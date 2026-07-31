@@ -252,10 +252,20 @@ jobs:
           awk "BEGIN{exit !($COVERAGE >= 90)}" && COLOR=brightgreen
           echo "COVERAGE_COLOR=$COLOR" >> "$GITHUB_ENV"
           # nextest prints one Summary line for the whole run; parse that
-          # rather than summing per-binary lines. `tests? run:` because a
-          # single-test run says "1 test run:", singular.
-          PASSED=$(awk '/tests? run:/{for(i=1;i<=NF;i++)if($i ~ /^passed/)print $(i-1)}' nextest.log | tail -1)
-          FAILED=$(awk '/tests? run:/{for(i=1;i<=NF;i++)if($i ~ /^failed/)print $(i-1)}' nextest.log | tail -1)
+          # rather than summing per-binary lines.
+          #
+          # The gsub strips ANSI colour first, and is not optional: this
+          # workflow sets CARGO_TERM_COLOR=always, so nextest colours its
+          # output even though it is piped, and the field is not `passed` but
+          # `\033[32;1mpassed\033[0m`. Stripping here rather than setting
+          # CARGO_TERM_COLOR=never keeps the tee'd log readable for a human
+          # and survives anyone changing that env later.
+          #
+          # `tests? run:` because a single-test run says "1 test run:",
+          # singular.
+          strip_ansi='{gsub(/\033\[[0-9;]*[a-zA-Z]/,"")}'
+          PASSED=$(awk "$strip_ansi"'/tests? run:/{for(i=1;i<=NF;i++)if($i ~ /^passed/)print $(i-1)}' nextest.log | tail -1)
+          FAILED=$(awk "$strip_ansi"'/tests? run:/{for(i=1;i<=NF;i++)if($i ~ /^failed/)print $(i-1)}' nextest.log | tail -1)
           # A green run prints no `failed` token at all — "3162 passed (1
           # leaky), 4 skipped" — so FAILED is legitimately empty and defaults
           # to 0. PASSED being empty means something else entirely: the run
