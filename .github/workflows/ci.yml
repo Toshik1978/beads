@@ -179,6 +179,118 @@ jobs:
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
       - run: env -u RUSTUP_TOOLCHAIN task test
 
+  # Coverage feeds the two shields.io badges in README.md, which read JSON from
+  # a public gist rather than from a third-party coverage service.
+  #
+  # Push to main only, deliberately. The badges describe main, a pull request
+  # from a fork cannot read the gist secrets anyway, and an instrumented build
+  # is roughly twice the cost of a plain one. Coverage is a number to watch,
+  # not a gate: nothing here fails the build on a percentage, because a
+  # coverage threshold that blocks a merge mostly teaches people to write tests
+  # that move the number.
+  coverage:
+    name: Coverage
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      # Read into env so the gist step can be skipped with a plain `if:` —
+      # `secrets.*` is not available in a job-level `if`, and the workflow must
+      # stay green for anyone who has not configured these.
+      GIST_ID: ${{ secrets.GIST_ID }}
+    steps:
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/checkout@v7
+      - uses: go-task/setup-task@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
+      - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
+
+      # Doctests are not instrumented: nextest cannot run them and merging
+      # rustdoc's coverage needs nightly. All 13 of ours are `#[ignore]`d, so
+      # nothing measurable is lost.
+      #
+      # `shell: bash` is not decoration: the default `run:` shell is `bash -e`
+      # WITHOUT pipefail, so `cargo llvm-cov ... | tee` would report tee's exit
+      # status and a failing coverage run would sail through green. `shell:
+      # bash` selects `bash -eo pipefail`.
+      - name: Measure coverage
+        shell: bash
+        run: |
+          env -u RUSTUP_TOOLCHAIN cargo llvm-cov nextest --workspace --no-fail-fast \
+            --json --summary-only --output-path cov.json | tee nextest.log
+
+      - name: Derive badge values
+        shell: bash
+        run: |
+          COVERAGE=$(python3 -c "import json;print(f\"{json.load(open('cov.json'))['data'][0]['totals']['lines']['percent']:.1f}\")")
+          echo "COVERAGE=$COVERAGE" >> "$GITHUB_ENV"
+          # Same thresholds as the other repos using this gist pattern.
+          COLOR=red
+          awk "BEGIN{exit !($COVERAGE >= 50)}" && COLOR=orange
+          awk "BEGIN{exit !($COVERAGE >= 60)}" && COLOR=yellow
+          awk "BEGIN{exit !($COVERAGE >= 70)}" && COLOR=yellowgreen
+          awk "BEGIN{exit !($COVERAGE >= 80)}" && COLOR=green
+          awk "BEGIN{exit !($COVERAGE >= 90)}" && COLOR=brightgreen
+          echo "COVERAGE_COLOR=$COLOR" >> "$GITHUB_ENV"
+          # nextest prints one Summary line for the whole run; parse that
+          # rather than summing per-binary lines.
+          PASSED=$(awk '/tests run:/{for(i=1;i<=NF;i++)if($i ~ /^passed/)print $(i-1)}' nextest.log | tail -1)
+          FAILED=$(awk '/tests run:/{for(i=1;i<=NF;i++)if($i ~ /^failed/)print $(i-1)}' nextest.log | tail -1)
+          # A green run prints no `failed` token at all — "3162 passed (1
+          # leaky), 4 skipped" — so FAILED is legitimately empty and defaults
+          # to 0. PASSED being empty means something else entirely: the run
+          # never produced a Summary line. Publishing "0 passed" in
+          # brightgreen for a build that never started is the same lie as an
+          # abort gate comparing 0 to 0, so refuse instead.
+          if [ -z "$PASSED" ]; then
+            echo "no nextest Summary line found; refusing to publish a badge" >&2
+            exit 1
+          fi
+          echo "TESTS_MSG=$PASSED passed" >> "$GITHUB_ENV"
+          echo "TESTS_COLOR=$([ "${FAILED:-0}" -eq 0 ] && echo brightgreen || echo red)" >> "$GITHUB_ENV"
+          echo "coverage=$COVERAGE% ($COLOR), tests=$PASSED passed, ${FAILED:-0} failed"
+
+      - name: Publish badge endpoints to the gist
+        if: env.GIST_ID != ''
+        uses: actions/github-script@v8
+        env:
+          COVERAGE: ${{ env.COVERAGE }}
+          COVERAGE_COLOR: ${{ env.COVERAGE_COLOR }}
+          TESTS_MSG: ${{ env.TESTS_MSG }}
+          TESTS_COLOR: ${{ env.TESTS_COLOR }}
+        with:
+          github-token: ${{ secrets.GIST_SECRET_TOKEN }}
+          script: |
+            const badge = (label, message, color) => ({
+              content: JSON.stringify({
+                schemaVersion: 1, label, namedLogo: "rust", message, color,
+                cacheSeconds: 180,
+              }, null, 2),
+            });
+            await github.rest.gists.update({
+              gist_id: process.env.GIST_ID,
+              files: {
+                'coverage.json': badge("Coverage", `${process.env.COVERAGE}%`,
+                                       process.env.COVERAGE_COLOR),
+                'tests.json': badge("Tests", process.env.TESTS_MSG,
+                                    process.env.TESTS_COLOR),
+              },
+            });
+
   # WHY THIS IS IN ci.yml AND NOT ONLY IN release.yml
   #
   # .goreleaser.yaml is otherwise executed for the first time by a tag push,

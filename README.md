@@ -1,3 +1,7 @@
+[![CI](https://github.com/Toshik1978/beads/actions/workflows/ci.yml/badge.svg)](https://github.com/Toshik1978/beads/actions/workflows/ci.yml)
+![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/Toshik1978/dd0300a64ea7f6b7acb4a6d70ef423b1/raw/tests.json&maxAge=180)
+![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/Toshik1978/dd0300a64ea7f6b7acb4a6d70ef423b1/raw/coverage.json&maxAge=180)
+
 # beads
 
 `br` is a personal, agent-friendly issue tracker: a single SQLite-backed
