@@ -223,15 +223,20 @@ jobs:
       # rustdoc's coverage needs nightly. All 13 of ours are `#[ignore]`d, so
       # nothing measurable is lost.
       #
-      # `shell: bash` is not decoration: the default `run:` shell is `bash -e`
-      # WITHOUT pipefail, so `cargo llvm-cov ... | tee` would report tee's exit
+      # `2>&1` is load-bearing: nextest writes its progress and its `Summary`
+      # line to STDERR and leaves stdout empty, so piping stdout alone gives
+      # `tee` nothing to record and the next step finds no counts. This is
+      # exactly how the first run of this job failed.
+      #
+      # `shell: bash` is not decoration either: the default `run:` shell is
+      # `bash -e` WITHOUT pipefail, so the pipeline would report tee's exit
       # status and a failing coverage run would sail through green. `shell:
       # bash` selects `bash -eo pipefail`.
       - name: Measure coverage
         shell: bash
         run: |
           env -u RUSTUP_TOOLCHAIN cargo llvm-cov nextest --workspace --no-fail-fast \
-            --json --summary-only --output-path cov.json | tee nextest.log
+            --json --summary-only --output-path cov.json 2>&1 | tee nextest.log
 
       - name: Derive badge values
         shell: bash
@@ -247,9 +252,10 @@ jobs:
           awk "BEGIN{exit !($COVERAGE >= 90)}" && COLOR=brightgreen
           echo "COVERAGE_COLOR=$COLOR" >> "$GITHUB_ENV"
           # nextest prints one Summary line for the whole run; parse that
-          # rather than summing per-binary lines.
-          PASSED=$(awk '/tests run:/{for(i=1;i<=NF;i++)if($i ~ /^passed/)print $(i-1)}' nextest.log | tail -1)
-          FAILED=$(awk '/tests run:/{for(i=1;i<=NF;i++)if($i ~ /^failed/)print $(i-1)}' nextest.log | tail -1)
+          # rather than summing per-binary lines. `tests? run:` because a
+          # single-test run says "1 test run:", singular.
+          PASSED=$(awk '/tests? run:/{for(i=1;i<=NF;i++)if($i ~ /^passed/)print $(i-1)}' nextest.log | tail -1)
+          FAILED=$(awk '/tests? run:/{for(i=1;i<=NF;i++)if($i ~ /^failed/)print $(i-1)}' nextest.log | tail -1)
           # A green run prints no `failed` token at all — "3162 passed (1
           # leaky), 4 skipped" — so FAILED is legitimately empty and defaults
           # to 0. PASSED being empty means something else entirely: the run
