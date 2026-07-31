@@ -19,10 +19,12 @@ One command wires all three stages — `.pre-commit-config.yaml` declares
 | `pre-commit` | `cargo fmt --check` | seconds |
 | `pre-push` | clippy, licensing guard | a minute or two |
 
-Nothing heavier is wired in, and that is deliberate: `task check` takes about
-twenty minutes, and a hook that slow does not produce a carefully verified
-repository, it produces a habit of reaching for `--no-verify`. The hooks are an
-early warning; the gate below is the actual verification.
+Nothing heavier is wired in, and that is deliberate: `task check` runs clippy
+over every target and the whole suite — around two minutes warm and
+considerably more from cold — and a hook that slow does not produce a
+carefully verified repository, it produces a habit of reaching for
+`--no-verify`. The hooks are an early warning; the gate below is the actual
+verification.
 
 **Commit messages must parse as Conventional Commits.** This is not a style
 preference — `.cliff.toml` builds `CHANGELOG.md` by parsing those prefixes, and

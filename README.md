@@ -84,6 +84,11 @@ lineage.
 
 ## Contributing
 
-See [`CLAUDE.md`](CLAUDE.md) for the development and verification workflow,
-[`CHANGELOG.md`](CHANGELOG.md) for what changed in each release, and
+beads is a personal project: pull requests may not be reviewed, issues may not
+get a response, and no support is offered. Forking is a first-class outcome
+rather than a fallback. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details
+and the setup steps.
+
+See also [`CLAUDE.md`](CLAUDE.md) for the development and verification
+workflow, [`CHANGELOG.md`](CHANGELOG.md) for what changed in each release, and
 [`docs/RELEASING.md`](docs/RELEASING.md) for how a release is cut.

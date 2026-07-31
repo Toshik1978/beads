@@ -29,8 +29,9 @@ repos:
     hooks:
       # WHY THE SPLIT ACROSS STAGES
       #
-      # `task check` takes on the order of twenty minutes here — it builds and
-      # runs 111 test binaries. Wiring that into a per-commit hook would not
+      # `task check` runs clippy over every target and the whole suite —
+      # around two minutes warm, considerably more from cold. Wiring that into
+      # a per-commit hook would not
       # produce a carefully verified repository, it would produce a habit of
       # reaching for `--no-verify`, which CLAUDE.md forbids for good reasons.
       # So each gate sits at the cheapest stage that still catches it in time:
