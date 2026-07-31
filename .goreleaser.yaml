@@ -105,11 +105,25 @@ checksum:
   name_template: "br_{{ .Version }}_checksums.txt"
   algorithm: sha256
 
-# Release notes come from CHANGELOG.md via --release-notes. GoReleaser's own
-# commit-scraping generator is switched off rather than left to run and be
-# overridden, so there is never a question of which one produced the text.
+# Release notes come from CHANGELOG.md via --release-notes.
+#
+# DO NOT SET `disable: true` HERE. It reads like the way to stop GoReleaser
+# generating its own notes, and it published v1.0.0 with an empty body while
+# reporting success. `--release-notes` is not a separate mechanism that
+# overrides the changelog — the flag is *read by the changelog pipe itself*
+# (`internal/pipe/changelog/changelog.go`), which loads the file into
+# ctx.ReleaseNotes and returns early. `disable: true` makes that pipe's Skip()
+# return true, so Run() never executes, so the file is never opened and the
+# body is empty. Nothing warns: the workflow's `cat release-body.md` prints
+# the full section, GoReleaser logs "release succeeded", and the release page
+# is blank.
+#
+# Leaving the pipe enabled is what makes --release-notes work, and it does not
+# reintroduce a second source of notes: the early return happens before any
+# commit scraping, so the generator only ever runs if the flag is absent.
+# Snapshot builds skip the pipe outright.
 changelog:
-  disable: true
+  disable: false
 
 release:
   github:

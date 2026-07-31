@@ -113,9 +113,39 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          # --release-notes overrides GoReleaser's own changelog generation
-          # entirely; `changelog.disable` in .goreleaser.yaml keeps it from
-          # running at all, so there is exactly one source of release notes.
+          # This flag is read by GoReleaser's *changelog pipe*, not by the
+          # release pipe — so it only works while that pipe is enabled. See the
+          # `changelog:` block in .goreleaser.yaml before changing either.
           args: release --clean --release-notes=release-body.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # v1.0.0 published four working archives and an empty body, and every step
+  # above reported success. The notes are the one part of a release that no
+  # earlier check can see: `guards` proves the CHANGELOG section exists, and
+  # the build step proves the file was written, but neither proves GoReleaser
+  # put it on the release. Only reading back the published body does.
+  #
+  # Separate job, on the bare runner, because `gh` is not in the
+  # cross-compilation image.
+  verify:
+    name: Check the published release has notes
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse an empty release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body=$(gh release view "$GITHUB_REF_NAME" \
+                   --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+          if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+            echo "error: $GITHUB_REF_NAME was published with an empty body" >&2
+            echo "hint: --release-notes is read by GoReleaser's changelog" >&2
+            echo "      pipe; check changelog.disable in .goreleaser.yaml" >&2
+            exit 1
+          fi
+          printf '%s\n' "$body" | head -5
+          echo "release body: $(printf '%s' "$body" | wc -c) bytes"

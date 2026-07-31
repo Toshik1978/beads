@@ -222,9 +222,20 @@ SBOM generation, and GitHub Actions can attest build provenance. None of it is
 wired up. It would be a reasonable next step rather than a gap that makes the
 current pipeline wrong.
 
-**GoReleaser's own changelog generator is switched off**
-(`changelog.disable` in `.goreleaser.yaml`) rather than left running and
-overridden. Two sources of release notes would be one too many.
+**Release notes come from `CHANGELOG.md`, via `--release-notes`, and the
+changelog pipe must stay enabled for that to work.** This is the one piece of
+the pipeline that is counter-intuitive enough to have already broken a
+release. `--release-notes` is not a switch on the release pipe that overrides
+the changelog — GoReleaser's *changelog* pipe is what reads the file, loading
+it into the release body and returning before it scrapes any commits. Setting
+`changelog.disable: true` therefore does not "turn off the generator and leave
+the file in charge"; it turns off the only code that opens the file. v1.0.0
+shipped that way: four correct archives, a blank release page, and a green
+run. There is still exactly one source of notes, because the early return
+means the generator only runs when the flag is absent.
+
+The `verify` job re-reads the published body and fails on an empty one, so a
+future regression here is loud rather than silent.
 
 ## A note on the builder
 
