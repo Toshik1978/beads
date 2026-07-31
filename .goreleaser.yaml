@@ -65,9 +65,25 @@ builds:
     # have to change to build, so the published binary is built from the
     # dependency graph that CI tested rather than from whatever resolved on
     # release day.
+    #
+    # `--package=beads` IS REQUIRED, AND NOT FOR THE REASON THE ERROR SUGGESTS.
+    # Cargo.toml is both a package and a workspace root (`members =
+    # ["test-support"]`, added when the shared test harness became its own
+    # crate). GoReleaser's rust builder refuses outright to build any manifest
+    # carrying a `[workspace]` section unless the flags name a package, and it
+    # reports the *members array* as the candidates — so the message reads
+    # "one of the available workspaces: [test-support]", naming the one crate
+    # that must never be released and omitting the only one that should be.
+    # It is not a suggestion to build test-support; it is the builder declining
+    # to guess. `cargo build` alone would have picked the root package fine.
+    #
+    # The `=` is load-bearing: the check matches the `-p=` and `--package=`
+    # prefixes literally, so `--package beads` as two list entries passes cargo
+    # and still fails GoReleaser.
     flags:
       - --release
       - --locked
+      - --package=beads
 
 archives:
   - id: br

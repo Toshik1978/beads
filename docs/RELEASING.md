@@ -99,8 +99,9 @@ This runs exactly the two checks the workflow runs first — the manifest/tag
 match and the changelog section — while they are still free to fail. A tag is
 public the moment it is pushed, and correcting one means deleting it.
 
-**5. Prove the artifacts build.** Optional, but this is the only step that
-catches a target that has stopped linking:
+**5. Prove the artifacts build.** Nominally optional, and skipped once at a
+cost: this is the only step that catches a target that has stopped linking, and
+the only one that runs `.goreleaser.yaml` at all.
 
 ```sh
 task release:snapshot
@@ -110,6 +111,15 @@ Four release-profile builds of a crate that compiles the C SQLite
 amalgamation, with no cache shared between targets. It takes a while, and the
 first run also pulls the image. The archives land in `dist/` and are named
 `-SNAPSHOT` so they cannot be mistaken for real ones.
+
+**A config error costs you none of that time.** GoReleaser validates and
+resolves the whole build before it compiles anything, so a bad
+`.goreleaser.yaml` fails in about a second — which is how v1.0.0 shipped a tag
+that could not build (the rust builder refuses a `[workspace]` manifest with no
+`--package=`, and nothing but this step exercises that path). If you skip step 5
+on the grounds that nothing touched the build, run it anyway when
+`.goreleaser.yaml`, `Cargo.toml`'s `[workspace]`, or the crate layout changed;
+you will know inside a second whether it was worth it.
 
 Needs Docker. It runs in the same container image the release job uses, and
 that is not incidental — see [Why the build runs in a
