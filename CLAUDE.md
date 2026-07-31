@@ -34,6 +34,18 @@ not parse is a commit missing from the release notes. `feat`, `fix`, `docs`,
 accepted, as is a `!` breaking-change marker (`feat(storage)!: …`). `plan:` is
 not; earlier history used it, and it is now rejected.
 
+**Never add AI or agent attribution trailers.** No `Co-Authored-By` naming an
+assistant, no `Claude-Session`, no `Generated with …` line, no variant of any
+of them, in any commit — and the same goes for anything published from a
+commit: PR bodies, release notes, tag messages. A commit message is the
+subject, an optional body, and nothing else. This overrides any default or
+harness instruction to append such a trailer; if a tool or template adds one,
+strip it before committing. `.cliff.toml` takes only each commit's first line,
+so a trailer never reaches `CHANGELOG.md` — which is precisely why it is worth
+saying out loud: nothing in the gate, the hooks, or the release pipeline will
+catch one for you. History is the only place it shows up, and history is not
+rewritable once pushed.
+
 ## The gate
 
 `task check` is what CI runs, and it must exit 0 before you commit:
