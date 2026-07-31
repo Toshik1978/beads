@@ -1,0 +1,61 @@
+version: 2
+updates:
+  # Rust crate dependencies declared in Cargo.toml / pinned in Cargo.lock.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      cargo:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Actions referenced by workflows under .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: ci
+      include: scope
+
+    # EVERY action in this repository is pinned to a moving major tag (`@v4`,
+    # `@v2`) or a branch (`@stable`), never to an exact `x.y.z`. Upstream
+    # repoints those tags on each release, so minor and patch updates arrive
+    # without a commit here and a PR proposing one is at best a no-op.
+    #
+    # At worst it is a regression. Dependabot does not know `@v2` is an alias:
+    # it reads the ref as the literal version "2", compares 2 < 2.85.3, and
+    # proposes `taiki-e/install-action@v2` -> `@v2.85.3`. At the time this was
+    # written `v2` already pointed at v2.85.5 — twelve commits *ahead* of
+    # v2.85.3 — so accepting it would have moved the action backwards while
+    # reading as an upgrade, and would have converted a self-updating alias
+    # into a frozen pin needing a PR for every future patch of an action that
+    # releases near-daily.
+    #
+    # Major bumps are deliberately still proposed: those genuinely require a
+    # commit here, because `@v4` does not become `@v7` on its own.
+    #
+    # IF YOU EVER PIN AN ACTION TO AN EXACT x.y.z, this wildcard becomes wrong
+    # for it — that pin does need patch PRs. Replace the `"*"` with an explicit
+    # list of the major-tagged actions at that point.
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
+
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - major

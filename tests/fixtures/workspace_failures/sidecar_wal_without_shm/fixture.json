@@ -1,0 +1,26 @@
+{
+  "name": "sidecar_wal_without_shm",
+  "family": "sidecar_mismatch",
+  "description": "The workspace includes a stray WAL sidecar without a matching SHM sidecar or coordinated writer state.",
+  "expected_classification": "usable",
+  "expected_command_outcomes": [
+    {
+      "surface": "startup/open",
+      "outcome": "success"
+    },
+    {
+      "surface": "create",
+      "outcome": "success"
+    },
+    {
+      "surface": "sync --status",
+      "outcome": "status_db_newer"
+    }
+  ],
+  "source_hint": "Represents the stale or missing sidecar family called out in rsei.2.1.",
+  "notes": [
+    "The database file itself is healthy so future tests can isolate how startup reacts to sidecar mismatch.",
+    "The WAL payload is intentionally synthetic and small.",
+    "sync --status expected status_in_sync until bds-04l.4.3. That encoded the previous storage engine's handling of a stub WAL: it reported one as WalCorrupt, which is in should_attempt_jsonl_recovery's set, so opening the workspace rebuilt the database from JSONL and left it in sync. Real SQLite has no WAL-corrupt result code -- a WAL that does not validate is discarded silently (src/storage/conn.rs) -- so the database opens normally and the schema migration marks its issue dirty, exactly as it does for orphan_shm_sidecar and journal_sidecar_leftover. All three now report an identical posture, and all three expect status_db_newer."
+  ]
+}

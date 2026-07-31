@@ -1,0 +1,7 @@
+---
+source: tests/output_contracts/json_output.rs
+expression: json
+---
+{
+  "error": "no beads directory found"
+}

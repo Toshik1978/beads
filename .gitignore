@@ -1,0 +1,46 @@
+# Build artifacts. Unanchored on purpose: this is a cargo workspace, and
+# `/target/` matched only the root one — a member's `test-support/target/`
+# slipped straight past it and got committed once already.
+target/
+
+# GoReleaser's output directory: the release archives, checksums, and the
+# binaries they were built from. `task release:snapshot` fills it locally and
+# `--clean` empties it first, so nothing here is ever worth keeping.
+/dist/
+
+# The release body the workflow extracts from CHANGELOG.md before publishing.
+# Written by .github/scripts/extract-changelog.sh, which is also runnable
+# locally to preview it.
+/release-body.md
+
+# Test scratch
+/coverage/
+*.profraw
+
+# insta pending snapshots. Regenerated output, not stale leftovers: every run
+# of a failing snapshot test rewrites its .snap.new, so these reappear after
+# any red run and are never worth committing. (The rule was added when 20
+# snapshot tests were failing at once; those were repaired in bds-04l.3 and
+# the suite is green, but the rule still earns its place the next time one
+# breaks.) Failing snapshots are reported by name by `task test:report`, which
+# is more precise than `git status` and does not depend on this rule.
+*.snap.new
+
+# Beads runtime state is NOT listed here. `.beads/.gitignore` covers it, is
+# written by `br init`, and takes precedence for everything under `.beads/`
+# anyway — `git check-ignore -v` named that file, never this one, for every
+# runtime path. Duplicating the rules here only created a second place to
+# forget to update.
+
+# Local databases
+*.sqlite
+*.sqlite3
+
+# Configuration
+.idea/
+.vscode/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

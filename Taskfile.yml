@@ -1,0 +1,512 @@
+version: "3"
+
+# `pipefail` is global and deliberate. Every verification command in this
+# project pipes cargo output into grep/awk, and without pipefail the pipeline
+# reports the *last* command's status, not cargo's. That mistake produced a
+# false "builds clean on stable" reading during design — the build had actually
+# failed with exit 101 because a transitive dependency required an unstable
+# compiler feature.
+set: [pipefail]
+
+vars:
+  TEST_LOG: /tmp/beads-test.log
+  TEST_FAILURES: /tmp/beads-failing.txt
+
+tasks:
+  setup:ci:
+    desc: Prepare the workspace on CI
+
+  # WHY THIS EXISTS
+  #
+  # `rust-toolchain.toml` was deleted when the storage engine moved to
+  # rusqlite, so nothing in the repository pins a toolchain any more: whatever
+  # rustup resolves is what builds. That is the intended end state — the
+  # project's claim is that it builds on *any* current stable — but it removed
+  # the only thing that stood between a stale `RUSTUP_TOOLCHAIN` in a
+  # contributor's shell and a silent nightly build.
+  #
+  # That is not hypothetical. `RUSTUP_TOOLCHAIN=nightly-2026-02-19` outlived
+  # the pin that justified it on the machine this port was done on, and an
+  # unprefixed `task check` ran the whole gate on nightly while reporting
+  # success. A gate that verifies the wrong compiler is worse than no gate,
+  # because a nightly-only dependency could be reintroduced and nothing would
+  # notice.
+  #
+  # This DETECTS rather than neutralises. Unsetting `RUSTUP_TOOLCHAIN` here
+  # would also defeat a *deliberate* override — `RUSTUP_TOOLCHAIN=1.95.0 task
+  # build` is how `Cargo.toml`'s `rust-version` floor is checked — and would
+  # turn that check into a false green, which is the same bug pointing the
+  # other way. So this refuses pre-release channels and stays out of the way
+  # for every stable one.
+  toolchain:check:
+    desc: Fail unless the active rustc is a stable release
+    # `silent` only suppresses Task's echo of the 18-line script; the guard's
+    # own stdout (the version it read) and stderr (the diagnosis) still print.
+    silent: true
+    cmd: |
+      release=$(rustc -vV | sed -n 's/^release: //p')
+      echo "rustc release: ${release:-<unknown>}"
+      case "${release}" in
+        "")
+          echo "toolchain:check: could not read 'release:' from 'rustc -vV'" >&2
+          exit 1
+          ;;
+        *-nightly | *-beta* | *-dev)
+          echo "toolchain:check: refusing to run the gate on '${release}'." >&2
+          echo "  beads builds on stable Rust and has no rust-toolchain.toml." >&2
+          echo "  A pre-release compiler here usually means RUSTUP_TOOLCHAIN is" >&2
+          echo "  set in your shell. Check with 'echo \$RUSTUP_TOOLCHAIN' and" >&2
+          echo "  unset it, or re-run under 'env -u RUSTUP_TOOLCHAIN'." >&2
+          exit 1
+          ;;
+      esac
+
+  format:
+    desc: Format all Rust sources
+    cmd: cargo fmt --all
+
+  format:check:
+    desc: Fail if any source is unformatted
+    cmd: cargo fmt --all -- --check
+
+  lint:
+    desc: Run clippy over every target
+    cmd: cargo clippy --workspace --all-targets
+
+  audit:
+    desc: Check dependencies for advisories and yanked crates
+    cmd: cargo audit --deny yanked
+
+  build:
+    desc: Build the br binary and every test target
+    cmd: cargo build --workspace --all-targets
+
+  build:release:
+    desc: Build the optimized br binary
+    cmd: cargo build --release
+    generates:
+      - target/release/br
+
+  # NOTE on TZ/LANG below: Task's `env:` YAML block does NOT reliably
+  # override a variable the calling shell already exports — HOME and LANG
+  # are inherited on every macOS shell, so Task appends its override *after*
+  # the inherited os.Environ() entry instead of replacing it, and the child
+  # process's libc getenv() resolves the first (inherited, wrong) match. A
+  # custom name Task never saw before (or TZ, unset in this shell) isn't
+  # duplicated, so it happens to "work" under `env:` — which is exactly what
+  # made this a silent trap: it looked fine until the name that matters here
+  # was tried. The fix verified against `task` 3.52.0: assign the var
+  # directly on the `cmd:` line (`VAR=value cargo ...`), which builds the
+  # child environment through the shell instead of Task's `env:` merge and
+  # overrides correctly. Do not move these back into an `env:` block.
+  # WHY TWO COMMANDS
+  #
+  # nextest does not run doctests — it has no way to, since rustdoc owns that
+  # path — so `cargo test --doc` is not redundant here. Drop it and the
+  # doctests silently stop running, which is precisely the class of failure
+  # the abort gate in CLAUDE.md exists to catch.
+  #
+  # `--workspace` so that test-support's own tests run. They used to run as
+  # part of every integration binary that did `mod common;` — 71 of them —
+  # and now run exactly once, in that crate's own test binary.
+  test:
+    desc: Run the full test suite
+    cmds:
+      - cargo nextest run --workspace --no-fail-fast
+      - cargo test --workspace --doc
+
+  test:lib:
+    desc: Run unit tests only (fast — skips the integration binaries)
+    cmd: cargo nextest run --lib
+
+  test:one:
+    desc: 'Run a subset — e.g. `task test:one -- -E ''test(defer_until_invalid_error)'''
+    cmd: cargo nextest run {{.CLI_ARGS}}
+
+  test:hermetic:
+    desc: Run the suite under a pinned timezone and locale
+    cmds:
+      - TZ=UTC LANG=C cargo nextest run --workspace --no-fail-fast
+      - TZ=UTC LANG=C cargo test --workspace --doc
+
+  # WHY THIS EXISTS
+  #
+  # On macOS `/tmp` is a symlink to `private/tmp`, and the per-user `TMPDIR`
+  # lives under `/var/folders/...` reached through the `/private` symlink. The
+  # 125 failures bds-04l.3.1 cleared (the brief predicted 142; 125 is what that
+  # task measured) were all path-identity mismatches caused by that symlink: one
+  # side held the pre-resolution path and the other the resolved one. None of
+  # them could ever have reproduced on Linux, where `/tmp` is a real directory
+  # and there is nothing to resolve.
+  #
+  # That asymmetry cuts both ways, which is the point of this task. A macOS-only
+  # suite cannot tell a fix that canonicalizes correctly from one that merely
+  # hard-codes a macOS-shaped assumption, because on this host both are green.
+  # Running the same suite where the symlink does not exist is what separates
+  # them.
+  #
+  # HONEST LIMIT: the host is aarch64, so this covers OS divergence and not
+  # architecture divergence. GitHub's runners are x86_64 and nothing here
+  # exercises that. Do not describe this task as "full Linux parity".
+  #
+  # NOTES ON THE SHAPE
+  #
+  # - `CARGO_TARGET_DIR` points at a named volume, never the host's `target/`:
+  #   the two hold incompatible artifacts for different targets and would
+  #   thrash each other on every alternating run. The registry volume exists
+  #   purely so the second run is not as slow as the first.
+  # - There is NO `RUSTUP_HOME` override any more, and no `br-linux-rustup`
+  #   volume. Both existed to hold the `nightly-2026-02-19` toolchain that
+  #   `rust-toolchain.toml` demanded; the redirect was chosen over mounting a
+  #   volume onto the image's `/usr/local/rustup/toolchains` because that mount
+  #   put rustup's staging `tmp/` and its install target on different
+  #   filesystems and the install died with "Invalid cross-device link (os
+  #   error 18)". With the pin deleted, the redirect became actively wrong: it
+  #   hides the image's own toolchain, and the cached volume has a stale
+  #   nightly with no default configured, so every command in the container
+  #   died with "rustup could not choose a version of rustc to run". Measured,
+  #   not reasoned. Removing the override is what makes the container use
+  #   `rust:1-slim`'s own stable toolchain, which is the point. Drop the stale
+  #   volume with `docker volume rm br-linux-rustup`.
+  # - The container prints `rustc --version` and `cc --version` before it runs
+  #   anything, because both now matter to the result and neither is pinned
+  #   here: the image floats (`rust:1-slim` tracks the newest stable, which is
+  #   ahead of the host's), and `rusqlite`'s `bundled` feature compiles the C
+  #   SQLite amalgamation, so a C compiler is a hard build requirement that the
+  #   pure-Rust engine this replaced did not have. `rust:1-slim` ships gcc and
+  #   libc6-dev already — it needs them to link any Rust binary at all — so
+  #   nothing extra is installed for it; the version is logged so a future
+  #   image that drops them fails visibly rather than mysteriously.
+  # - `git` and `sqlite3` are installed because the suite shells out to both
+  #   (tests/licensing.rs runs `git ls-files` and the dataset registry runs
+  #   `git rev-parse`; several tests run `PRAGMA integrity_check` through the
+  #   sqlite3 CLI). `bv` is deliberately NOT installed — the three
+  #   robot_golden_bv_* tests skip loudly without it.
+  # - `safe.directory` is required because the bind-mounted worktree is not
+  #   owned by the container's root, and git would otherwise refuse to read it
+  #   at all — which fails tests/licensing.rs, whose whole sweep is driven by
+  #   `git ls-files`.
+  # - `CARGO_BUILD_JOBS` is capped. Left uncapped, cargo runs one rustc per host
+  #   CPU (18 here) and links 120 debug test binaries — `[profile.dev]` keeps
+  #   full debuginfo — concurrently. OrbStack's VM gets ~15.7GB regardless of
+  #   the Mac's 48GB, so `ld` is OOM-killed: `collect2: fatal error: ld
+  #   terminated with signal 9 [Killed]`, repeatedly, before a single test runs.
+  #   This caps concurrency only; every artifact is built exactly as it would be
+  #   uncapped. Raise JOBS on a container host with more memory.
+  # - Override PLATFORM on an x86_64 host; the default is what is verified here,
+  #   and leaving it pinned there would silently drop into qemu emulation.
+  test:linux:
+    desc: Run the full suite in a Linux container, proving it is not macOS-specific
+    vars:
+      PLATFORM: '{{.PLATFORM | default "linux/arm64"}}'
+      IMAGE: '{{.IMAGE | default "rust:1-slim"}}'
+      JOBS: '{{.JOBS | default "4"}}'
+    cmd: |
+      # The cache volumes are named per platform, and that is load-bearing
+      # rather than tidy. CARGO_TARGET_DIR points at one directory and cargo
+      # writes host-target artifacts straight into its `debug/`, with no
+      # triple in the path — so an amd64 run and an arm64 run sharing a volume
+      # do not coexist, they overwrite each other. Every alternation would then
+      # pay a full rebuild, and the fingerprint mismatches read as spurious
+      # cache misses rather than as the collision they are.
+      #
+      # THE CONTAINER SCRIPT ARRIVES ON STDIN VIA A QUOTED HEREDOC, and that is
+      # a correctness fix, not a style preference. It used to be passed as
+      # `bash -eu -c '...'`. A single quote cannot be escaped inside a
+      # single-quoted shell word, so every apostrophe in the script — and the
+      # comments in it had three, in "container's", "head's" and "rusqlite's" —
+      # silently ended the quoting and re-opened it. The parse died with
+      # `reached EOF without closing quote`, and because nothing else runs this
+      # task, it stayed broken and unnoticed while docs/TESTING.md went on
+      # describing it as a working check. `<<'CONTAINER_SCRIPT'` quotes the
+      # delimiter, so the body is passed through verbatim with no quoting or
+      # expansion to get wrong. Do not "simplify" this back to -c.
+      slug=$(printf '%s' '{{.PLATFORM}}' | tr '/' '-')
+      docker run --rm -i \
+        --platform {{.PLATFORM}} \
+        -v "$PWD":/work -w /work \
+        -v "br-target-$slug:/linux-target" \
+        -v "br-registry-$slug:/usr/local/cargo/registry" \
+        -e CARGO_TARGET_DIR=/linux-target \
+        -e CARGO_BUILD_JOBS={{.JOBS}} \
+        {{.IMAGE}} \
+        bash -eus <<'CONTAINER_SCRIPT'
+        apt-get -qq update
+        DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends git sqlite3 >/dev/null
+        git config --global --add safe.directory /work
+        rustc --version
+        # `bundled` rusqlite compiles C SQLite, so a missing cc must fail here
+        # rather than 200 lines into a link error. Check it separately from the
+        # pretty-print: this is the container's own `bash -eu`, which has no
+        # pipefail, so `cc --version | head -1` would report head's exit status
+        # and sail past a missing compiler.
+        command -v cc >/dev/null || {
+          echo "no C compiler in this image; rusqlite's bundled SQLite cannot build" >&2
+          exit 1
+        }
+        cc --version | head -1
+        # Prints the architecture the suite actually ran on, so a PLATFORM
+        # override is evidenced in the log rather than merely requested.
+        uname -m
+        # Deliberately `cargo test`, not nextest. This task exists to vary the
+        # OS, and installing another tool into a throwaway container on every
+        # run buys nothing toward that. The in-process
+        # `workspace_replay_test_guard()` mutex still serialises correctly
+        # under `cargo test`, so this path needs no test-group config — but it
+        # is also the one path where the abort gate in CLAUDE.md still earns
+        # its keep, since a binary that dies mid-run here can still take its
+        # `test result:` line with it.
+        cargo test --workspace --no-fail-fast
+      CONTAINER_SCRIPT
+
+  # WHY THIS EXISTS SEPARATELY FROM `test:linux`
+  #
+  # `test:linux` on this host runs an aarch64 container on an aarch64 machine,
+  # so it varies the OS and holds the architecture fixed. That is what makes it
+  # a macOS-specificity check and NOT an architecture check — a distinction
+  # bds-028 was opened to keep visible, because this suite has twice contained
+  # platform-shaped assumptions that were invisible until the platform moved
+  # (bds-04l.3.1's 125 macOS symlink failures; a util-linux `script(1)` branch
+  # in a since-deleted pty golden test that nothing had ever executed).
+  #
+  # This task moves the other axis. It produces a genuinely x86_64 container —
+  # `rust:1-slim` is a manifest list, not an arm64 image, so `--platform`
+  # selects a different image whose binaries are x86-64 machine code, and the
+  # `uname -m` above evidences that in the log.
+  #
+  # IT DOES NOT CURRENTLY COMPLETE ON THIS HOST, and that is a property of the
+  # emulator rather than of this suite. With Rosetta disabled, OrbStack falls
+  # back to QEMU, and QEMU segfaults inside itself while lld links the first
+  # debuginfo-heavy test binary:
+  #
+  #   [qemu]: QEMU internal SIGSEGV {code=MAPERR, addr=0x7fff6ff8c000}
+  #   collect2: fatal error: ld terminated with signal 11 [Segmentation fault]
+  #
+  # The dependency tree builds fine (173 crates, ~21 min); zero of ~110 test
+  # binaries ever run. Re-running will fail identically — do not retry it
+  # expecting otherwise. The task is kept because it is correct and works
+  # wherever a viable x86_64 path exists (Rosetta enabled, or a native x86_64
+  # machine), and because it is what turned that limitation into a recorded
+  # fact.
+  #
+  # Native x86_64 coverage therefore arrives with CI, which bds-028 always
+  # called the better route: .github/workflows/ci.yml runs the full suite on
+  # ubuntu-latest, unemulated, where a failure would be unambiguous. Close
+  # bds-028 on the first green CI run, not on a local emulated one.
+  test:linux:amd64:
+    desc: Run the full suite on x86_64 Linux, covering the architecture axis test:linux does not
+    cmds:
+      - task: test:linux
+        vars:
+          PLATFORM: linux/amd64
+
+  # WHY THIS EXISTS
+  #
+  # `rusqlite`'s `bundled` feature compiles the C SQLite amalgamation, so every
+  # release target needs a C compiler *for that target*. `rustup target add`
+  # alone does NOT link: it supplies a Rust std, not a cross libc or headers.
+  # That requirement is new — the pure-Rust engine this replaced needed no C
+  # toolchain at all — and it arrived after the release pipeline was planned
+  # (bds-saq). This task is the standing proof that the requirement is met.
+  #
+  # MEASURED, one linux/arm64 container. The list below is the release matrix
+  # in .goreleaser.yaml and must stay equal to it — this task is only a proof
+  # of the release targets if it builds exactly those:
+  #   x86_64-unknown-linux-musl    ELF x86-64, static
+  #   aarch64-unknown-linux-musl   ELF aarch64, static
+  #   x86_64-apple-darwin          Mach-O x86_64
+  #   aarch64-apple-darwin         Mach-O arm64
+  # Linking is not running, so binaries were also executed — including
+  # aarch64-musl on Alpine, which has no glibc present at all. Each completed a
+  # real `br init` + `br create` + `br list` round-trip, which is what proves
+  # the bundled C SQLite is linked and working rather than merely resolved.
+  #
+  # The two `*-unknown-linux-gnu` targets were measured here too and linked
+  # cleanly (dynamic ELF, GLIBC_2.30 floor from zig's default). They were
+  # dropped from the release before any release was cut: musl is fully static
+  # and so carries no GLIBC floor, and the usual reason to keep a glibc build —
+  # its faster allocator — does not apply to a binary that installs mimalloc as
+  # its `#[global_allocator]`. Re-adding them needs no new knowledge, just the
+  # two triples back in both lists.
+  #
+  # THE `rustup update stable` IS LOAD-BEARING. DO NOT DELETE IT.
+  # The image ships rustc 1.93.0, which is below this crate's 1.95 floor. Left
+  # alone, every target fails with "rustc 1.93.0 is not supported by the
+  # following packages" — which reads like a dependency problem and is actually
+  # a toolchain one. That confounded the first run of this very matrix: every
+  # target "failed" for a reason that had nothing to do with C cross-compiling.
+  #
+  # NOT A GATE. `task check` does not call this: it needs Docker, pulls a large
+  # image, and builds the whole release matrix. Run it when the release
+  # pipeline or the storage engine changes.
+  build:cross:
+    desc: Prove every release target builds and links with the bundled C SQLite
+    vars:
+      PLATFORM: '{{.PLATFORM | default "linux/arm64"}}'
+      IMAGE: '{{.IMAGE | default "ghcr.io/rust-cross/cargo-zigbuild:latest"}}'
+      JOBS: '{{.JOBS | default "4"}}'
+    cmd: |
+      docker run --rm \
+        --platform {{.PLATFORM}} \
+        -v "$PWD":/work -w /work \
+        -v br-zig-target:/zig-target \
+        -v br-zig-registry:/usr/local/cargo/registry \
+        -e CARGO_TARGET_DIR=/zig-target \
+        -e CARGO_BUILD_JOBS={{.JOBS}} \
+        {{.IMAGE}} \
+        bash -eu -c '
+          git config --global --add safe.directory /work
+          rustup update stable >/dev/null && rustup default stable >/dev/null
+          rustc --version
+          zig version
+          failed=0
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+                   x86_64-apple-darwin aarch64-apple-darwin; do
+            # `|| true` is required, not defensive. This runs under `bash -eu`,
+            # so an unrecognised or unavailable triple would abort the whole
+            # loop right here — non-zero, but with no output naming the target
+            # that died. Let it fail, and let the build below produce the
+            # diagnosis.
+            rustup target add "$t" >/dev/null 2>&1 || true
+            if cargo zigbuild --release --target "$t" >"/tmp/$t.log" 2>&1; then
+              echo "PASS  $t"
+            else
+              echo "FAIL  $t"
+              tail -20 "/tmp/$t.log" | sed "s/^/        /"
+              failed=1
+            fi
+          done
+          exit $failed
+        '
+
+  # RELEASE TASKS
+  #
+  # A release is cut by pushing a tag; .github/workflows/release.yml does the
+  # rest. Everything below exists so that each thing the workflow will check
+  # can be checked *before* the tag exists, when it is still free to be wrong.
+  # docs/RELEASING.md is the sequence these fit into.
+  #
+  # `goreleaser` and `git-cliff` are pinned in .mise.toml. Rust deliberately is
+  # not — see CLAUDE.md on why this repository has no toolchain pin.
+
+  changelog:
+    desc: 'Prepend the next release''s commit list to CHANGELOG.md (TAG=v1.1.0 overrides the computed bump)'
+    cmd: git-cliff --unreleased {{if .TAG}}--tag {{.TAG}}{{else}}--bump{{end}} --prepend CHANGELOG.md
+
+  release:check:
+    desc: Validate .goreleaser.yaml without building anything
+    cmd: goreleaser check
+
+  # Runs the exact two guards the workflow runs first, against a tag that does
+  # not exist yet. Both failures are cheap here and expensive after a push: a
+  # tag is public the moment it lands, and correcting one means deleting it.
+  release:verify:
+    desc: 'Check a prospective tag against Cargo.toml and CHANGELOG.md (TAG=v1.1.0)'
+    requires:
+      vars: [TAG]
+    cmds:
+      - .github/scripts/check-release-version.sh '{{.TAG}}'
+      - .github/scripts/extract-changelog.sh '{{.TAG}}'
+
+  # The whole release, minus the publishing. This is the part neither of the
+  # guards above can give you: it proves every release target builds, links, and
+  # archive from *this* commit, which is otherwise only discovered by a tag
+  # push that fails halfway through.
+  #
+  # WHY THIS RUNS IN A CONTAINER RATHER THAN ON THE HOST
+  #
+  # The two *-apple-darwin targets link against Apple frameworks —
+  # CoreFoundation, via chrono's local-timezone lookup — and zig does not
+  # bundle those. Running this directly on a macOS host with a plain
+  # `cargo install cargo-zigbuild` builds every target but one and then fails
+  # aarch64-apple-darwin with `undefined symbol: _CFRelease` and six of its
+  # neighbours. Pointing SDKROOT at the Command Line Tools SDK does not fix
+  # it. The image below carries its own SDK and sets SDKROOT to it
+  # (/opt/MacOSX11.3.sdk, which has CoreFoundation.tbd), which is the
+  # environment every target was measured linking in, and the same image
+  # the release workflow uses.
+  #
+  # `target/` is a named volume rather than the bind mount so that alternating
+  # between this task and an ordinary host `cargo build` does not invalidate
+  # both caches on every switch. It is mounted at the path GoReleaser expects
+  # to find the binaries under, so CARGO_TARGET_DIR stays untouched.
+  #
+  # goreleaser is fetched inside the container because the image does not ship
+  # it and a macOS host binary cannot run there. Pin it with GORELEASER=x.y.z
+  # if you need to match a specific CI run.
+  release:snapshot:
+    desc: Build every release archive locally, in the image the release job uses
+    vars:
+      PLATFORM: '{{.PLATFORM | default "linux/arm64"}}'
+      IMAGE: '{{.IMAGE | default "ghcr.io/rust-cross/cargo-zigbuild:0.23.0"}}'
+      GORELEASER: '{{.GORELEASER | default "2.17.1"}}'
+      JOBS: '{{.JOBS | default "4"}}'
+    cmd: |
+      docker run --rm \
+        --platform {{.PLATFORM}} \
+        -v "$PWD":/work -w /work \
+        -v br-release-target:/work/target \
+        -v br-zig-registry:/usr/local/cargo/registry \
+        -e CARGO_BUILD_JOBS={{.JOBS}} \
+        {{.IMAGE}} \
+        bash -eu -c '
+          git config --global --add safe.directory /work
+          # LOAD-BEARING: the image ships a rustc below this crate 1.95 floor,
+          # and without this every target fails with a message that blames the
+          # dependencies rather than the compiler.
+          rustup update stable >/dev/null && rustup default stable >/dev/null
+          rustc --version
+          case "$(uname -m)" in
+            aarch64) grarch=arm64 ;;
+            x86_64)  grarch=x86_64 ;;
+            *) echo "no goreleaser build for $(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/goreleaser/goreleaser/releases/download/v{{.GORELEASER}}/goreleaser_Linux_${grarch}.tar.gz" \
+            | tar xz -C /usr/local/bin goreleaser
+          goreleaser --version | tail -3
+          goreleaser release --snapshot --clean --skip=publish
+        '
+
+  test:report:
+    desc: Run the suite and report "passed=N failed=N" plus the failing test names
+    cmds:
+      - |
+        # Prints the pass/fail counts and the failing names from one place
+        # instead of ten copies of a fragile shell pipeline.
+        #
+        # `|| true` is intentional and was re-examined once the suite went
+        # green: it is kept. The original reason (the strip phase gated on an
+        # exact expected failure count, so a non-zero cargo exit was the
+        # expected state) has expired, but the current one has not — this task
+        # exists to *report* on a failing run, and the counts and names it
+        # prints are exactly what you want when cargo exits non-zero. Removing
+        # `|| true` would abort before printing them.
+        #
+        # This is a diagnostic, never a gate. `task check` does not call it, and
+        # nothing derives a verdict from it. When you want the exit code itself
+        # to fail the command, use `task test`, whose status is the runner's own.
+        #
+        # nextest prints one `Summary` line for the whole run rather than a
+        # `test result:` line per binary, and names each failure on its own
+        # `FAIL` line — so both greps below read a single authoritative source
+        # instead of summing across one line per integration binary.
+        cargo nextest run --workspace --no-fail-fast > "{{.TEST_LOG}}" 2>&1 || true
+        awk '/tests run:/ {for(i=1;i<=NF;i++){if($i ~ /^passed/)p=$(i-1); if($i ~ /^failed/)f=$(i-1)}} END{print "passed="p+0" failed="f+0}' "{{.TEST_LOG}}"
+        # FAIL covers assertion failures; the rest are the abrupt deaths that
+        # used to vanish between a `running N tests` line and its missing
+        # `test result:`. nextest attributes each to the test that caused it.
+        grep -E '^ +(FAIL|SIGSEGV|SIGABRT|ABORT|TIMEOUT|LEAK)' "{{.TEST_LOG}}" \
+          | sed -E 's/^ +([A-Z]+) +\[[^]]*\] +/\1 /' | sort -u > "{{.TEST_FAILURES}}"
+        echo "failing test names -> {{.TEST_FAILURES}} ($(wc -l < "{{.TEST_FAILURES}}" | tr -d ' ') entries)"
+
+  check:
+    desc: Everything CI runs
+    cmds:
+      - task: toolchain:check
+      - task: format:check
+      - task: lint
+      - task: test
+
+  clean:
+    desc: Remove build artifacts
+    cmd: cargo clean

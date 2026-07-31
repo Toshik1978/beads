@@ -1,0 +1,112 @@
+# GoReleaser builds, packages, and publishes the `br` binaries for a release.
+#
+# It owns exactly one layer: turning a tag into four archives, a checksum file,
+# and one GitHub release. It does NOT own the release notes — those are
+# written by hand into CHANGELOG.md and passed in with `--release-notes`
+# (see .github/workflows/release.yml), which is why `changelog` is disabled
+# below. Two sources of release notes would be one too many.
+#
+# Try the whole thing without publishing anything:
+#
+#   task release:snapshot
+#
+# https://goreleaser.com/customization/builds/builders/rust
+version: 2
+
+project_name: beads
+
+builds:
+  - id: br
+    builder: rust
+    # HARD INVARIANT. The binary is named `br` everywhere it is referenced —
+    # the [[bin]] section of Cargo.toml, the install smoke test in ci.yml, and
+    # external tooling that shells out to it. Renaming the release artifact's
+    # binary would break those silently, since a tarball extracts whatever
+    # name it was given without complaint.
+    binary: br
+
+    # cargo-zigbuild (the builder's default tool) covers all four of these from
+    # a single machine, including the C SQLite amalgamation that rusqlite's
+    # `bundled` feature compiles. That is measured, not assumed: `task
+    # build:cross` reproduces this exact matrix and fails if any target stops
+    # linking.
+    #
+    # It only holds where a macOS SDK is on disk, which is why both the
+    # release workflow and `task release:snapshot` run inside
+    # ghcr.io/rust-cross/cargo-zigbuild rather than on a bare host. Without one
+    # the two darwin targets fail to link CoreFoundation while the four Linux
+    # targets succeed — see docs/RELEASING.md.
+    #
+    # Windows is absent deliberately, not by oversight. cargo-zigbuild does
+    # not cover *-pc-windows-msvc, and — more decisively — .github/workflows/ci.yml
+    # runs the test suite on ubuntu and macos only. Shipping a Windows binary
+    # would mean shipping the one artifact no test has ever executed.
+    #
+    # LINUX IS musl ONLY, AND THE GLIBC BUILDS WERE DROPPED ON PURPOSE.
+    # musl links fully static (`not a dynamic executable`), so there is no
+    # GLIBC floor anywhere in the support matrix and one binary runs on any
+    # distribution including Alpine, which was verified by running it there.
+    #
+    # The usual objection — musl's allocator is slower under allocation-heavy
+    # load — does not apply to this binary. src/main.rs installs mimalloc as
+    # the `#[global_allocator]` on every non-Windows target, so musl's malloc
+    # never serves a Rust allocation. The remaining exposure is the bundled C
+    # SQLite, which allocates through libc directly because the mimalloc crate
+    # registers a Rust global allocator rather than interposing the C symbol.
+    # That is a far smaller surface than the whole program, and neither side
+    # of it has ever been benchmarked here.
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+
+    # `--locked` is the point of the whole gate: it fails if Cargo.lock would
+    # have to change to build, so the published binary is built from the
+    # dependency graph that CI tested rather than from whatever resolved on
+    # release day.
+    flags:
+      - --release
+      - --locked
+
+archives:
+  - id: br
+    ids:
+      - br
+    formats:
+      - tar.gz
+    # Leads with the binary name rather than the project name: `br` is what
+    # someone is looking for in a downloads folder, and the two differ here.
+    name_template: "br_{{ .Version }}_{{ .Target }}"
+    files:
+      - LICENSE
+      # The rider and the project's lineage travel with every binary. Both are
+      # conditions of the licence, not documentation.
+      - NOTICE.md
+      - README.md
+
+checksum:
+  name_template: "br_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+# Release notes come from CHANGELOG.md via --release-notes. GoReleaser's own
+# commit-scraping generator is switched off rather than left to run and be
+# overridden, so there is never a question of which one produced the text.
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: Toshik1978
+    name: beads
+  # A tag carrying a pre-release suffix (v0.2.0-rc.1) is marked as such rather
+  # than becoming the repository's "Latest release".
+  prerelease: auto
+  # Publishing a release with no binaries attached would be worse than failing.
+  draft: false
+
+snapshot:
+  # Local `--snapshot` runs never carry a plausible version number, so a
+  # snapshot tarball can't be mistaken for a real one if it escapes onto a
+  # colleague's machine.
+  version_template: "{{ incpatch .Version }}-SNAPSHOT"

@@ -1,0 +1,30 @@
+{
+  "name": "corrupt_db_text",
+  "family": "corrupt_db",
+  "description": "The primary database file is plain text while JSONL remains present and parseable.",
+  "expected_classification": "recoverable",
+  "expected_command_outcomes": [
+    {
+      "surface": "startup/open",
+      "outcome": "success_with_auto_recovery"
+    },
+    {
+      "surface": "create",
+      "outcome": "success_with_auto_recovery"
+    },
+    {
+      "surface": "sync --status",
+      "outcome": "status_in_sync"
+    },
+    {
+      "surface": "list --no-db",
+      "outcome": "success"
+    }
+  ],
+  "source_hint": "Derived from the malformed-db repair cases in tests/e2e_workspace_commands.rs and tests/e2e_global_flags.rs.",
+  "notes": [
+    "Represents the simplest non-SQLite database corruption case.",
+    "Intended to drive rebuild-or-bypass behavior rather than low-level SQLite recovery.",
+    "The workspace must carry NO beads.db-wal. A WAL sidecar holding page 1 makes real SQLite open the database straight through the clobbered main file, so the fixture stops reproducing the case it is named for. One was present until bds-04l.4.3 removed it; see that task's report."
+  ]
+}

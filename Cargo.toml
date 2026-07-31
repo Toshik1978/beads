@@ -1,0 +1,184 @@
+[package]
+name = "beads"
+version = "1.0.0"
+publish = false
+edition = "2024"
+# MEASURED, not inherited. The `1.88` that stood here came from upstream and had
+# never been tested in this fork; it is wrong by seven releases. The binding
+# constraint is not `edition = "2024"` (1.85) and not any declared MSRV in the
+# graph (the highest is `time`'s 1.88) — it is `libsqlite3-sys 0.38.1`, which
+# declares no `rust-version` at all and whose build script calls the
+# `cfg_select!` macro, stabilized in Rust 1.95. Because it declares nothing,
+# cargo cannot detect the conflict and the failure is a build-script compile
+# error, not a resolver message.
+#
+# Bisected on this host with `cargo build --locked`, each toolchain installed
+# and run:
+#
+#   1.88.0  error: cannot find macro `cfg_select` in this scope
+#   1.91.0  error[E0658]: use of unstable library feature `cfg_select`
+#   1.93.0  error[E0658]: use of unstable library feature `cfg_select`
+#   1.94.0  error[E0658]: use of unstable library feature `cfg_select`
+#   1.95.0  ok — and `cargo build --locked --all-targets` also ok
+#   1.96.0  ok — the full suite is run on this
+#
+# So 1.95 is the floor, and it is a floor someone has actually built with
+# rather than a number nobody has tested. Note what it is a property of: the
+# pinned `Cargo.lock`, not this crate's source. A future `libsqlite3-sys` may
+# move it again, in either direction, with no change here.
+rust-version = "1.95"
+description = "Agent-first issue tracker (SQLite + JSONL)"
+# Not plain MIT: LICENSE carries a binding OpenAI/Anthropic rider that must
+# travel unmodified into derivative works. SPDX has no identifier for it, so
+# the manifest points at the file. See NOTICE.md.
+license-file = "LICENSE"
+repository = "https://github.com/Toshik1978/beads"
+
+[[bin]]
+name = "br"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4.5.60", features = ["derive", "env", "unstable-ext"] }
+clap_complete = { version = "4.6.7", features = ["unstable-dynamic"] }
+
+# Database (C SQLite via rusqlite).
+#
+# `bundled` compiles the amalgamation from source, which means the build needs
+# a C toolchain (cc); the pure-Rust engine this replaced did not. See
+# `src/storage/conn.rs` for why the alternative (linking the host
+# libsqlite3) was rejected.
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1.0.228", features = ["derive"] }
+# `preserve_order` makes `serde_json::Map` keep insertion order instead of
+# sorting alphabetically. beads has always emitted JSON this way, but never
+# declared it: the feature arrived through the pure-Rust storage engine's
+# crates, three of which listed `serde_json = { features = ["preserve_order"] }`
+# as a normal dependency, and cargo unified it into this crate. Deleting that
+# engine in bds-04l.4.2 silently reordered every key in `.beads/issues.jsonl`
+# and in every `--json` payload. Declared here so the ordering is beads's own
+# choice and cannot be revoked by a dependency change again.
+#
+# It costs no new crate: `indexmap` is already in the tree via `serde_norway`.
+#
+# CAVEAT for anything that depends on this: `preserve_order` is process-global
+# and makes key order a property of *insertion sites*. The durable fix for the
+# JSONL writer is to serialize a `#[derive(Serialize)]` struct, whose field
+# order is fixed either way. Note also that `tests/storage_schema_shape.rs`
+# pins the JSONL field *set* but not the field *order*, so nothing in the suite
+# would catch a recurrence.
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
+serde_yml = { package = "serde_norway", version = "0.9.42" }
+
+# Time
+chrono = { version = "0.4.43", features = ["serde"] }
+
+# Hashing
+sha2 = "0.11.0"
+
+# Error handling
+anyhow = "1.0.103"
+thiserror = "2.0.18"
+
+# Logging
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "json"] }
+
+# Terminal
+indicatif = "0.18.6"
+crossterm = "0.29"
+
+# Rich terminal output (sibling project). Keep syntax highlighting out of the
+# release build until the upstream syntect stack drops unmaintained transitive
+# crates.
+rich_rust = { version = "0.2.1", features = ["markdown", "json", "backtrace"] }
+
+# Path normalization (strips \\?\ prefix on Windows)
+dunce = "1.0.5"
+
+# Utilities
+once_cell = "1.21"
+regex = "1.12"
+shell-words = "1.1.1"
+similar = "3.1.1"
+tempfile = "3.25"
+unicode-width = "0.2.2"
+
+# Versioning
+semver = "1.0.27"
+
+# Cooperative shutdown so SIGINT/SIGTERM/SIGHUP unwind through main and let
+# SqliteStorage::Drop flush the WAL instead of stranding frames on disk (#270).
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.4"
+
+[target.'cfg(not(windows))'.dependencies]
+mimalloc = "0.1.52"
+
+[dev-dependencies]
+# Shared test scaffolding. Extracted from `tests/common/` so its own 154 tests
+# compile and run once instead of once per integration binary — see
+# test-support/Cargo.toml for the arithmetic.
+test-support = { path = "test-support" }
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+walkdir = "2.5"
+insta = { version = "1.46", features = ["json", "yaml"] }
+proptest = "1.10"
+rand = "0.10"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+debug = "line-tables-only"
+strip = false
+
+[profile.dev]
+opt-level = 1
+
+[features]
+default = []
+
+# NOTE: no `[patch.crates-io]` here. Every dependency resolves from
+# crates.io, so `cargo install --locked` works out of the box with no sibling
+# checkout (issue #250 bug 1).
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+# Allow these lints to unblock CI (need higher priority than groups)
+cast_precision_loss = { level = "allow", priority = 1 }
+doc_markdown = { level = "allow", priority = 1 }
+missing_const_for_fn = { level = "allow", priority = 1 }
+uninlined_format_args = { level = "allow", priority = 1 }
+useless_let_if_seq = { level = "allow", priority = 1 }
+format_push_string = { level = "allow", priority = 1 }
+# Stylistic nursery/pedantic lints that don't reflect real defects
+option_if_let_else = { level = "allow", priority = 1 }
+map_unwrap_or = { level = "allow", priority = 1 }
+similar_names = { level = "allow", priority = 1 }
+too_long_first_doc_paragraph = { level = "allow", priority = 1 }
+missing_errors_doc = { level = "allow", priority = 1 }
+redundant_clone = { level = "allow", priority = 1 }
+struct_excessive_bools = { level = "allow", priority = 1 }
+if_not_else = { level = "allow", priority = 1 }
+
+# `test-support` is a workspace member so that `cargo test --workspace` runs
+# its own tests. Without this it would be an ordinary path dependency whose
+# tests nothing ever executes.
+[workspace]
+members = ["test-support"]

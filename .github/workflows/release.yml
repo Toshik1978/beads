@@ -1,0 +1,121 @@
+name: Release
+
+# Releases are cut by pushing a tag:
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# The tag is the version. This workflow only reads the repository — it never
+# commits, bumps, or pushes anything back.
+#
+# Write the CHANGELOG.md section for the version and bump Cargo.toml before
+# tagging (`TAG=v1.1.0 task changelog`, then the prose on top). The job reads
+# that section as the release body and fails without one. See
+# docs/RELEASING.md for the full sequence.
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a release midway: a half-finished run can leave a draft
+  # release or a partial asset set behind, which is worse than a slow one.
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A separate job purely so a bad tag fails in seconds. Both checks below are
+  # cheap, both catch mistakes that are otherwise only visible after
+  # publication, and neither needs the 1GB+ cross-compilation image that the
+  # build job spends its first minutes pulling.
+  guards:
+    name: Check the tag is releasable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # A tag whose version disagrees with Cargo.toml would publish archives
+      # named after one version containing a binary that reports another.
+      - name: Check the tag matches Cargo.toml
+        run: .github/scripts/check-release-version.sh "$GITHUB_REF_NAME"
+
+      # A tag pushed without release notes would publish an empty release body.
+      - name: Check the tag has release notes
+        run: .github/scripts/extract-changelog.sh "$GITHUB_REF_NAME"
+
+  release:
+    name: Build and publish
+    needs: guards
+    runs-on: ubuntu-latest
+
+    # WHY THIS RUNS IN A CONTAINER AND NOT ON THE BARE RUNNER
+    #
+    # The two *-apple-darwin targets link against Apple frameworks —
+    # CoreFoundation, by way of chrono's local-timezone lookup. zig does not
+    # bundle those, so `cargo zigbuild` needs a macOS SDK on disk to resolve
+    # them. This image provides one and points SDKROOT at it
+    # (/opt/MacOSX11.3.sdk, which carries CoreFoundation.tbd).
+    #
+    # This is measured, not defensive. Building the release matrix against a
+    # plain cargo-zigbuild install with no SDK fails at link time with
+    # `undefined symbol: _CFRelease` and six of its neighbours, while every
+    # Linux targets sail through — so the failure mode is a release that
+    # silently ships most of its artifacts. bds-saq proved the matrix inside
+    # this image; `task build:cross` is the standing local reproduction.
+    container:
+      image: ghcr.io/rust-cross/cargo-zigbuild:0.23.0
+
+    permissions:
+      # goreleaser creates the release and uploads the archives and checksums.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # goreleaser derives the version from the tag, and needs the tag
+          # objects themselves rather than a shallow snapshot of one commit.
+          fetch-depth: 0
+
+      # Inside a container the workspace is not owned by the user git runs as,
+      # so git refuses to read the repository at all — including the tag
+      # goreleaser is about to name the release after.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: go-task/setup-task@v2
+
+      # LOAD-BEARING. The image ships rustc 1.93.0, which is below this crate's
+      # 1.95 floor. Left alone, every target fails with "rustc 1.93.0 is not
+      # supported by the following packages" — a message that blames the
+      # dependencies for what is actually a toolchain problem, and which
+      # confounded the first run of this matrix. GoReleaser runs
+      # `rustup target add` per target itself, so the toolchain version is the
+      # only part of this the workflow owns.
+      - name: Update the toolchain past the crate's floor
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Refuse a pre-release compiler
+        run: env -u RUSTUP_TOOLCHAIN task toolchain:check
+
+      # Re-derived rather than passed from the `guards` job: the script is
+      # deterministic and reads a file already in the checkout, so an artifact
+      # upload would be plumbing for no gain.
+      - name: Build release body from CHANGELOG
+        run: |
+          .github/scripts/extract-changelog.sh "$GITHUB_REF_NAME" > release-body.md
+          cat release-body.md
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          # --release-notes overrides GoReleaser's own changelog generation
+          # entirely; `changelog.disable` in .goreleaser.yaml keeps it from
+          # running at all, so there is exactly one source of release notes.
+          args: release --clean --release-notes=release-body.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

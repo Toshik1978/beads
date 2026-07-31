@@ -1,0 +1,43 @@
+# Shared test scaffolding, extracted from `tests/common/` into its own crate.
+#
+# WHY THIS IS A CRATE AND NOT A MODULE
+#
+# As `tests/common/`, this code was pulled in with `mod common;` by 71 separate
+# integration test binaries. Rust compiles a module into every binary that
+# declares it, so its 154 `#[test]` functions were compiled — and executed —
+# 71 times over. That was 10,934 of the suite's 12,385 reported integration
+# tests: the same 154 tests, re-run, accounting for 88% of the count and a
+# corresponding share of link time across 71 binaries.
+#
+# As a crate it is compiled once, linked as a library, and its own tests run
+# exactly once. The integration tests still say `common::` everywhere, because
+# each one aliases it back with `extern crate test_support as common;`.
+[package]
+name = "test-support"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license-file = "../LICENSE"
+
+[dependencies]
+# The crate under test. This is a dependency cycle in form only — `beads`
+# depends on `test-support` as a *dev*-dependency, which cargo permits and
+# resolves without trouble.
+beads = { path = ".." }
+
+assert_cmd = "2.2.2"
+chrono = { version = "0.4.43", features = ["serde"] }
+dunce = "1.0.5"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
+sha2 = "0.11.0"
+tempfile = "3.25"
+tracing = "0.1.44"
+walkdir = "2.5"
+
+# Deliberately not inheriting the root crate's pedantic/nursery clippy config.
+# This is test scaffolding, and it already carries a crate-level
+# `allow(dead_code, unused_imports)` because helpers exist for the binaries
+# that need them, not for every binary that links them.
+[lints.rust]
+unsafe_code = "forbid"

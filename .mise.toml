@@ -1,0 +1,23 @@
+# Release tooling, pinned so a release is reproducible.
+#
+# Rust is deliberately absent. This repository has no toolchain pin at all —
+# see CLAUDE.md — because the project's claim is that it builds on any current
+# stable, and pinning one here would quietly make that claim untestable. Every
+# `cargo`/`task` invocation is still prefixed with `env -u RUSTUP_TOOLCHAIN`
+# for the reason given there.
+#
+# Nothing in `task check` needs any of these; they are only required to cut a
+# release (docs/RELEASING.md).
+[tools]
+# Generates the commit lists in CHANGELOG.md (`task changelog`).
+git-cliff = "2"
+# Validates .goreleaser.yaml (`task release:check`).
+goreleaser = "2"
+
+# zig and cargo-zigbuild are deliberately NOT pinned here, even though they are
+# what actually builds the release. They live inside the container image that
+# `task release:snapshot` and the release workflow both use, because the two
+# *-apple-darwin targets need a macOS SDK that the image supplies and a host
+# install does not — a host build gets every target but one and then fails to
+# link CoreFoundation. Pinning them here would suggest a host build is the
+# supported path when it is not.

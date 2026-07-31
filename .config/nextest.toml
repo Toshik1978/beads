@@ -1,0 +1,45 @@
+# cargo-nextest configuration.
+#
+# WHY THIS FILE EXISTS AT ALL
+#
+# `cargo test` runs every test in a binary inside one process, on threads.
+# nextest runs each test in a process of its own. That is what makes it fast
+# here — this suite is ~100 binaries of mostly-`br`-subprocess tests — but it
+# also silently voids any synchronisation that only holds within a process.
+#
+# `test_support::workspace_replay_test_guard()` is exactly that: a
+# `static Mutex` six tests take before materialising a workspace. Under
+# `cargo test` it serialises them. Under nextest each of the six is its own
+# process, every one gets its own copy of the mutex, and all six lock an
+# uncontended lock and proceed in parallel. Nothing fails to compile and
+# nothing warns; the guard just stops guarding.
+#
+# A test group is the cross-process equivalent. nextest owns the scheduling,
+# so `max-threads = 1` means one at a time no matter how the tests are split
+# across binaries.
+
+[test-groups]
+workspace-replay = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# Covers the six callers of `workspace_replay_test_guard()`: four
+# `workspace_failure_replay_*` tests in tests/workspace_failure_replay.rs and
+# the two `workspace_evolution_*_story_*` tests in test-support's own suite.
+#
+# It also catches `workspace_evolution_seed_suite_is_deterministic`, which takes
+# no guard because it only compares scenario descriptions and never calls
+# `.execute()`. That over-inclusion is deliberate. Serialising one fast, pure
+# test costs nothing; missing one that materialises a workspace is a race that
+# only appears under load, so the filter is drawn wide on purpose.
+#
+# Keep this in step with that function's callers.
+filter = 'test(/^workspace_failure_replay_/) or test(/workspace_evolution_/)'
+test-group = 'workspace-replay'
+
+[profile.default]
+# The suite shells out to `br` constantly, so a failure's stdout/stderr is the
+# whole diagnosis. Show it immediately rather than only in the final summary.
+failure-output = "immediate-final"
+# Surface a test that hangs rather than letting CI sit on it for the full job
+# timeout. No test in this suite legitimately takes a minute.
+slow-timeout = { period = "60s", terminate-after = 4 }

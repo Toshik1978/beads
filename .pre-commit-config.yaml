@@ -1,0 +1,80 @@
+# See https://pre-commit.com for more information.
+#
+# Install with a single command:
+#
+#   pre-commit install
+#
+# Plain `pre-commit install` only wires the pre-commit stage, which would leave
+# the commit-msg and pre-push hooks below dormant. Declaring the hook types
+# here means every contributor gets the same enforcement from that one command.
+default_install_hook_types: [pre-commit, pre-push, commit-msg]
+
+repos:
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      # Enforces Conventional Commits on every commit message (instant check).
+      # CI re-checks the same rule in commit-lint.yml, so a contributor who
+      # never ran `pre-commit install` is still caught before merge.
+      #
+      # This is not decoration: `.cliff.toml` groups the CHANGELOG by parsing
+      # these prefixes, and `docs/RELEASING.md` makes that generated list the
+      # release notes. A commit that does not parse silently lands in "Others"
+      # or vanishes from the changelog entirely.
+      - id: conventional-pre-commit
+        stages:
+          - commit-msg
+
+  - repo: local
+    hooks:
+      # WHY THE SPLIT ACROSS STAGES
+      #
+      # `task check` takes on the order of twenty minutes here — it builds and
+      # runs 111 test binaries. Wiring that into a per-commit hook would not
+      # produce a carefully verified repository, it would produce a habit of
+      # reaching for `--no-verify`, which CLAUDE.md forbids for good reasons.
+      # So each gate sits at the cheapest stage that still catches it in time:
+      #
+      #   commit-msg  conventional commits   instant
+      #   pre-commit  formatting             seconds
+      #   pre-push    clippy + licensing     a minute or two
+      #   CI          the full suite         however long it takes
+      #
+      # Nothing here is a substitute for `task check`; they are an early
+      # warning, and the ordering is chosen so that the fast checks fail first.
+
+      # Formatting is the cheapest possible check and the one most likely to
+      # fail — `cargo fmt` reflows code that looks fine to a human, so an
+      # unformatted commit is easy to make and annoying to discover from CI.
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: env -u RUSTUP_TOOLCHAIN cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages:
+          - pre-commit
+
+      # Clippy runs pedantic + nursery over every target (see [lints.clippy] in
+      # Cargo.toml), which is slower than a per-commit hook should be but well
+      # inside what is reasonable before a push.
+      - id: cargo-clippy
+        name: cargo clippy (all targets)
+        entry: env -u RUSTUP_TOOLCHAIN task lint
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages:
+          - pre-push
+
+      # Deliberately NOT filtered by file type. The licensing sweep enumerates
+      # every git-tracked file — prose included — so a Markdown-only change can
+      # trip it just as easily as a source change. `types: [rust]` here would
+      # skip exactly the commits most likely to introduce a bad reference.
+      - id: licensing
+        name: licensing guard
+        entry: env -u RUSTUP_TOOLCHAIN cargo test --test licensing
+        language: system
+        pass_filenames: false
+        stages:
+          - pre-push

@@ -1,0 +1,238 @@
+name: Continuous integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+  # DISK, NOT TIME, IS THE BINDING CONSTRAINT ON THE LINUX RUNNERS.
+  #
+  # The first CI run that got as far as building died with
+  # `rustc-LLVM ERROR: IO failure on output stream: No space left on device`
+  # in `Build (ubuntu-latest)`, and with
+  # `collect2: fatal error: ld terminated with signal 7 [Bus error]` in
+  # `Test (ubuntu-latest)`. The bus error is the same fault wearing a
+  # disguise: `ld` mmaps its output file, the filesystem has no space left,
+  # and touching a mapped page raises SIGBUS rather than a clean ENOSPC.
+  # Every macOS job passed, as did the ubuntu smoke test — which builds one
+  # release binary rather than 111 debug ones.
+  #
+  # Both settings below are measured against this tree, not guessed:
+  #
+  # * Incremental compilation is the single largest consumer. `target/debug/
+  #   incremental` reached 12GB in one day of local runs here, against a
+  #   runner that has roughly 14GB free in total. It buys nothing on CI —
+  #   every job starts on a fresh machine and never recompiles anything a
+  #   second time — so this is pure waste, not a speed/space trade.
+  #
+  # * The dev profile sets only `opt-level`, so `debug` takes cargo's default
+  #   of full DWARF. On Linux that debuginfo is embedded in each ELF, and
+  #   there are 111 test binaries of it. `line-tables-only` keeps file and
+  #   line numbers in backtraces — which is all the suite uses; several tests
+  #   set RUST_BACKTRACE=1 but none assert on symbol detail — and is already
+  #   the setting this project chose for its `release-perf` profile.
+  #
+  # Neither is set in Cargo.toml on purpose: local development keeps full
+  # debuginfo and incremental builds, which is where both actually earn their
+  # disk.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  # Every job below runs on both platforms with fail-fast disabled: a failure
+  # on one OS must never hide a failure (or a pass) on the other, which is
+  # the entire point of running the matrix instead of a single runner.
+  #
+  # There is no rust-toolchain.toml in this repository (see CLAUDE.md) — the
+  # project's claim is that it builds on any current stable, so every job
+  # installs stable explicitly via dtolnay/rust-toolchain rather than relying
+  # on whatever happens to be preinstalled on the runner image.
+
+  # Single OS on purpose. rustfmt's verdict is computed from the source and
+  # rustfmt.toml alone, so a second runner would re-derive an identical answer
+  # at the cost of another checkout and toolchain install. The OS matrix exists
+  # to surface platform divergence; there is none to surface here.
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: go-task/setup-task@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
+      - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
+      - run: env -u RUSTUP_TOOLCHAIN task format:check
+
+  lint:
+    name: Lint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS bills at 10x Linux, and on a pull request it is nearly always
+        # re-proving what the previous push to main already proved — most PRs
+        # here are Dependabot bumps, which change dependencies rather than
+        # platform behaviour. So the second leg is added only for pushes to
+        # main. A PR still gets full Linux coverage, and macOS still gates
+        # every commit that actually lands.
+        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The hosted Linux image ships toolchains this project never uses —
+      # Android SDK, .NET, GHC, CodeQL — worth on the order of 25GB. Reclaiming
+      # them is what turns "roughly 14GB free" into enough headroom for 111
+      # debug test binaries. `df` is printed either side so that a future
+      # out-of-disk failure is diagnosable from the log rather than by
+      # inference: the run that prompted this reported a linker bus error and
+      # nothing about space.
+      - name: Reclaim runner disk
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/checkout@v7
+      - uses: go-task/setup-task@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
+      - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
+      # `rusqlite`'s `bundled` feature compiles SQLite from C source, so
+      # clippy over every target needs a C compiler too. Both hosted images
+      # ship one; nothing extra is installed for it.
+      - run: env -u RUSTUP_TOOLCHAIN task lint
+
+  # Single OS on purpose, same reasoning as `format`: `cargo audit` reads
+  # Cargo.lock and the advisory database. Neither varies by runner, so a second
+  # leg can only ever agree.
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: go-task/setup-task@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
+      - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
+      # No continue-on-error and no advisory ignore list here: an audit that
+      # cannot fail is decoration. A first-run advisory should be reported
+      # and dealt with, not suppressed.
+      - run: env -u RUSTUP_TOOLCHAIN task audit
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS bills at 10x Linux, and on a pull request it is nearly always
+        # re-proving what the previous push to main already proved — most PRs
+        # here are Dependabot bumps, which change dependencies rather than
+        # platform behaviour. So the second leg is added only for pushes to
+        # main. A PR still gets full Linux coverage, and macOS still gates
+        # every commit that actually lands.
+        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The hosted Linux image ships toolchains this project never uses —
+      # Android SDK, .NET, GHC, CodeQL — worth on the order of 25GB. Reclaiming
+      # them is what turns "roughly 14GB free" into enough headroom for 111
+      # debug test binaries. `df` is printed either side so that a future
+      # out-of-disk failure is diagnosable from the log rather than by
+      # inference: the run that prompted this reported a linker bus error and
+      # nothing about space.
+      - name: Reclaim runner disk
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/checkout@v7
+      - uses: go-task/setup-task@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      # `task test` runs the suite under nextest, so the runner needs it.
+      # install-action fetches a prebuilt binary; `cargo install cargo-nextest`
+      # would compile it from source on every cache miss, which costs more
+      # than nextest saves.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
+      - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
+      - run: env -u RUSTUP_TOOLCHAIN task test
+
+  # WHY THIS IS IN ci.yml AND NOT ONLY IN release.yml
+  #
+  # .goreleaser.yaml is otherwise executed for the first time by a tag push,
+  # which is the worst possible moment to discover a typo in it: the tag is
+  # already public, and correcting it means deleting a tag. This job makes a
+  # broken release config a failing pull request instead.
+  #
+  # It validates the config and the two release scripts; it does not build
+  # anything. The cross-compiled build is proven separately by `task build:cross`
+  # and by `task release:snapshot`, neither of which belongs in per-PR CI.
+  release-config:
+    name: Release config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check
+      # The CHANGELOG section for the version currently in Cargo.toml must
+      # already exist. Because a release bumps the manifest and writes the
+      # notes in the same commit (docs/RELEASING.md), this holds continuously
+      # between releases — and it turns "write the release notes" from a step
+      # someone remembers at tag time into something the repository enforces
+      # on every pull request.
+      - name: Check the current version has release notes
+        run: |
+          tag="v$(.github/scripts/check-release-version.sh --manifest-version)"
+          echo "Cargo.toml version: $tag"
+          .github/scripts/extract-changelog.sh "$tag" >/dev/null
+
+  smoke:
+    name: Install smoke test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS bills at 10x Linux, and on a pull request it is nearly always
+        # re-proving what the previous push to main already proved — most PRs
+        # here are Dependabot bumps, which change dependencies rather than
+        # platform behaviour. So the second leg is added only for pushes to
+        # main. A PR still gets full Linux coverage, and macOS still gates
+        # every commit that actually lands.
+        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: smoke
+      # `--locked` compiles the bundled C SQLite amalgamation from source, so
+      # this is slower than the plain `task build` above — but it is the
+      # closest thing to what someone cloning the repo actually runs, and
+      # it's the only job that proves the installed binary starts at all.
+      - run: cargo install --path . --locked
+      - run: br --version

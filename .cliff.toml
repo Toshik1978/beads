@@ -1,0 +1,86 @@
+# git-cliff configuration for beads.
+#
+# git-cliff generates only the grouped commit list under each release heading.
+# The prose above it — the framing paragraph and the Highlights list — is
+# hand-written. `TAG=v1.1.0 task changelog` prepends a new section; you then
+# write the prose into it before tagging.
+#
+# The generated section becomes the GitHub release body verbatim, via
+# .github/scripts/extract-changelog.sh. Nothing regenerates it at release time.
+
+[changelog]
+# MUST stay byte-identical to the top of CHANGELOG.md (its title, the framing
+# paragraphs, the `---` and the blank line after it). `--prepend` strips this
+# string from the existing file and re-emits it above the new section; if it
+# does not match, the strip silently no-ops and the new release section lands
+# *above* the file title — which also makes
+# .github/scripts/extract-changelog.sh swallow the preamble into the release
+# body. Edit one, edit the other.
+header = """
+# Changelog
+
+What changed in each `br` release and why. Highlights are written by hand; the
+commit lists under them are generated with [git-cliff](https://git-cliff.org)
+via `TAG=vX.Y.Z task changelog`.
+
+Versions follow [semver](https://semver.org). Commits follow
+[Conventional Commits](https://www.conventionalcommits.org).
+
+---
+
+"""
+body = """
+{% if version %}\
+## {{ version }} — {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## Unreleased
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- [{{ commit.id | truncate(length=7, end="") }}](https://github.com/Toshik1978/beads/commit/{{ commit.id }}) {{ commit.raw_message | split(pat="\\n") | first | trim }}
+{%- endfor %}
+{% endfor %}
+---
+
+
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+# Keep non-conventional commits — they land in "Others" rather than vanishing.
+filter_unconventional = false
+filter_commits = false
+tag_pattern = "v[0-9]*"
+sort_commits = "oldest"
+topo_order = false
+
+# Order matters: the first matching parser wins. Skips come first so that, for
+# example, `chore(beads):` never reaches the catch-all Others rule.
+commit_parsers = [
+  { message = '^Merge ', skip = true },
+  # `chore(beads):` commits close issues in this project's own tracker. That is
+  # development bookkeeping and would otherwise be the bulk of the changelog.
+  #
+  # There is deliberately no `^plan` rule here any more. Earlier history used a
+  # `plan:` prefix for design notes, but `plan` is not a Conventional Commits
+  # type and .pre-commit-config.yaml now rejects it at commit-msg time, so the
+  # rule could never match again. Add the type to the hook first if you want
+  # the prefix back — a skip rule for commits that cannot exist is worse than
+  # no rule, because it reads as coverage.
+  { message = '^chore', skip = true },
+  { message = '^test', skip = true },
+  { message = '^style', skip = true },
+  # Dependabot noise: without these two the changelog is mostly version bumps.
+  # Single-quoted TOML literal strings, so the backslash is NOT an escape and
+  # reaches the regex engine as-is. Do not double it.
+  { message = '^build\(deps', skip = true },
+  { message = '^ci\(deps', skip = true },
+  { message = '^feat', group = "<!-- 0 -->Features" },
+  { message = '^fix', group = "<!-- 1 -->Bug Fixes" },
+  { message = '^perf', group = "<!-- 2 -->Performance" },
+  { message = '^docs', group = "<!-- 3 -->Documentation" },
+  { message = '.*', group = "<!-- 4 -->Others" },
+]
