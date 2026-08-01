@@ -9,6 +9,79 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.1.0 — 2026-08-01
+
+Issue bodies now render as markdown when `br` writes to a terminal, a hang
+that could leave a repository locked is fixed, and two redundant spellings of
+existing features are gone.
+
+### Why this is 1.1.0 and not 2.0.0
+
+Both changes under **Breaking Changes** remove a documented part of the
+command surface, and strict [semver](https://semver.org) would make that a
+major release. This one stays minor deliberately.
+
+`br` is a personal tool, adapted as its own needs change rather than
+stabilised for a userbase. There is nobody on the other end of a
+deprecate-then-remove cycle, so a spelling that turns out to be redundant goes
+when it is noticed — and both removals here are that: aliases doing nothing
+their surviving spellings do not. Spending a major version on each would turn
+the number into a running total of housekeeping.
+
+So read the major version as the shape of the tool, not as a promise about
+every flag. The **Breaking Changes** list at the top of each release names
+what stops working and what to use instead; that list is the contract, not the
+version number.
+
+This revises what v1.0.0 said about the command surface being an interface
+under semver. It is not one, and continuing to claim it would be the less
+useful of the two options.
+
+### Highlights
+
+- **Markdown renders as markdown.** `br show` and `br comments` on a terminal
+  render headings, emphasis, inline code, lists, task checkboxes, blockquotes
+  and tables instead of printing their source. Piped output, `--no-color` and
+  `--json` are byte-identical to before, so `br show <id> | glow -` and
+  anything parsing `--json` are unaffected.
+- **A hang that could lock a repository is fixed.** Closing a terminal or
+  dropping an ssh session while `br` was running could leave the process alive
+  forever holding `.beads/.write.lock`, after which every later `br` in that
+  repository timed out waiting for it.
+- **Two aliases removed.** `br status` (use `br stats`) and `--robot` (use
+  `--json`). Details and migration in **Breaking Changes** below.
+
+### ⚠ Breaking Changes
+
+- [4966c58](https://github.com/Toshik1978/beads/commit/4966c58e6989b308b1a9a28d0153232edad2f258) `br status` no longer exists. Use `br stats`, which it was an alias for and which is otherwise unchanged -- same arguments, same output. Clap suggests it by name, so an existing caller gets "unrecognized subcommand 'status' ... tip: some similar subcommands exist: 'stale', 'stats'" rather than a bare failure.
+- [e84fdd9](https://github.com/Toshik1978/beads/commit/e84fdd910fe9c7c9389822a737512245473988fc) `--robot` no longer exists on any command. Use `--json`, which is a global flag and so is accepted everywhere `--robot` was. The two produced byte-identical output, verified by diffing them before the change.
+
+### Features
+
+- [4c070c8](https://github.com/Toshik1978/beads/commit/4c070c88499a0c374ee1a6841f09f799a147e04b) feat(format): render markdown into styled, width-aware text
+- [af61152](https://github.com/Toshik1978/beads/commit/af6115241fea7c0bdc5ba14e18aed2ea315aa8ff) feat(output): render issue prose and comment bodies as markdown
+- [4a33acf](https://github.com/Toshik1978/beads/commit/4a33acfca11a9c85edd4f807bf5c73cb1bd415cc) feat(output): strip markdown from search context snippets
+- [4966c58](https://github.com/Toshik1978/beads/commit/4966c58e6989b308b1a9a28d0153232edad2f258) feat(cli)!: remove the status alias, leaving stats
+- [e84fdd9](https://github.com/Toshik1978/beads/commit/e84fdd910fe9c7c9389822a737512245473988fc) feat(cli)!: remove the --robot flag, leaving --json
+
+### Bug Fixes
+
+- [4a2a5d6](https://github.com/Toshik1978/beads/commit/4a2a5d6a2ac55d359df2939c7a8b05d3f455b122) fix(release): stop changelog.disable from discarding the release notes
+- [bcb8551](https://github.com/Toshik1978/beads/commit/bcb8551decd078f5867d00c2da1ef533368aeb97) fix(format): correct markdown rendering defects found in review
+- [75c8ce9](https://github.com/Toshik1978/beads/commit/75c8ce97a1493536f8c155cc62fb990de6825850) fix(output): stop br hanging forever when its terminal hangs up
+
+### Documentation
+
+- [d1e422a](https://github.com/Toshik1978/beads/commit/d1e422a06c5de4f1eb26014156c12b8960010c48) docs: forbid AI attribution trailers in commit messages
+
+### Others
+
+- [97c3288](https://github.com/Toshik1978/beads/commit/97c3288a9308cda5c744762f5f4a0921689204e2) refactor(format): delete the unreachable rich module
+- [d5a06f4](https://github.com/Toshik1978/beads/commit/d5a06f4ae1830a394af85dcc7bd7aad68363cc3d) ci: skip the suite for prose-only changes
+- [3c94b69](https://github.com/Toshik1978/beads/commit/3c94b69a4dc67f53ed95a5d1e80c50488d426583) ci(changelog): add a Breaking Changes group
+
+---
+
 ## v1.0.0 — 2026-07-31
 
 The first release. `br` is a personal, agent-friendly issue tracker: one

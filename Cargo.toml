@@ -1,6 +1,6 @@
 [package]
 name = "beads"
-version = "1.0.0"
+version = "1.1.0"
 publish = false
 edition = "2024"
 # MEASURED, not inherited. The `1.88` that stood here came from upstream and had
@@ -26,7 +26,7 @@ edition = "2024"
 # rather than a number nobody has tested. Note what it is a property of: the
 # pinned `Cargo.lock`, not this crate's source. A future `libsqlite3-sys` may
 # move it again, in either direction, with no change here.
-rust-version = "1.95"
+rust-version = "1.97.1"
 description = "Agent-first issue tracker (SQLite + JSONL)"
 # Not plain MIT: LICENSE carries a binding OpenAI/Anthropic rider that must
 # travel unmodified into derivative works. SPDX has no identifier for it, so
