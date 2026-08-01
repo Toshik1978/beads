@@ -340,10 +340,16 @@ fn build_comments_content(comments: &[Comment], theme: &Theme, content_width: us
         );
         content.append("\n");
 
-        content.append_text(&render_markdown_text(
+        let mut rendered = render_markdown_text(
             sanitize_terminal_text(comment.body.trim_end_matches('\n')).as_ref(),
             content_width,
-        ));
+        );
+        // `stylize_all` pushes an overlay span rather than replacing the
+        // renderer's own spans, and `Theme::comment` sets only the italic
+        // attribute, so this cannot clobber the per-element styles
+        // `render_markdown_text` already applied (headings, bold, code, …).
+        rendered.stylize_all(theme.comment.clone());
+        content.append_text(&rendered);
         content.append("\n\n");
     }
 
@@ -392,10 +398,12 @@ fn build_comment_added_content(comment: &Comment, theme: &Theme, content_width: 
     );
     comment_text.append_styled(" \u{2022} just now", theme.timestamp.clone());
     comment_text.append("\n");
-    comment_text.append_text(&render_markdown_text(
+    let mut rendered = render_markdown_text(
         sanitize_terminal_text(comment.body.trim_end_matches('\n')).as_ref(),
         content_width,
-    ));
+    );
+    rendered.stylize_all(theme.comment.clone());
+    comment_text.append_text(&rendered);
     comment_text
 }
 
@@ -761,6 +769,39 @@ mod tests {
         assert!(plain.contains("Note"));
         assert!(!plain.contains("##"), "got {plain:?}");
         assert!(!plain.contains("**"), "got {plain:?}");
+    }
+
+    #[test]
+    fn rich_comment_bodies_are_italicized_without_losing_markdown_styling() {
+        // `Theme::comment` is italic; comment bodies should render italic
+        // *and* keep the markdown renderer's own per-element styles (a `##`
+        // heading is bold, per `rich_rust`'s default `h2_style`). Overlaying
+        // a flat style over the whole block would destroy the latter, so
+        // this pins that both survive together on the same text.
+        use rich_rust::style::Attributes;
+
+        let theme = Theme::default();
+        let comments = vec![test_comment("## Note\n\nSome text.")];
+        let content = build_comments_content(&comments, &theme, 60);
+
+        let segments = content.render("");
+        let heading_segment = segments
+            .iter()
+            .find(|seg| seg.text.contains("Note"))
+            .expect("heading segment present");
+        let style = heading_segment
+            .style
+            .as_ref()
+            .expect("heading segment is styled");
+
+        assert!(
+            style.attributes.contains(Attributes::ITALIC),
+            "comment styling was lost: {style:?}"
+        );
+        assert!(
+            style.attributes.contains(Attributes::BOLD),
+            "the heading's own bold styling was clobbered: {style:?}"
+        );
     }
 
     #[test]

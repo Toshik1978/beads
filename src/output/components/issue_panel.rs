@@ -270,10 +270,16 @@ impl<'a> IssuePanel<'a> {
                 self.theme.username.clone(),
             );
             content.append_styled(": ", self.theme.dimmed.clone());
-            content.append_text(&render_markdown_text(
+            let mut rendered = render_markdown_text(
                 sanitize_terminal_text(&comment.body).as_ref(),
                 content_width,
-            ));
+            );
+            // Overlay, not replace: `stylize_all` pushes a span rather than
+            // clearing the renderer's own, and `Theme::comment` sets only the
+            // italic attribute, so it cannot clobber the per-element styles
+            // `render_markdown_text` already applied.
+            rendered.stylize_all(self.theme.comment.clone());
+            content.append_text(&rendered);
             content.append("\n");
         }
     }
@@ -441,6 +447,49 @@ mod tests {
         assert!(!content.plain().contains("##"), "got {:?}", content.plain());
         assert!(!content.plain().contains("**"), "got {:?}", content.plain());
         assert!(!content.spans().is_empty(), "nothing was styled");
+    }
+
+    #[test]
+    fn panel_comment_bodies_are_italicized_without_losing_markdown_styling() {
+        // `Theme::comment` is italic; the panel's inline comment rendering
+        // should apply it while keeping the markdown renderer's own
+        // per-element styles (a `##` heading is bold by default), the same
+        // guarantee `comments.rs`'s rich comment paths pin.
+        use rich_rust::style::Attributes;
+
+        let theme = Theme::default();
+        let issue = Issue {
+            id: "bd-md".to_string(),
+            title: "Has comments".to_string(),
+            comments: vec![crate::model::Comment {
+                id: 1,
+                issue_id: "bd-md".to_string(),
+                author: "someone".to_string(),
+                body: "## Note\n\nSome text.".to_string(),
+                created_at: Utc::now(),
+            }],
+            ..Issue::default()
+        };
+
+        let content = IssuePanel::new(&issue, &theme).build_content(60);
+        let segments = content.render("");
+        let heading_segment = segments
+            .iter()
+            .find(|seg| seg.text.contains("Note"))
+            .expect("heading segment present");
+        let style = heading_segment
+            .style
+            .as_ref()
+            .expect("heading segment is styled");
+
+        assert!(
+            style.attributes.contains(Attributes::ITALIC),
+            "comment styling was lost: {style:?}"
+        );
+        assert!(
+            style.attributes.contains(Attributes::BOLD),
+            "the heading's own bold styling was clobbered: {style:?}"
+        );
     }
 
     #[test]

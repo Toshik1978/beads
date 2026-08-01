@@ -336,15 +336,22 @@ fn highlight_text(text: &str, regex: Option<&Regex>, theme: &Theme) -> Text {
 
 /// Flatten a search snippet for a one-line table cell.
 ///
-/// The snippet arrives already stripped of markdown (done in `build_context_snippets`).
-/// This function sanitizes terminal escapes, strips any remaining markdown (belt-and-braces
-/// in case markdown somehow persists), and ensures single-line format for the cell.
+/// The snippet arrives already stripped of markdown by `build_context_snippets`
+/// — including its raw-text fallback, which is chosen precisely because
+/// stripping loses the match, so re-stripping here would erase the very
+/// fallback that produced it. `strip_markdown` is also not idempotent
+/// (`[[x]]` strips to `[x]`, and a second pass strips that to `x`), so a
+/// second call here could mangle content the first pass already produced
+/// correctly. This function therefore only sanitizes terminal escapes and
+/// flattens whitespace to a single line; it must not strip markdown again.
+///
+/// Sanitizing must run first, and always — it is a terminal-injection
+/// defence and must apply to every snippet regardless of origin.
 fn plain_snippet(snippet: &str) -> String {
     let sanitized = sanitize_terminal_text(snippet);
-    let stripped = crate::format::markdown::strip_markdown(sanitized.as_ref());
-    // Collapse any remaining whitespace to single spaces (belt-and-braces; snippet
-    // should already be one line from normalize_whitespace in snippet_around_match).
-    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Collapse any remaining whitespace to single spaces (snippet should
+    // already be one line from normalize_whitespace in snippet_around_match).
+    sanitized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -414,18 +421,36 @@ mod tests {
     }
 
     #[test]
-    fn plain_snippet_strips_markers_and_flattens_to_one_line() {
-        let snippet = "## Heading\n\nSome **bold** and `code` text.";
+    fn plain_snippet_flattens_multiline_text_to_one_line() {
+        let snippet = "Heading\n\nSome bold and code text.";
         let out = plain_snippet(snippet);
 
-        assert!(!out.contains('#'), "got {out:?}");
-        assert!(!out.contains('*'), "got {out:?}");
         assert!(
             !out.contains('\n'),
             "a table cell must be one line: {out:?}"
         );
         assert!(out.contains("Heading"));
         assert!(out.contains("bold"));
+    }
+
+    #[test]
+    fn plain_snippet_does_not_strip_markdown_a_second_time() {
+        // `build_context_snippets` already strips markdown before a snippet
+        // reaches here, including on its raw-text fallback path (chosen
+        // precisely because stripping loses the search match). A second
+        // `strip_markdown` pass here would erase that fallback, and
+        // `strip_markdown` is not idempotent (`[[x]]` -> `[x]` -> `x`), so a
+        // second pass can also mangle content the first pass produced
+        // correctly. `plain_snippet` must leave markdown markers alone.
+        let snippet = "## Heading\n\nSome **bold** and `code` text.";
+        let out = plain_snippet(snippet);
+
+        assert!(out.contains('#'), "got {out:?}");
+        assert!(out.contains('*'), "got {out:?}");
+        assert!(
+            !out.contains('\n'),
+            "a table cell must be one line: {out:?}"
+        );
     }
 
     #[test]

@@ -1,87 +1,247 @@
 //! Markdown rendering for descriptions and comments.
 //!
 //! [`render_markdown_text`] is the single entry point: it splits `content`
-//! into top-level blocks via `split_top_level_blocks`, renders each through
-//! `rich_rust`'s `Markdown` renderable, re-wraps prose at the caller's width
-//! with `wrap_text_with_indent`, and leaves fixed blocks (tables, fenced code,
-//! rules) exactly as the renderer laid them out.
+//! into blocks via `split_blocks`, renders each through `rich_rust`, re-wraps
+//! prose at the caller's width with `wrap_text_with_indent`, and gives code
+//! blocks, tables and rules a layout that is never re-wrapped.
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use beads::format::markdown::render_markdown_text;
 //!
 //! let content = "# Heading\n\nThis is **bold** and *italic*.";
 //! let rendered = render_markdown_text(content, 80);
+//! assert!(rendered.plain().contains("Heading"));
+//! assert!(rendered.plain().contains("bold"));
 //! ```
 
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use rich_rust::Text;
 use rich_rust::renderables::markdown::Markdown;
+use rich_rust::renderables::table::{Cell, Column, Row, Table};
 use std::borrow::Cow;
+use std::ops::Range;
 
-/// Whether a rendered block may be re-wrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BlockKind {
-    /// Paragraph, heading, list, blockquote — safe to wrap.
-    Prose,
-    /// Table, fenced code, horizontal rule — must keep the renderer's own
-    /// layout. Wrapping one of these mangles it.
-    Fixed,
-}
-
-/// A top-level markdown block, borrowed from the original source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SourceBlock<'a> {
-    pub kind: BlockKind,
-    pub source: &'a str,
-}
-
-/// Split `content` into top-level blocks, each tagged with whether it may be
-/// re-wrapped.
+/// One renderable unit of a markdown document.
 ///
-/// Relies on two properties of `pulldown_cmark`'s offset iterator, both pinned
-/// by the tests in this module: a `Start` event seen at nesting depth 0 carries
-/// the whole element's source range, and `Rule` arrives unwrapped at depth 0.
-pub(crate) fn split_top_level_blocks(content: &str) -> Vec<SourceBlock<'_>> {
+/// Code blocks and tables carry their **parsed content** rather than a slice
+/// of the source, and are lifted out of whatever container they sit in — a
+/// list item, a blockquote, or the top level. That is deliberate:
+/// `pulldown_cmark` strips a container's prefix from a nested block's *first*
+/// line only, so the source range of a fenced block inside a blockquote is
+/// ``"```sh\n> echo hi\n> ```"`` — the surviving `> ` markers make the slice
+/// invalid as standalone markdown. The parser's own events are already
+/// de-prefixed, so they are the source of truth for these two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Block<'a> {
+    /// Markdown source that may be re-wrapped to the caller's width.
+    Prose(&'a str),
+    /// Markdown source rendered as-is and never re-wrapped: horizontal rules,
+    /// whose source is a single line and needs no de-prefixing.
+    Fixed(&'a str),
+    /// A code block's exact content, with the info string from its fence.
+    Code { language: String, text: String },
+    /// A table's cells. Rendered through `rich_rust`'s `Table`, which honours
+    /// a maximum width; the `Markdown` renderable's own table path ignores the
+    /// width it is given entirely.
+    Table {
+        header: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+}
+
+fn parser_options() -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    options
+}
+
+/// Split `content` into blocks, lifting every code block and table out of its
+/// container so each can be rendered with a layout of its own.
+///
+/// Prose keeps its original source slice, which preserves context a
+/// reconstruction would lose — notably a list's numbering, since the slice
+/// following a lifted code block still begins `2.` and `rich_rust` honours an
+/// ordered list's start number.
+pub(crate) fn split_blocks(content: &str) -> Vec<Block<'_>> {
+    let events: Vec<(Event<'_>, Range<usize>)> = Parser::new_ext(content, parser_options())
+        .into_offset_iter()
+        .collect();
 
     let mut blocks = Vec::new();
-    let mut depth = 0usize;
+    let mut i = 0usize;
 
-    for (event, range) in Parser::new_ext(content, options).into_offset_iter() {
-        match event {
-            Event::Start(ref tag) => {
-                if depth == 0 {
-                    blocks.push(SourceBlock {
-                        kind: classify_block(tag),
-                        source: &content[range],
-                    });
-                }
-                depth += 1;
+    while i < events.len() {
+        match &events[i].0 {
+            // A rule arrives unwrapped, with no matching `End`.
+            Event::Rule => {
+                blocks.push(Block::Fixed(&content[events[i].1.clone()]));
+                i += 1;
             }
-            Event::End(_) => depth = depth.saturating_sub(1),
-            Event::Rule if depth == 0 => blocks.push(SourceBlock {
-                kind: BlockKind::Fixed,
-                source: &content[range],
-            }),
-            _ => {}
+            Event::Start(_) => {
+                let end = matching_end(&events, i);
+                split_element(content, &events[i..=end], &mut blocks);
+                i = end + 1;
+            }
+            _ => i += 1,
         }
     }
 
     blocks
 }
 
-/// Tables and code blocks carry layout the renderer computed; everything else
-/// is prose this crate re-wraps itself.
-fn classify_block(tag: &Tag<'_>) -> BlockKind {
-    match tag {
-        Tag::Table(_) | Tag::CodeBlock(_) => BlockKind::Fixed,
-        _ => BlockKind::Prose,
+/// Index of the `End` event closing the `Start` at `start`.
+fn matching_end(events: &[(Event<'_>, Range<usize>)], start: usize) -> usize {
+    let mut depth = 0usize;
+    for (offset, (event, _)) in events[start..].iter().enumerate() {
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return start + offset;
+                }
+            }
+            _ => {}
+        }
     }
+    events.len() - 1
+}
+
+/// Emit one top-level element as a run of blocks, splitting it around any code
+/// block or table nested anywhere inside it.
+///
+/// An element with no fixed descendant yields exactly one `Prose` block
+/// covering the whole element, which is the common case.
+fn split_element<'a>(
+    content: &'a str,
+    events: &[(Event<'a>, Range<usize>)],
+    out: &mut Vec<Block<'a>>,
+) {
+    let element = events[0].1.clone();
+
+    // The element is itself a code block or table — the top-level case.
+    if let Event::Start(tag) = &events[0].0
+        && let Some(block) = extract_fixed(tag, events)
+    {
+        out.push(block);
+        return;
+    }
+
+    let mut cursor = element.start;
+    let mut i = 1usize;
+
+    while i < events.len() {
+        let Event::Start(tag) = &events[i].0 else {
+            i += 1;
+            continue;
+        };
+
+        let inner_end = matching_end(events, i);
+        if let Some(block) = extract_fixed(tag, &events[i..=inner_end]) {
+            let range = events[i].1.clone();
+            push_prose(content, cursor..range.start, out);
+            out.push(block);
+            cursor = range.end;
+            i = inner_end + 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    push_prose(content, cursor..element.end, out);
+}
+
+/// Push `content[range]` as prose, unless it holds nothing a reader would see.
+///
+/// Lifting a table out of a blockquote leaves `"> "` behind as the slice before
+/// it; emitting that would render an empty quote marker, and — worse — trip
+/// `render_markdown_text`'s raw-source fallback and print the `>` literally.
+fn push_prose<'a>(content: &'a str, range: Range<usize>, out: &mut Vec<Block<'a>>) {
+    if range.start >= range.end {
+        return;
+    }
+    let slice = &content[range];
+    if has_visible_content(slice) {
+        out.push(Block::Prose(slice));
+    }
+}
+
+/// Whether `source` contains anything that renders to visible output.
+///
+/// Used both to drop structural leftovers (see [`push_prose`]) and to decide
+/// whether a block the renderer produced nothing for is worth falling back to
+/// its raw source. Raw HTML counts as visible: it is exactly the case the
+/// fallback exists for.
+fn has_visible_content(source: &str) -> bool {
+    Parser::new_ext(source, parser_options()).any(|event| match event {
+        Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text) => {
+            !text.trim().is_empty()
+        }
+        Event::Rule | Event::FootnoteReference(_) => true,
+        _ => false,
+    })
+}
+
+/// Pull a code block's or table's content out of its events, or `None` if this
+/// element is neither.
+fn extract_fixed<'a>(tag: &Tag<'a>, events: &[(Event<'a>, Range<usize>)]) -> Option<Block<'a>> {
+    match tag {
+        Tag::CodeBlock(kind) => {
+            let language = match kind {
+                CodeBlockKind::Fenced(info) => {
+                    info.split_whitespace().next().unwrap_or("").to_string()
+                }
+                CodeBlockKind::Indented => String::new(),
+            };
+            let text = events
+                .iter()
+                .filter_map(|(event, _)| match event {
+                    Event::Text(text) => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect::<String>();
+            Some(Block::Code { language, text })
+        }
+        Tag::Table(_) => Some(extract_table(events)),
+        _ => None,
+    }
+}
+
+/// Collect a table's cells as plain strings.
+///
+/// Inline markup inside a cell is flattened to its text: `` `code` `` arrives
+/// as an `Event::Code` and contributes `code`, without the backticks the
+/// `Markdown` renderable leaves behind.
+fn extract_table<'a>(events: &[(Event<'a>, Range<usize>)]) -> Block<'a> {
+    let mut header = Vec::new();
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut cell = String::new();
+    let mut in_cell = false;
+
+    for (event, _) in events {
+        match event {
+            Event::Start(Tag::TableCell) => {
+                in_cell = true;
+                cell.clear();
+            }
+            Event::Text(text) | Event::Code(text) if in_cell => cell.push_str(text),
+            Event::SoftBreak | Event::HardBreak if in_cell => cell.push(' '),
+            Event::End(TagEnd::TableCell) => {
+                in_cell = false;
+                row.push(std::mem::take(&mut cell));
+            }
+            Event::End(TagEnd::TableHead) => header = std::mem::take(&mut row),
+            Event::End(TagEnd::TableRow) => rows.push(std::mem::take(&mut row)),
+            _ => {}
+        }
+    }
+
+    Block::Table { header, rows }
 }
 
 /// Render `content` as styled, width-aware terminal markdown.
@@ -93,14 +253,24 @@ fn classify_block(tag: &Tag<'_>) -> BlockKind {
 /// through `sanitize_terminal_text`, so the only escape sequences in the result
 /// are the ones this renderer produced.
 ///
-/// **No emitted line exceeds `width`.** Prose is wrapped to it by
-/// [`wrap_text_with_indent`]. Fixed blocks (tables, fenced code, rules) are
-/// never wrapped — `rich_rust` does not clamp a fixed block's width, so a
-/// table wider than requested still renders at its own natural width — so
-/// instead each of their lines is *cropped* to `width`. Wrapping a table row
-/// would scatter its cells across several lines and destroy it; cropping
-/// keeps a row recognizable as a row, and either way an over-wide line would
-/// break a panel's border, so cropping is the least-bad option.
+/// **No emitted line exceeds `width`.** How each kind of block honours that
+/// differs, because only some can be reflowed without being destroyed:
+///
+/// - Prose is wrapped to `width` by `wrap_text_with_indent`.
+/// - A table is laid out to fit by `rich_rust`'s `Table`, which wraps cell
+///   content within each column. A table narrower than `width` keeps its
+///   natural size.
+/// - A code block is broken at the width boundary, keeping every character,
+///   the way a terminal soft-wraps. It is never reflowed at spaces: that
+///   would alter the code.
+/// - A horizontal rule is *cropped*, having nothing worth preserving past
+///   the width.
+///
+/// The crop is also applied to both fallback paths below (a block the renderer
+/// produced nothing for, and a document the renderer produced nothing for at
+/// all), so the guarantee holds there too. It matters: a caller that draws a
+/// border at `width` — every panel in this crate — is broken by a single line
+/// that exceeds it.
 #[must_use]
 pub fn render_markdown_text(content: &str, width: usize) -> Text {
     let width = width.max(1);
@@ -109,35 +279,45 @@ pub fn render_markdown_text(content: &str, width: usize) -> Text {
     let mut out = Text::new("");
     let mut emitted = 0usize;
 
-    for block in split_top_level_blocks(content) {
-        let mut rendered = match block.kind {
-            BlockKind::Fixed => {
-                let rendered = trim_leading_blank_lines(&render_block(block.source, width));
-                crop_fixed_lines(&trim_end(&rendered), width)
+    for block in split_blocks(content) {
+        // Only a block that still holds a usable slice of the original source
+        // can fall back to showing it. A lifted code block or table carries
+        // parsed content instead, and its slice may not be valid markdown.
+        let (mut rendered, fallback) = match &block {
+            Block::Fixed(source) => {
+                let rendered = trim_leading_blank_lines(&render_block(source, width));
+                (crop_fixed_lines(&trim_end(&rendered), width), Some(*source))
             }
-            BlockKind::Prose => {
-                let source = if definitions.is_empty() {
-                    Cow::Borrowed(block.source)
+            Block::Prose(source) => {
+                let with_definitions = if definitions.is_empty() {
+                    Cow::Borrowed(*source)
                 } else {
                     // A blank line, not a single one: a paragraph's own
                     // range never includes its trailing newline (it is the
                     // *last* thing pulldown-cmark emits for that block), so
                     // one `\n` would make the definition a lazy continuation
                     // of the paragraph instead of a block of its own.
-                    Cow::Owned(format!("{}\n\n{definitions}", block.source.trim_end()))
+                    Cow::Owned(format!("{}\n\n{definitions}", source.trim_end()))
                 };
-                let rendered = trim_leading_blank_lines(&render_block(&source, width));
-                trim_end(&wrap_text_with_indent(&trim_line_ends(&rendered), width))
+                let rendered = trim_leading_blank_lines(&render_block(&with_definitions, width));
+                (
+                    trim_end(&wrap_text_with_indent(&trim_line_ends(&rendered), width)),
+                    Some(*source),
+                )
             }
+            Block::Code { language, text } => (render_code_block(language, text, width), None),
+            Block::Table { header, rows } => (render_table_block(header, rows, width), None),
         };
 
-        if rendered.plain().trim().is_empty() && !block.source.trim().is_empty() {
+        if rendered.plain().trim().is_empty()
+            && let Some(source) = fallback.filter(|source| has_visible_content(source))
+        {
             // The renderer produced nothing for this block alone — raw HTML
             // and a handful of other constructs do this. Fall back to the
             // block's own source rather than silently dropping it; the
             // whole-document fallback below only catches this when it
             // happens to be the only block.
-            rendered = Text::new(block.source.trim_end());
+            rendered = crop_fixed_lines(&Text::new(source.trim_end()), width);
         }
 
         if rendered.plain().trim().is_empty() {
@@ -153,7 +333,7 @@ pub fn render_markdown_text(content: &str, width: usize) -> Text {
     if emitted == 0 && !content.trim().is_empty() {
         // The renderer produced nothing for non-empty input — a lone link
         // definition does this. Show the source rather than an empty panel.
-        return Text::new(content);
+        return crop_fixed_lines(&Text::new(content), width);
     }
 
     out
@@ -170,6 +350,118 @@ fn render_block(source: &str, width: usize) -> Text {
         }
     }
     text
+}
+
+/// Render a lifted code block by re-fencing its exact content.
+///
+/// The fence is grown past the longest backtick run in the content, so a code
+/// block that itself contains a fence cannot terminate its own.
+fn render_code_block(language: &str, text: &str, width: usize) -> Text {
+    let longest_run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest_run.max(2) + 1);
+
+    let body = if text.is_empty() || text.ends_with('\n') {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("{text}\n"))
+    };
+
+    let rendered = trim_leading_blank_lines(&render_block(
+        &format!("{fence}{language}\n{body}{fence}"),
+        width,
+    ));
+    wrap_code_lines(&trim_end(&rendered), width)
+}
+
+/// Break every over-wide line of a code block at exactly `width`.
+///
+/// Code is not reflowed the way prose is — a break at a space would be a
+/// break inside the code, and dropping that space (which the prose wrapper
+/// does, so a broken line does not start with one) would silently alter it.
+/// So this cuts at the width boundary and keeps every character, the way a
+/// terminal soft-wraps.
+///
+/// Cropping would be the alternative, and was what code blocks got before:
+/// it reads more tidily right up until the truncated line is a command
+/// someone needs to run. Losing the tail of `cargo nextest run --workspace
+/// --no-fail-fast --status-level all` is worse than wrapping it.
+fn wrap_code_lines(text: &Text, width: usize) -> Text {
+    let mut out = Text::new("");
+
+    for (idx, line) in text.split_lines().iter().enumerate() {
+        if idx > 0 {
+            out.append("\n");
+        }
+        if line.cell_len() <= width {
+            out.append_text(line);
+            continue;
+        }
+
+        let chars: Vec<char> = line.plain().chars().collect();
+        let mut start = 0usize;
+        let mut piece = 0usize;
+
+        while start < chars.len() {
+            if piece > 0 {
+                out.append("\n");
+            }
+            let end = cut_at_width(&chars, start, width);
+            out.append_text(&line.slice(start, end));
+            start = end;
+            piece += 1;
+        }
+    }
+
+    out
+}
+
+/// Exclusive character index at which `chars[start..]` reaches `width` display
+/// columns. Always greater than `start`, so a caller's loop cannot spin.
+fn cut_at_width(chars: &[char], start: usize, width: usize) -> usize {
+    let mut acc = 0usize;
+    for i in start..chars.len() {
+        let w = char_width(chars[i]);
+        if acc + w > width {
+            return i.max(start + 1);
+        }
+        acc += w;
+    }
+    chars.len()
+}
+
+/// Render a lifted table through `rich_rust`'s `Table` renderable.
+///
+/// `Table::render` treats its argument as a true maximum: it wraps cell
+/// content to fit and leaves a table narrower than `width` at its natural
+/// size. The `Markdown` renderable's own table path does neither — it lays
+/// columns out at their content width and ignores the width it was given, so
+/// an over-wide table could only be cropped, which discarded most of it
+/// (bds-jgk.6).
+fn render_table_block(header: &[String], rows: &[Vec<String>], width: usize) -> Text {
+    if header.is_empty() {
+        return Text::new("");
+    }
+
+    let mut table = Table::new().with_columns(header.iter().map(|h| Column::new(h.as_str())));
+
+    for row in rows {
+        // A malformed row can carry a different cell count than the header;
+        // pad and truncate so the table stays rectangular.
+        let cells = (0..header.len())
+            .map(|i| Cell::new(row.get(i).map_or("", String::as_str)))
+            .collect();
+        table = table.with_row(Row::new(cells));
+    }
+
+    let mut text = Text::new("");
+    for segment in table.render(width) {
+        match segment.style {
+            Some(style) => text.append_styled(&segment.text, style),
+            None => text.append(&segment.text),
+        }
+    }
+
+    crop_fixed_lines(&trim_end(&text), width)
 }
 
 /// Strip the right-padding `rich_rust` adds to every rendered line.
@@ -227,10 +519,12 @@ fn trim_leading_blank_lines(text: &Text) -> Text {
 ///
 /// `rich_rust` does not clamp a table's rendered width to what was asked for,
 /// so this is what makes `render_markdown_text`'s no-line-exceeds-`width`
-/// guarantee hold for fixed blocks. Character-wise, using the same display
-/// width accounting `wrap_text_with_indent` uses, so a cut never lands inside
-/// a wide character; `Text::slice` re-maps style spans onto the cropped
-/// range, so no span is disturbed by cutting mid-run.
+/// guarantee hold for fixed blocks — and, since `render_markdown_text` also
+/// runs its two fallback paths (uncropped source text) through this
+/// function, for those too. Character-wise, using the same display width
+/// accounting `wrap_text_with_indent` uses, so a cut never lands inside a
+/// wide character; `Text::slice` re-maps style spans onto the cropped range,
+/// so no span is disturbed by cutting mid-run.
 fn crop_fixed_lines(text: &Text, width: usize) -> Text {
     let mut out = Text::new("");
     for (idx, line) in text.split_lines().iter().enumerate() {
@@ -592,9 +886,12 @@ fn skip_parentheses(chars: &[char], start: usize) -> usize {
 /// Soft-wrap `text` to `width` columns, carrying each line's leading
 /// indentation onto its continuation lines.
 ///
-/// The plain-text twin of this is `wrap_body` in `cli::commands::show`; the two
-/// must agree, because the same issue body is rendered through one or the other
-/// depending on output mode. Existing line breaks are preserved and a single
+/// The plain-text twin of this is `wrap_body` in `cli::commands::show`, which
+/// wraps the raw, unrendered issue body for plain-mode output. The two are
+/// *not* required to agree: rich mode renders the body as markdown through
+/// this module and wraps the result with this function, while plain mode
+/// wraps the untouched source with `wrap_body` — that split is deliberate,
+/// not an invariant to hold. Existing line breaks are preserved and a single
 /// over-long word is never split.
 ///
 /// Style-preserving by construction: every cut goes through `Text::slice`,
@@ -780,45 +1077,101 @@ mod tests {
     }
 
     #[test]
-    fn split_top_level_blocks_classifies_each_block() {
+    fn split_blocks_classifies_each_block() {
         let src = "# Head\n\nPara one **bold**.\n\n- a\n- b\n\n```rust\nfn x() {}\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n---\n\n> quote\n\nLast para.\n";
 
-        let blocks = split_top_level_blocks(src);
-        let kinds: Vec<BlockKind> = blocks.iter().map(|b| b.kind).collect();
+        let blocks = split_blocks(src);
+
+        // Prose keeps the real source text, not reconstructed markdown.
+        assert_eq!(blocks[0], Block::Prose("# Head\n"));
+        assert!(matches!(blocks[1], Block::Prose(s) if s.contains("**bold**")));
+        assert!(matches!(blocks[2], Block::Prose(s) if s.contains("- b")));
+        assert_eq!(
+            blocks[3],
+            Block::Code {
+                language: "rust".to_string(),
+                text: "fn x() {}\n".to_string(),
+            }
+        );
+        assert_eq!(
+            blocks[4],
+            Block::Table {
+                header: vec!["a".to_string(), "b".to_string()],
+                rows: vec![vec!["1".to_string(), "2".to_string()]],
+            }
+        );
+        assert!(matches!(blocks[5], Block::Fixed(_)));
+        assert!(matches!(blocks[6], Block::Prose(s) if s.contains("quote")));
+        assert!(matches!(blocks[7], Block::Prose(s) if s.contains("Last para.")));
+        assert_eq!(blocks.len(), 8);
+    }
+
+    #[test]
+    fn split_blocks_handles_empty_and_whitespace_input() {
+        assert!(split_blocks("").is_empty());
+        assert!(split_blocks("   \n\n  \n").is_empty());
+    }
+
+    #[test]
+    fn split_blocks_keeps_nested_lists_as_one_block() {
+        let src = "- outer\n  - inner\n  - inner two\n- outer two\n";
+        let blocks = split_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], Block::Prose(s) if s.contains("inner two")));
+    }
+
+    #[test]
+    fn split_blocks_lifts_a_code_block_out_of_a_list_item() {
+        // bds-jgk.7: the container used to be classified whole, so the code
+        // inside it went through the prose wrapper and got shredded.
+        let src = "1. First step:\n\n   ```rust\n   let x = 1;\n   ```\n\n2. Second step\n";
+        let blocks = split_blocks(src);
 
         assert_eq!(
-            kinds,
-            vec![
-                BlockKind::Prose, // heading
-                BlockKind::Prose, // paragraph
-                BlockKind::Prose, // list
-                BlockKind::Fixed, // fenced code
-                BlockKind::Fixed, // table
-                BlockKind::Fixed, // rule
-                BlockKind::Prose, // blockquote
-                BlockKind::Prose, // paragraph
-            ]
+            blocks[1],
+            Block::Code {
+                language: "rust".to_string(),
+                // De-prefixed by the parser: the source slice would still
+                // carry the list item's three-space indent.
+                text: "let x = 1;\n".to_string(),
+            }
         );
-
-        // The slices must be the real source text, not reconstructed markdown.
-        assert_eq!(blocks[0].source, "# Head\n");
-        assert_eq!(blocks[3].source, "```rust\nfn x() {}\n```");
-        assert!(blocks[4].source.contains("| 1 | 2 |"));
+        // The prose either side keeps its own source, so the list numbering
+        // survives the split.
+        assert!(matches!(blocks[0], Block::Prose(s) if s.starts_with("1. First step:")));
+        assert!(matches!(blocks[2], Block::Prose(s) if s.contains("2. Second step")));
+        assert_eq!(blocks.len(), 3);
     }
 
     #[test]
-    fn split_top_level_blocks_handles_empty_and_whitespace_input() {
-        assert!(split_top_level_blocks("").is_empty());
-        assert!(split_top_level_blocks("   \n\n  \n").is_empty());
+    fn split_blocks_lifts_a_table_out_of_a_blockquote() {
+        // bds-jgk.7, the other half. The `> ` left over in front of the table
+        // must not survive into the block, and the bare `> ` preceding it must
+        // not be emitted as a prose block of its own.
+        let src = "> | column alpha | column beta |\n> | --- | --- |\n> | one | two |\n";
+        let blocks = split_blocks(src);
+
+        assert_eq!(
+            blocks,
+            vec![Block::Table {
+                header: vec!["column alpha".to_string(), "column beta".to_string()],
+                rows: vec![vec!["one".to_string(), "two".to_string()]],
+            }]
+        );
     }
 
     #[test]
-    fn split_top_level_blocks_keeps_nested_lists_as_one_block() {
-        let src = "- outer\n  - inner\n  - inner two\n- outer two\n";
-        let blocks = split_top_level_blocks(src);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].kind, BlockKind::Prose);
-        assert!(blocks[0].source.contains("inner two"));
+    fn split_blocks_flattens_inline_markup_in_a_table_cell() {
+        let src = "| head `code` | **bold** head |\n| --- | --- |\n| a `b` | *c* |\n";
+        let blocks = split_blocks(src);
+
+        assert_eq!(
+            blocks,
+            vec![Block::Table {
+                header: vec!["head code".to_string(), "bold head".to_string()],
+                rows: vec![vec!["a b".to_string(), "c".to_string()]],
+            }]
+        );
     }
 
     #[test]
@@ -891,48 +1244,50 @@ mod tests {
         }
     }
 
-    /// A table whose rendered width (44 columns, verified with an
-    /// out-of-repo probe against this `rich_rust` version) exceeds the width
-    /// requested below. `rich_rust` does not clamp a table's width to what
-    /// was asked for, so a narrower table would make the `Fixed`/`Prose`
-    /// routing untestable: both paths are a no-op when nothing needs to be
-    /// wrapped or cropped.
+    /// A table whose natural width (44 columns) exceeds the width requested
+    /// below, so it can only be shown by reflowing it. A narrower table would
+    /// make these tests vacuous.
     const WIDE_TABLE_SRC: &str = "| left column header | right column header |\n| ------------------- | -------------------- |\n| left value here | right value here |\n";
 
     #[test]
-    fn render_markdown_text_does_not_break_a_table_row() {
+    fn render_markdown_text_keeps_a_table_a_table() {
         let out = render_markdown_text(WIDE_TABLE_SRC, 30);
-        let lines: Vec<&str> = out.plain().lines().collect();
 
-        // One physical line per table row (top border, header, separator,
-        // value, bottom border). If `Fixed` blocks were routed through the
-        // prose path instead, `wrap_text_with_indent` would break each
-        // 44-column row at its internal spaces, growing this to 7 lines.
-        assert_eq!(
-            lines.len(),
-            5,
-            "a table row was split across lines: {:?}",
-            out.plain()
-        );
-
-        let header = lines
-            .iter()
-            .find(|l| l.contains("left column header"))
-            .expect("header row missing");
-        assert!(
-            header.starts_with('│'),
-            "the header row lost its left border: {header:?}"
-        );
+        // Every line belongs to the table's frame: a border or a cell row.
+        // If a table were routed through the prose wrapper instead, its rows
+        // would break at their internal spaces into borderless fragments.
+        for line in out.plain().lines() {
+            let first = line.chars().next().expect("blank line inside a table");
+            assert!(
+                "┏┃┡│└├┌".contains(first),
+                "a table line lost its left border: {line:?}"
+            );
+        }
     }
 
     #[test]
-    fn render_markdown_text_crops_lines_of_an_over_wide_table_to_the_requested_width() {
-        // `rich_rust` renders this table at its own natural width (44
-        // columns) regardless of the narrower width requested here, so
-        // `render_markdown_text` must crop each line itself, or a caller
-        // (a panel) that assumes no emitted line exceeds the requested width
-        // gets hard evidence to the contrary the first time it draws a
-        // border around one.
+    fn render_markdown_text_reflows_an_over_wide_table_without_losing_content() {
+        // bds-jgk.6: this table used to be cropped to the requested width,
+        // which kept the row structure but discarded most of the text — the
+        // second column came out as five characters. `rich_rust`'s `Table`
+        // wraps cell content to fit instead, so every word survives.
+        let out = render_markdown_text(WIDE_TABLE_SRC, 30);
+        let plain = out.plain();
+        let flattened: String = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        for word in ["left", "column", "header", "right", "value", "here"] {
+            assert!(
+                flattened.contains(word),
+                "the table lost {word:?}: {plain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_markdown_text_fits_an_over_wide_table_within_the_requested_width() {
+        // A caller (a panel) that assumes no emitted line exceeds the
+        // requested width gets hard evidence to the contrary the first time
+        // it draws a border around one.
         let out = render_markdown_text(WIDE_TABLE_SRC, 30);
         for line in out.plain().lines() {
             assert!(
@@ -951,17 +1306,77 @@ mod tests {
         assert!(lines[0].contains("fn a() {}"), "got {:?}", out.plain());
         assert!(lines[1].contains("fn b() {}"), "got {:?}", out.plain());
 
-        // A non-final fixed-block line keeps the trailing background-fill
-        // padding `rich_rust` renders it with -- the contract for `Fixed`
-        // blocks is "emitted verbatim, including any background fill",
-        // and per-line trimming is `Prose`-only behaviour. If `BlockKind::Fixed`
-        // were routed through the prose path instead, `trim_line_ends` would
-        // strip that padding from every line, not just the block's last one.
+        // A non-final code line keeps the trailing background-fill padding
+        // `rich_rust` renders it with -- the contract for a code block is
+        // "emitted verbatim, including any background fill", and per-line
+        // trimming is prose-only behaviour. If a code block were routed
+        // through the prose path instead, `trim_line_ends` would strip that
+        // padding from every line, not just the block's last one.
         assert_eq!(
             unicode_width::UnicodeWidthStr::width(lines[0]),
             40,
             "the code line lost its background-fill padding, or was wrapped: {:?}",
             lines[0]
+        );
+    }
+
+    #[test]
+    fn render_markdown_text_keeps_a_code_block_inside_a_list_item_intact() {
+        // bds-jgk.7: the list was classified whole as prose, so this code
+        // line -- longer than the requested width -- was broken at its spaces
+        // into three lines.
+        let src = "1. Run this:\n\n   ```sh\n   cargo nextest run --workspace --no-fail-fast\n   ```\n\n2. Then check the output\n";
+        let out = render_markdown_text(src, 40);
+        let plain = out.plain();
+
+        // Every character of the command survives. The prose wrapper broke it
+        // at spaces and dropped them; the code path breaks at the width
+        // boundary and keeps them, so re-joining the pieces reproduces the
+        // original exactly.
+        // Joining without a separator is what makes this an assertion about
+        // the *code* path: it breaks at the width boundary and keeps the
+        // spaces, so the pieces re-join into the original. The prose wrapper
+        // breaks at a space and drops it, which would yield
+        // `--workspace--no-fail-fast` here.
+        let rejoined = plain.replace('\n', "");
+        assert!(
+            rejoined.contains("cargo nextest run --workspace --no-fail-fast"),
+            "the code was altered by wrapping: {plain:?}"
+        );
+
+        for line in plain.lines() {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(line) <= 40,
+                "a code line exceeded the width: {line:?}"
+            );
+        }
+
+        // Splitting the list around the code block must not cost it its
+        // numbering -- the prose either side keeps its own source, and
+        // `rich_rust` honours an ordered list's start number.
+        assert!(plain.contains("1."), "lost the first marker: {plain:?}");
+        assert!(plain.contains("2."), "lost the second marker: {plain:?}");
+    }
+
+    #[test]
+    fn render_markdown_text_does_not_wrap_a_table_inside_a_blockquote() {
+        // bds-jgk.7, the other half: this came out as `| column alpha |
+        // column beta |` / `column gamma |` -- exactly the row-shredding the
+        // fixed-block handling exists to prevent.
+        let src = "> | column alpha | column beta |\n> | --- | --- |\n> | column gamma | column delta |\n";
+        let out = render_markdown_text(src, 40);
+
+        for line in out.plain().lines() {
+            let first = line.chars().next().expect("blank line inside a table");
+            assert!(
+                "┏┃┡│└├┌".contains(first),
+                "a table line lost its left border: {line:?}"
+            );
+        }
+        assert!(
+            !out.plain().contains('>'),
+            "a blockquote marker leaked into the table: {:?}",
+            out.plain()
         );
     }
 
@@ -1082,6 +1497,37 @@ mod tests {
         let src = "[ref]: https://example.com\n";
         let out = render_markdown_text(src, 40);
         assert_eq!(out.plain(), src, "expected the source as a fallback");
+    }
+
+    #[test]
+    fn render_markdown_text_crops_the_whole_document_fallback_to_width() {
+        // Same shape as the fallback above, but the source line itself is
+        // wider than the requested width. The fallback returns source text
+        // verbatim, so without cropping this would violate the "no emitted
+        // line exceeds width" guarantee documented on `render_markdown_text`.
+        let src = "[ref]: https://example.com/a/very/long/path/over/twenty/columns\n";
+        let out = render_markdown_text(src, 20);
+        for line in out.plain().lines() {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(line) <= 20,
+                "fallback line exceeded the requested width: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_markdown_text_crops_the_per_block_fallback_to_width() {
+        // Raw HTML falls back to source text per-block (see the raw-HTML
+        // test above); make that source line wider than the requested width
+        // and confirm the fallback is cropped, not emitted verbatim.
+        let src = "Para one.\n\n<div>raw html that is definitely over twenty columns wide</div>\n\nPara two.\n";
+        let out = render_markdown_text(src, 20);
+        for line in out.plain().lines() {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(line) <= 20,
+                "fallback line exceeded the requested width: {line:?}"
+            );
+        }
     }
 
     #[test]

@@ -1282,11 +1282,17 @@ mod tests {
         let snippets = build_context_snippets(&[issue], "**");
 
         let snippet = snippets.get("bd-test").expect("snippet exists");
-        // Fallback should have produced a snippet with the raw text (** not stripped)
-        // because the match only exists in the raw form
+        // Fallback should have produced a snippet with the raw text (** not
+        // stripped) because the match only exists in the raw form. Asserting
+        // only `!snippet.is_empty()` here would also pass with the fallback
+        // branch deleted outright (the earlier ID-match arm always inserts a
+        // non-empty snippet) or with markdown-stripping never happening at
+        // all, so pin the one thing that actually distinguishes the
+        // fallback: the raw `**` markers must survive into the snippet.
         assert!(
-            !snippet.is_empty(),
-            "fallback should produce a snippet when stripped loses the match"
+            snippet.contains("**"),
+            "fallback should keep the raw ** markers that the match depends on: {snippet:?}"
         );
+        assert!(snippet.contains("bold-text"), "got {snippet:?}");
     }
 }

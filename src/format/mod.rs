@@ -20,9 +20,11 @@
 //!
 //! # Rich Output
 //!
-//! The [`rich`] module provides enhanced terminal output using `rich_rust`:
+//! Enhanced terminal output using `rich_rust` lives under
+//! `crate::output::components`:
 //! - Tables with styled columns for issue lists
-//! - Panels for detailed issue views
+//! - Panels for detailed issue views, including rendered markdown via
+//!   [`markdown::render_markdown_text`]
 //! - Trees for dependency visualization
 //! - Consistent theming via [`Theme`]
 //!
