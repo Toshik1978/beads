@@ -7,8 +7,8 @@
 use beads::model::{Issue, IssueType, Priority, Status};
 use beads::storage::SqliteStorage;
 use beads::sync::{
-    ExportConfig, ImportConfig, OrphanMode, compute_jsonl_hash, compute_staleness,
-    ensure_no_conflict_markers, export_to_jsonl, import_from_jsonl, preflight_import,
+    ExportConfig, ImportConfig, compute_jsonl_hash, compute_staleness, ensure_no_conflict_markers,
+    export_to_jsonl, import_from_jsonl, preflight_import,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -37,7 +37,6 @@ fn seed_storage(storage: &mut SqliteStorage) {
 fn default_export_config(beads_dir: &std::path::Path) -> ExportConfig {
     ExportConfig {
         force: true,
-        is_default_path: true,
         beads_dir: Some(beads_dir.to_path_buf()),
         show_progress: false,
         ..ExportConfig::default()
@@ -125,29 +124,10 @@ fn repro_sync_cycle_crash_export_upsert_orphan() {
     );
     fs::write(&jsonl_path, modified).unwrap();
 
-    let config_strict = ImportConfig {
-        orphan_mode: OrphanMode::Strict,
-        ..default_import_config(&beads_dir)
-    };
-    let _ = import_from_jsonl(&mut storage, &jsonl_path, &config_strict, Some("bd"));
-
-    let config_allow = ImportConfig {
-        orphan_mode: OrphanMode::Allow,
-        ..default_import_config(&beads_dir)
-    };
-    let _ = import_from_jsonl(&mut storage, &jsonl_path, &config_allow, Some("bd"));
-
-    let config_skip = ImportConfig {
-        orphan_mode: OrphanMode::Skip,
-        ..default_import_config(&beads_dir)
-    };
-    let _ = import_from_jsonl(&mut storage, &jsonl_path, &config_skip, Some("bd"));
-
-    let config_resurrect = ImportConfig {
-        orphan_mode: OrphanMode::Resurrect,
-        ..default_import_config(&beads_dir)
-    };
-    let _ = import_from_jsonl(&mut storage, &jsonl_path, &config_resurrect, Some("bd"));
+    // Importing an issue whose parent is absent must not panic or corrupt the
+    // database, whatever else the import decides to do with it.
+    let config = default_import_config(&beads_dir);
+    let _ = import_from_jsonl(&mut storage, &jsonl_path, &config, Some("bd"));
 }
 
 /// crash-8533: Binary/null bytes in the byte stream combined with force-export
@@ -230,7 +210,6 @@ fn repro_sync_cycle_slow_unit_force_upsert_orphan() {
 
     let config_force = ImportConfig {
         force_upsert: true,
-        orphan_mode: OrphanMode::Allow,
         ..default_import_config(&beads_dir)
     };
 

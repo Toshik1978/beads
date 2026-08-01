@@ -29,7 +29,7 @@ use crate::common;
 
 use beads::storage::SqliteStorage;
 use beads::sync::{
-    ExportConfig, ImportConfig, PreflightCheckStatus, preflight_export, preflight_import,
+    ExportConfig, ImportConfig, PreflightCheckStatus, export_to_jsonl, preflight_import,
 };
 use common::cli::{BrWorkspace, run_br};
 use std::collections::HashMap;
@@ -440,12 +440,18 @@ fn preflight_import_rejects_path_traversal() {
 }
 
 // ============================================================================
-// EXPORT PREFLIGHT TESTS
+// EXPORT SAFETY TESTS
 // ============================================================================
+//
+// Export has no preflight pass: `export_to_jsonl` enforces these guards itself,
+// inline, on the path that actually runs. These two tests used to call a
+// separate `preflight_export` that re-derived the same two rules and was never
+// wired into any command — so they passed while asserting nothing about `br`.
+// They now drive the live export.
 
-/// Test: Export preflight rejects export to .git path
+/// Test: export refuses to write into .git even with external paths opted in
 #[test]
-fn preflight_export_rejects_git_paths() {
+fn export_rejects_git_paths() {
     let workspace = setup_workspace_with_issues();
     let beads_dir = workspace.root.join(".beads");
     let db_path = beads_dir.join("beads.db");
@@ -462,55 +468,48 @@ fn preflight_export_rejects_git_paths() {
         ..Default::default()
     };
 
-    let result = preflight_export(&storage, &git_output, &config).expect("preflight should run");
+    let err = export_to_jsonl(&storage, &git_output, &config)
+        .expect_err("CRITICAL SAFETY: export should ALWAYS reject .git paths!");
 
-    // ASSERTION: Preflight should fail
-    assert_eq!(
-        result.overall_status,
-        PreflightCheckStatus::Fail,
-        "CRITICAL SAFETY: Export preflight should ALWAYS reject .git paths!"
+    assert!(
+        !git_output.exists(),
+        "rejected export must not leave a file behind: {err}"
     );
-
-    eprintln!("✓ Export preflight correctly rejected .git path");
 }
 
-/// Test: Export preflight warns about empty database over non-empty JSONL
+/// Test: export refuses to overwrite a non-empty JSONL from an empty database
 #[test]
-fn preflight_export_warns_empty_db_over_nonempty_jsonl() {
+fn export_refuses_empty_db_over_nonempty_jsonl() {
     let workspace = setup_workspace_with_issues();
     let beads_dir = workspace.root.join(".beads");
     let jsonl_path = beads_dir.join("issues.jsonl");
     let db_path = beads_dir.join("beads_test_empty.db");
+
+    let before = fs::read(&jsonl_path).expect("seed jsonl exists");
+    assert!(!before.is_empty(), "fixture should seed a non-empty JSONL");
 
     // Create an empty database
     let storage = SqliteStorage::open(&db_path).expect("open empty db");
 
     let config = ExportConfig {
         beads_dir: Some(beads_dir),
-        force: false, // No force - should fail on empty db
+        force: false, // No force - should refuse on empty db
         ..Default::default()
     };
 
-    let result = preflight_export(&storage, &jsonl_path, &config).expect("preflight should run");
+    let err = export_to_jsonl(&storage, &jsonl_path, &config)
+        .expect_err("export should prevent exporting empty db over non-empty JSONL");
 
-    // ASSERTION: Preflight should fail (would lose data)
-    assert_eq!(
-        result.overall_status,
-        PreflightCheckStatus::Fail,
-        "Preflight should prevent exporting empty db over non-empty JSONL"
-    );
-
-    // ASSERTION: Should mention data loss
-    let failures = result.failures();
-    let safety_failure = failures
-        .iter()
-        .find(|c| c.name.contains("empty") || c.name.contains("safety") || c.name.contains("data"));
+    let message = err.to_string();
     assert!(
-        safety_failure.is_some(),
-        "Preflight should fail on empty database safety check"
+        message.contains("empty database") && message.contains("data loss"),
+        "error should name the data-loss guard, got: {message}"
     );
-
-    eprintln!("✓ Export preflight correctly prevented potential data loss");
+    assert_eq!(
+        fs::read(&jsonl_path).expect("read jsonl"),
+        before,
+        "refused export must leave the JSONL byte-identical"
+    );
 }
 
 // ============================================================================
@@ -534,11 +533,6 @@ fn preflight_results_are_actionable() {
     // ASSERTION: All checks should have names
     for check in &result.checks {
         assert!(!check.name.is_empty(), "Check should have a name");
-        assert!(
-            !check.description.is_empty(),
-            "Check {} should have a description",
-            check.name
-        );
         assert!(
             !check.message.is_empty(),
             "Check {} should have a message",

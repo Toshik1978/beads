@@ -48,17 +48,6 @@ const DEFAULT_JSONL_EXPORT_PARALLELISM: usize = 64;
 const IMPORT_EXPORT_HASH_BATCH_SIZE: usize = 512;
 const MAX_JSONL_TEMP_PATH_ATTEMPTS: u32 = 64;
 
-/// Acquire a blocking exclusive lock on `.beads/.write.lock`.
-///
-/// This serializes all mutating operations across processes, preventing
-/// concurrent-write deadlocks in the underlying SQLite engine. Uses a fast-path
-/// `try_lock()` for the uncontended case, then polls with a bounded timeout for
-/// contended locks. The lock is held until the returned `File` drops.
-#[allow(clippy::incompatible_msrv)]
-pub fn blocking_write_lock(beads_dir: &Path) -> Result<File> {
-    blocking_write_lock_with_timeout(beads_dir, None)
-}
-
 /// Acquire a bounded exclusive lock on `.beads/.write.lock`.
 ///
 /// `lock_timeout_ms` uses the same millisecond setting as `--lock-timeout`.
@@ -312,8 +301,6 @@ fn set_restrictive_jsonl_permissions(_path: &Path) {}
 pub struct ExportConfig {
     /// Force export even if database is empty and JSONL has issues.
     pub force: bool,
-    /// Whether this is an export to the default JSONL path (affects dirty flag clearing).
-    pub is_default_path: bool,
     /// Error handling policy for export.
     pub error_policy: ExportErrorPolicy,
     /// Retention period for tombstones in days (None = keep forever).
@@ -513,18 +500,14 @@ pub struct ExportResult {
     pub exported_ids: Vec<String>,
     /// IDs and timestamps of dirty issues that were cleared.
     pub exported_marked_at: Vec<(String, String)>,
-    /// IDs skipped due to expired tombstone retention (still clear dirty flags).
-    pub skipped_tombstone_ids: Vec<String>,
     /// SHA256 hash of the exported JSONL content.
     pub content_hash: String,
-    /// Output file path (None if stdout).
-    pub output_path: Option<String>,
     /// Per-issue content hashes (`issue_id`, `content_hash`) for incremental export tracking.
     pub issue_hashes: Vec<(String, String)>,
 }
 
 /// Configuration for JSONL import.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ImportConfig {
     /// Skip prefix validation when importing.
@@ -533,8 +516,6 @@ pub struct ImportConfig {
     pub rename_on_import: bool,
     /// Clear duplicate external refs instead of erroring.
     pub clear_duplicate_external_refs: bool,
-    /// How to handle orphaned issues during import.
-    pub orphan_mode: OrphanMode,
     /// Force upsert even if timestamps are equal or older.
     pub force_upsert: bool,
     /// The `.beads` directory path for path validation.
@@ -545,34 +526,6 @@ pub struct ImportConfig {
     pub allow_external_jsonl: bool,
     /// Show progress indicators for long-running operations.
     pub show_progress: bool,
-}
-
-impl Default for ImportConfig {
-    fn default() -> Self {
-        Self {
-            skip_prefix_validation: false,
-            rename_on_import: false,
-            clear_duplicate_external_refs: false,
-            orphan_mode: OrphanMode::Strict,
-            force_upsert: false,
-            beads_dir: None,
-            allow_external_jsonl: false,
-            show_progress: false,
-        }
-    }
-}
-
-/// Orphan handling behavior for import.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrphanMode {
-    /// Fail if any issue references a missing parent.
-    Strict,
-    /// Attempt to resurrect missing parents if found.
-    Resurrect,
-    /// Skip orphaned issues.
-    Skip,
-    /// Allow orphans (no parent validation).
-    Allow,
 }
 
 /// Result of a JSONL import.
@@ -626,8 +579,6 @@ pub enum PreflightCheckStatus {
 pub struct PreflightCheck {
     /// Name of the check (e.g., "`path_validation`").
     pub name: String,
-    /// Human-readable description of what was checked.
-    pub description: String,
     /// Status of the check.
     pub status: PreflightCheckStatus,
     /// Detailed message (error/warning reason, or success confirmation).
@@ -637,14 +588,9 @@ pub struct PreflightCheck {
 }
 
 impl PreflightCheck {
-    fn pass(
-        name: impl Into<String>,
-        description: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
+    fn pass(name: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            description: description.into(),
             status: PreflightCheckStatus::Pass,
             message: message.into(),
             remediation: None,
@@ -653,13 +599,11 @@ impl PreflightCheck {
 
     fn warn(
         name: impl Into<String>,
-        description: impl Into<String>,
         message: impl Into<String>,
         remediation: impl Into<String>,
     ) -> Self {
         Self {
             name: name.into(),
-            description: description.into(),
             status: PreflightCheckStatus::Warn,
             message: message.into(),
             remediation: Some(remediation.into()),
@@ -668,13 +612,11 @@ impl PreflightCheck {
 
     fn fail(
         name: impl Into<String>,
-        description: impl Into<String>,
         message: impl Into<String>,
         remediation: impl Into<String>,
     ) -> Self {
         Self {
             name: name.into(),
-            description: description.into(),
             status: PreflightCheckStatus::Fail,
             message: message.into(),
             remediation: Some(remediation.into()),
@@ -711,33 +653,12 @@ impl PreflightResult {
         self.checks.push(check);
     }
 
-    /// Returns true if all checks passed (no failures or warnings).
-    #[must_use]
-    pub fn is_ok(&self) -> bool {
-        self.overall_status == PreflightCheckStatus::Pass
-    }
-
-    /// Returns true if there are no failures (warnings are acceptable).
-    #[must_use]
-    pub fn has_no_failures(&self) -> bool {
-        self.overall_status != PreflightCheckStatus::Fail
-    }
-
     /// Get all failed checks.
     #[must_use]
     pub fn failures(&self) -> Vec<&PreflightCheck> {
         self.checks
             .iter()
             .filter(|c| c.status == PreflightCheckStatus::Fail)
-            .collect()
-    }
-
-    /// Get all warnings.
-    #[must_use]
-    pub fn warnings(&self) -> Vec<&PreflightCheck> {
-        self.checks
-            .iter()
-            .filter(|c| c.status == PreflightCheckStatus::Warn)
             .collect()
     }
 
@@ -837,231 +758,6 @@ pub(crate) fn validate_jsonl_issue_records(path: &Path) -> Result<JsonlIssueVali
     Ok(summary)
 }
 
-/// Run preflight checks for export operation.
-///
-/// This function is read-only and validates:
-/// - Beads directory exists
-/// - Output path is within allowlist (not in .git, within `beads_dir`)
-/// - Database is accessible
-/// - Export won't cause data loss (empty db over non-empty JSONL, stale db)
-///
-/// # Arguments
-///
-/// * `storage` - Database connection for validation
-/// * `output_path` - Target JSONL path
-/// * `config` - Export configuration
-///
-/// # Returns
-///
-/// `PreflightResult` with all check results. Use `.into_result()` to convert
-/// failures to an error.
-///
-/// # Errors
-///
-/// Returns an error if the preflight checks fail.
-#[allow(clippy::too_many_lines)]
-pub fn preflight_export(
-    storage: &SqliteStorage,
-    output_path: &Path,
-    config: &ExportConfig,
-) -> Result<PreflightResult> {
-    let mut result = PreflightResult::new();
-
-    tracing::debug!(
-        output_path = %output_path.display(),
-        beads_dir = ?config.beads_dir,
-        "Running export preflight checks"
-    );
-
-    // Check 1: Beads directory exists
-    if let Some(ref beads_dir) = config.beads_dir {
-        if beads_dir.is_dir() {
-            result.add(PreflightCheck::pass(
-                "beads_dir_exists",
-                "Beads directory exists",
-                format!("Found: {}", beads_dir.display()),
-            ));
-            tracing::debug!(beads_dir = %beads_dir.display(), "Beads directory check: PASS");
-        } else {
-            result.add(PreflightCheck::fail(
-                "beads_dir_exists",
-                "Beads directory exists",
-                format!("Not found: {}", beads_dir.display()),
-                "Run 'br init' to initialize the beads directory.",
-            ));
-            tracing::debug!(beads_dir = %beads_dir.display(), "Beads directory check: FAIL");
-        }
-    }
-
-    // Check 2: Output path validation (PC-1, PC-2, PC-3, NGI-3)
-    if let Some(ref beads_dir) = config.beads_dir {
-        // Determine if the path is external (outside .beads/)
-        let canonical_beads = dunce::canonicalize(beads_dir).unwrap_or_else(|_| beads_dir.clone());
-        let is_external =
-            !output_path.starts_with(beads_dir) && !output_path.starts_with(&canonical_beads);
-
-        match validate_sync_path_with_external(output_path, beads_dir, config.allow_external_jsonl)
-        {
-            Ok(()) => {
-                let msg = format!(
-                    "Path {} validated (external={})",
-                    output_path.display(),
-                    is_external
-                );
-                if is_external && config.allow_external_jsonl {
-                    result.add(PreflightCheck::warn(
-                        "path_validation",
-                        "Output path is within allowlist",
-                        msg,
-                        "Consider moving JSONL to .beads/ directory for better safety.",
-                    ));
-                } else {
-                    result.add(PreflightCheck::pass(
-                        "path_validation",
-                        "Output path is within allowlist",
-                        msg,
-                    ));
-                }
-                tracing::debug!(path = %output_path.display(), is_external = is_external, "Path validation: PASS");
-            }
-            Err(e) => {
-                result.add(PreflightCheck::fail(
-                    "path_validation",
-                    "Output path is within allowlist",
-                    format!("Path rejected: {e}"),
-                    "Use a path within .beads/ directory or set --allow-external-jsonl.",
-                ));
-                tracing::debug!(path = %output_path.display(), error = %e, "Path validation: FAIL");
-            }
-        }
-    }
-
-    // Check 3: Database is accessible
-    match storage.count_issues() {
-        Ok(count) => {
-            result.add(PreflightCheck::pass(
-                "database_accessible",
-                "Database is accessible",
-                format!("Database contains {count} issue(s)"),
-            ));
-            tracing::debug!(issue_count = count, "Database access check: PASS");
-
-            // Check 4: Empty database safety (would overwrite non-empty JSONL)
-            if count == 0 && !config.force && output_path.exists() {
-                match count_issues_in_jsonl(output_path) {
-                    Ok(jsonl_count) if jsonl_count > 0 => {
-                        result.add(PreflightCheck::fail(
-                            "empty_database_safety",
-                            "Export won't cause data loss",
-                            format!(
-                                "Database has 0 issues, JSONL has {jsonl_count} issues. Export would cause data loss.",
-                            ),
-                            "Import the JSONL first, or use --force to override.",
-                        ));
-                        tracing::debug!(
-                            db_count = 0,
-                            jsonl_count = jsonl_count,
-                            "Empty database safety check: FAIL"
-                        );
-                    }
-                    Ok(_) => {
-                        result.add(PreflightCheck::pass(
-                            "empty_database_safety",
-                            "Export won't cause data loss",
-                            "Database is empty, no existing JSONL to overwrite.",
-                        ));
-                    }
-                    Err(e) => {
-                        result.add(PreflightCheck::warn(
-                            "empty_database_safety",
-                            "Export won't cause data loss",
-                            format!("Could not read existing JSONL: {e}"),
-                            "Verify JSONL file is readable.",
-                        ));
-                    }
-                }
-            } else if count == 0 && !config.force {
-                result.add(PreflightCheck::pass(
-                    "empty_database_safety",
-                    "Export won't cause data loss",
-                    "Database is empty, no existing JSONL to overwrite.",
-                ));
-            }
-
-            // Check 5: Stale database safety (would lose issues from JSONL)
-            if count > 0 && !config.force && output_path.exists() {
-                match get_issue_ids_from_jsonl(output_path) {
-                    Ok(jsonl_ids) if !jsonl_ids.is_empty() => {
-                        let db_ids: HashSet<String> = storage.get_all_ids()?.into_iter().collect();
-                        let missing: Vec<_> = jsonl_ids.difference(&db_ids).take(5).collect();
-                        if missing.is_empty() {
-                            result.add(PreflightCheck::pass(
-                                "stale_database_safety",
-                                "Export won't lose JSONL issues",
-                                "All JSONL issues are present in database.",
-                            ));
-                        } else {
-                            let total_missing = jsonl_ids.difference(&db_ids).count();
-                            result.add(PreflightCheck::fail(
-                                "stale_database_safety",
-                                "Export won't lose JSONL issues",
-                                format!(
-                                    "Database is missing {total_missing} issue(s) from JSONL: {}{}",
-                                    missing
-                                        .iter()
-                                        .map(|s| s.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", "),
-                                    if total_missing > 5 { " ..." } else { "" }
-                                ),
-                                "Import the JSONL first to sync, or use --force to override.",
-                            ));
-                            tracing::debug!(
-                                missing_count = total_missing,
-                                sample = ?missing,
-                                "Stale database safety check: FAIL"
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        result.add(PreflightCheck::pass(
-                            "stale_database_safety",
-                            "Export won't lose JSONL issues",
-                            "JSONL is empty or doesn't exist.",
-                        ));
-                    }
-                    Err(e) => {
-                        result.add(PreflightCheck::warn(
-                            "stale_database_safety",
-                            "Export won't lose JSONL issues",
-                            format!("Could not read existing JSONL: {e}"),
-                            "Verify JSONL file is readable.",
-                        ));
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            result.add(PreflightCheck::fail(
-                "database_accessible",
-                "Database is accessible",
-                format!("Database error: {e}"),
-                "Check database file permissions and integrity.",
-            ));
-            tracing::debug!(error = %e, "Database access check: FAIL");
-        }
-    }
-
-    tracing::debug!(
-        overall_status = ?result.overall_status,
-        check_count = result.checks.len(),
-        failure_count = result.failures().len(),
-        "Export preflight complete"
-    );
-
-    Ok(result)
-}
-
 /// Run preflight checks for import operation.
 ///
 /// This function is read-only and validates:
@@ -1105,14 +801,12 @@ pub fn preflight_import(
         if beads_dir.is_dir() {
             result.add(PreflightCheck::pass(
                 "beads_dir_exists",
-                "Beads directory exists",
                 format!("Found: {}", beads_dir.display()),
             ));
             tracing::debug!(beads_dir = %beads_dir.display(), "Beads directory check: PASS");
         } else {
             result.add(PreflightCheck::fail(
                 "beads_dir_exists",
-                "Beads directory exists",
                 format!("Not found: {}", beads_dir.display()),
                 "Run 'br init' to initialize the beads directory.",
             ));
@@ -1137,23 +831,17 @@ pub fn preflight_import(
                 if is_external && config.allow_external_jsonl {
                     result.add(PreflightCheck::warn(
                         "path_validation",
-                        "Input path is within allowlist",
                         msg,
                         "Consider using JSONL from .beads/ directory for better safety.",
                     ));
                 } else {
-                    result.add(PreflightCheck::pass(
-                        "path_validation",
-                        "Input path is within allowlist",
-                        msg,
-                    ));
+                    result.add(PreflightCheck::pass("path_validation", msg));
                 }
                 tracing::debug!(path = %input_path.display(), is_external = is_external, "Path validation: PASS");
             }
             Err(e) => {
                 result.add(PreflightCheck::fail(
                     "path_validation",
-                    "Input path is within allowlist",
                     format!("Path rejected: {e}"),
                     "Use a path within .beads/ directory or set --allow-external-jsonl.",
                 ));
@@ -1169,7 +857,6 @@ pub fn preflight_import(
             Ok(_) => {
                 result.add(PreflightCheck::pass(
                     "file_readable",
-                    "Input file exists and is readable",
                     format!("File accessible: {}", input_path.display()),
                 ));
                 tracing::debug!(path = %input_path.display(), "File readable check: PASS");
@@ -1177,7 +864,6 @@ pub fn preflight_import(
             Err(e) => {
                 result.add(PreflightCheck::fail(
                     "file_readable",
-                    "Input file exists and is readable",
                     format!("Cannot read file: {e}"),
                     "Check file permissions.",
                 ));
@@ -1187,7 +873,6 @@ pub fn preflight_import(
     } else {
         result.add(PreflightCheck::fail(
             "file_readable",
-            "Input file exists and is readable",
             format!("File not found: {}", input_path.display()),
             "Verify the path is correct or run export first.",
         ));
@@ -1201,7 +886,6 @@ pub fn preflight_import(
         Ok(markers) if markers.is_empty() => {
             result.add(PreflightCheck::pass(
                 "no_conflict_markers",
-                "No merge conflict markers",
                 "File is clean of conflict markers.",
             ));
             tracing::debug!(path = %input_path.display(), "Conflict marker check: PASS");
@@ -1223,7 +907,6 @@ pub fn preflight_import(
                 .collect();
             result.add(PreflightCheck::fail(
                 "no_conflict_markers",
-                "No merge conflict markers",
                 format!(
                     "Found {} conflict marker(s): {}{}",
                     markers.len(),
@@ -1241,7 +924,6 @@ pub fn preflight_import(
         Err(e) => {
             result.add(PreflightCheck::warn(
                 "no_conflict_markers",
-                "No merge conflict markers",
                 format!("Could not scan for markers: {e}"),
                 "Verify file is readable and not corrupted.",
             ));
@@ -1254,7 +936,6 @@ pub fn preflight_import(
         Ok(summary) if summary.invalid_count == 0 => {
             result.add(PreflightCheck::pass(
                 "json_valid",
-                "All JSONL lines are valid issue records",
                 format!("Validated {} issue record(s).", summary.record_count),
             ));
             tracing::debug!(path = %input_path.display(), record_count = summary.record_count, "JSONL issue validation check: PASS");
@@ -1263,7 +944,6 @@ pub fn preflight_import(
             let preview = summary.preview_messages();
             result.add(PreflightCheck::fail(
                 "json_valid",
-                "All JSONL lines are valid issue records",
                 format!(
                     "Found {} invalid issue record(s): {}{}",
                     summary.invalid_count,
@@ -1285,7 +965,6 @@ pub fn preflight_import(
         Err(err) => {
             result.add(PreflightCheck::warn(
                 "json_valid",
-                "All JSONL lines are valid issue records",
                 format!("Could not open file for JSONL validation: {err}"),
                 "Verify file is readable.",
             ));
@@ -1328,7 +1007,6 @@ pub fn preflight_import(
                 if mismatched_ids.is_empty() {
                     result.add(PreflightCheck::pass(
                         "prefix_match",
-                        "Issue IDs match expected prefix",
                         format!("All issue IDs start with '{prefix}'."),
                     ));
                     tracing::debug!(prefix = prefix, "Prefix match check: PASS");
@@ -1336,7 +1014,6 @@ pub fn preflight_import(
                     let preview: Vec<String> = mismatched_ids.iter().take(5).cloned().collect();
                     result.add(PreflightCheck::fail(
                         "prefix_match",
-                        "Issue IDs match expected prefix",
                         format!(
                             "Expected prefix '{}', found {} mismatched ID(s): {}{}",
                             prefix,
@@ -1356,7 +1033,6 @@ pub fn preflight_import(
             Err(e) => {
                 result.add(PreflightCheck::warn(
                     "prefix_match",
-                    "Issue IDs match expected prefix",
                     format!("Could not open file for prefix validation: {e}"),
                     "Verify file is readable.",
                 ));
@@ -1519,15 +1195,6 @@ pub fn analyze_jsonl(path: &Path) -> Result<(usize, HashSet<String>)> {
     }
 
     Ok((count, ids))
-}
-
-/// Count issues in an existing JSONL file.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or contains invalid JSON.
-pub fn count_issues_in_jsonl(path: &Path) -> Result<usize> {
-    Ok(analyze_jsonl(path)?.0)
 }
 
 fn verify_exported_jsonl_integrity(path: &Path, expected_ids: &[String]) -> Result<()> {
@@ -2039,6 +1706,144 @@ fn increment_progress(progress: Option<&ProgressBar>) {
     }
 }
 
+/// Everything an export run accumulates besides the bytes it writes.
+struct ExportStream {
+    exported_ids: Vec<String>,
+    skipped_tombstone_ids: Vec<String>,
+    issue_hashes: Vec<(String, String)>,
+    hasher: Sha256,
+    buffer: Vec<u8>,
+}
+
+impl ExportStream {
+    fn with_capacity(issue_count: usize) -> Self {
+        Self {
+            exported_ids: Vec::with_capacity(issue_count),
+            skipped_tombstone_ids: Vec::new(), // Usually small
+            issue_hashes: Vec::with_capacity(issue_count),
+            hasher: Sha256::new(),
+            buffer: Vec::with_capacity(1024),
+        }
+    }
+
+    /// Consume the accumulators: exported ids, skipped tombstones, per-issue
+    /// hashes, and the hash over every byte written.
+    fn finish(self) -> (Vec<String>, Vec<String>, Vec<(String, String)>, String) {
+        (
+            self.exported_ids,
+            self.skipped_tombstone_ids,
+            self.issue_hashes,
+            hex_encode(&self.hasher.finalize()),
+        )
+    }
+
+    fn push_issue<W: Write>(
+        &mut self,
+        writer: &mut W,
+        issue: &Issue,
+        retention_days: Option<u64>,
+        ctx: &mut ExportContext,
+        report: &mut ExportReport,
+    ) -> Result<()> {
+        if issue.is_expired_tombstone(retention_days) {
+            self.skipped_tombstone_ids.push(issue.id.clone());
+            return Ok(());
+        }
+
+        if !write_export_issue_jsonl(writer, issue, &mut self.hasher, &mut self.buffer, ctx)? {
+            return Ok(());
+        }
+
+        self.exported_ids.push(issue.id.clone());
+        self.issue_hashes.push((
+            issue.id.clone(),
+            issue
+                .content_hash
+                .clone()
+                .unwrap_or_else(|| crate::util::content_hash(issue)),
+        ));
+        report.issues_exported += 1;
+        report.dependencies_exported += issue.dependencies.len();
+        report.labels_exported += issue.labels.len();
+        report.comments_exported += issue.comments.len();
+        Ok(())
+    }
+}
+
+/// How one export run should traverse the issue set.
+struct ExportStreamParams<'a> {
+    export_ids: &'a [String],
+    retention_days: Option<u64>,
+    max_parallelism: usize,
+    progress: Option<&'a ProgressBar>,
+}
+
+fn write_export_issue_group<W: Write>(
+    writer: &mut W,
+    issues: &[Issue],
+    params: &ExportStreamParams<'_>,
+    stream: &mut ExportStream,
+    ctx: &mut ExportContext,
+    report: &mut ExportReport,
+) -> Result<()> {
+    if should_prepare_export_issues_parallel(issues.len(), params.max_parallelism) {
+        let prepared = prepare_export_issues_jsonl_parallel(
+            issues,
+            params.retention_days,
+            params.max_parallelism,
+        )?;
+        write_prepared_export_entries(
+            writer,
+            prepared,
+            &mut stream.hasher,
+            ctx,
+            report,
+            &mut stream.exported_ids,
+            &mut stream.skipped_tombstone_ids,
+            &mut stream.issue_hashes,
+            params.progress,
+        )?;
+    } else {
+        for issue in issues {
+            stream.push_issue(writer, issue, params.retention_days, ctx, report)?;
+            increment_progress(params.progress);
+        }
+    }
+
+    Ok(())
+}
+
+/// Serialise every exportable issue to `writer`, in ID order.
+///
+/// Both export entry points run this loop. `export_to_jsonl_with_policy`
+/// stages the bytes in a temp file and renames it into place;
+/// `export_to_writer_with_policy` hands the caller an arbitrary sink, which is
+/// how the `ExportErrorPolicy` branches are tested against a writer that fails
+/// on a chosen line. They used to be two loops with the writer one lacking
+/// tombstone expiry, progress and parallel preparation — so the policy tests
+/// covered the copy that never shipped.
+fn stream_export_issues<W: Write>(
+    storage: &SqliteStorage,
+    writer: &mut W,
+    params: &ExportStreamParams<'_>,
+    ctx: &mut ExportContext,
+    report: &mut ExportReport,
+) -> Result<ExportStream> {
+    let mut stream = ExportStream::with_capacity(params.export_ids.len());
+
+    if params.export_ids.len() <= EXPORT_FULL_SCAN_ISSUE_THRESHOLD {
+        let issues = hydrate_export_issues_full_scan(storage, ctx)?;
+        write_export_issue_group(writer, &issues, params, &mut stream, ctx, report)?;
+    } else {
+        for id_batch in params.export_ids.chunks(EXPORT_ISSUE_BATCH_SIZE) {
+            let issues = hydrate_export_issue_batch(storage, id_batch, ctx)?;
+            write_export_issue_group(writer, &issues, params, &mut stream, ctx, report)?;
+        }
+    }
+
+    Ok(stream)
+}
+
 /// Export issues from `SQLite` to JSONL format.
 ///
 /// This implements the classic beads export semantics:
@@ -2182,125 +1987,18 @@ pub fn export_to_jsonl_with_policy(
     let mut writer = BufWriter::new(temp_file);
 
     // Write JSONL and compute hash
-    let mut hasher = Sha256::new();
-    let mut exported_ids = Vec::with_capacity(export_ids.len());
-    let mut skipped_tombstone_ids = Vec::new(); // Usually small
-    let mut issue_hashes = Vec::with_capacity(export_ids.len());
-    let mut buffer = Vec::with_capacity(1024);
-    let max_parallelism = effective_export_parallelism(config);
-
-    if export_ids.len() <= EXPORT_FULL_SCAN_ISSUE_THRESHOLD {
-        let issues = hydrate_export_issues_full_scan(storage, &mut ctx)?;
-        if should_prepare_export_issues_parallel(issues.len(), max_parallelism) {
-            let prepared = prepare_export_issues_jsonl_parallel(
-                &issues,
-                config.retention_days,
-                max_parallelism,
-            )?;
-            write_prepared_export_entries(
-                &mut writer,
-                prepared,
-                &mut hasher,
-                &mut ctx,
-                &mut report,
-                &mut exported_ids,
-                &mut skipped_tombstone_ids,
-                &mut issue_hashes,
-                Some(&progress),
-            )?;
-        } else {
-            for issue in &issues {
-                // Skip expired tombstones
-                if issue.is_expired_tombstone(config.retention_days) {
-                    skipped_tombstone_ids.push(issue.id.clone());
-                    progress.inc(1);
-                    continue;
-                }
-
-                if !write_export_issue_jsonl(
-                    &mut writer,
-                    issue,
-                    &mut hasher,
-                    &mut buffer,
-                    &mut ctx,
-                )? {
-                    progress.inc(1);
-                    continue;
-                }
-
-                exported_ids.push(issue.id.clone());
-                issue_hashes.push((
-                    issue.id.clone(),
-                    issue
-                        .content_hash
-                        .clone()
-                        .unwrap_or_else(|| crate::util::content_hash(issue)),
-                ));
-                report.issues_exported += 1;
-                report.dependencies_exported += issue.dependencies.len();
-                report.labels_exported += issue.labels.len();
-                report.comments_exported += issue.comments.len();
-                progress.inc(1);
-            }
-        }
-    } else {
-        for id_batch in export_ids.chunks(EXPORT_ISSUE_BATCH_SIZE) {
-            let issues = hydrate_export_issue_batch(storage, id_batch, &mut ctx)?;
-            if should_prepare_export_issues_parallel(issues.len(), max_parallelism) {
-                let prepared = prepare_export_issues_jsonl_parallel(
-                    &issues,
-                    config.retention_days,
-                    max_parallelism,
-                )?;
-                write_prepared_export_entries(
-                    &mut writer,
-                    prepared,
-                    &mut hasher,
-                    &mut ctx,
-                    &mut report,
-                    &mut exported_ids,
-                    &mut skipped_tombstone_ids,
-                    &mut issue_hashes,
-                    Some(&progress),
-                )?;
-            } else {
-                for issue in &issues {
-                    // Skip expired tombstones
-                    if issue.is_expired_tombstone(config.retention_days) {
-                        skipped_tombstone_ids.push(issue.id.clone());
-                        progress.inc(1);
-                        continue;
-                    }
-
-                    if !write_export_issue_jsonl(
-                        &mut writer,
-                        issue,
-                        &mut hasher,
-                        &mut buffer,
-                        &mut ctx,
-                    )? {
-                        progress.inc(1);
-                        continue;
-                    }
-
-                    exported_ids.push(issue.id.clone());
-                    issue_hashes.push((
-                        issue.id.clone(),
-                        issue
-                            .content_hash
-                            .clone()
-                            .unwrap_or_else(|| crate::util::content_hash(issue)),
-                    ));
-                    report.issues_exported += 1;
-                    report.dependencies_exported += issue.dependencies.len();
-                    report.labels_exported += issue.labels.len();
-                    report.comments_exported += issue.comments.len();
-                    progress.inc(1);
-                }
-            }
-        }
-    }
-
+    let stream = stream_export_issues(
+        storage,
+        &mut writer,
+        &ExportStreamParams {
+            export_ids: &export_ids,
+            retention_days: config.retention_days,
+            max_parallelism: effective_export_parallelism(config),
+            progress: Some(&progress),
+        },
+        &mut ctx,
+        &mut report,
+    )?;
     progress.finish_with_message("Export complete");
 
     // Flush and sync
@@ -2310,8 +2008,7 @@ pub fn export_to_jsonl_with_policy(
         .map_err(|e| BeadsError::Io(e.into_error()))?
         .sync_all()?;
 
-    // Compute final hash
-    let content_hash = hex_encode(&hasher.finalize());
+    let (exported_ids, skipped_tombstone_ids, issue_hashes, content_hash) = stream.finish();
 
     // Verify staged export integrity before replacing the live JSONL.
     verify_exported_jsonl_integrity(&temp_path, &exported_ids)?;
@@ -2343,9 +2040,7 @@ pub fn export_to_jsonl_with_policy(
             &skipped_tombstone_ids,
         ),
         exported_ids,
-        skipped_tombstone_ids,
         content_hash,
-        output_path: Some(output_path.to_string_lossy().to_string()),
         issue_hashes,
     };
 
@@ -2354,23 +2049,11 @@ pub fn export_to_jsonl_with_policy(
     Ok((result, report))
 }
 
-/// Export issues to a writer (e.g., stdout).
-///
-/// # Errors
-///
-/// Returns an error if serialization or writing fails.
-pub fn export_to_writer<W: Write>(storage: &SqliteStorage, writer: &mut W) -> Result<ExportResult> {
-    let (result, _report) =
-        export_to_writer_with_policy(storage, writer, ExportErrorPolicy::Strict)?;
-    Ok(result)
-}
-
 /// Export issues to a writer with configurable error policy.
 ///
 /// # Errors
 ///
 /// Returns an error if serialization or writing fails under a strict policy.
-#[allow(clippy::too_many_lines)]
 pub fn export_to_writer_with_policy<W: Write>(
     storage: &SqliteStorage,
     writer: &mut W,
@@ -2381,65 +2064,29 @@ pub fn export_to_writer_with_policy<W: Write>(
     let mut ctx = ExportContext::new(policy);
     let mut report = ExportReport::new(policy);
 
-    let mut hasher = Sha256::new();
-    let mut exported_ids = Vec::with_capacity(export_ids.len());
-    let skipped_tombstone_ids = Vec::new();
-    let mut issue_hashes = Vec::with_capacity(export_ids.len());
-    let mut buffer = Vec::with_capacity(1024);
+    // No retention cutoff and no parallel preparation: a caller streaming to an
+    // arbitrary sink gets every issue, in order, with nothing to report progress
+    // to.
+    let stream = stream_export_issues(
+        storage,
+        writer,
+        &ExportStreamParams {
+            export_ids: &export_ids,
+            retention_days: None,
+            max_parallelism: 1,
+            progress: None,
+        },
+        &mut ctx,
+        &mut report,
+    )?;
 
-    if export_ids.len() <= EXPORT_FULL_SCAN_ISSUE_THRESHOLD {
-        let issues = hydrate_export_issues_full_scan(storage, &mut ctx)?;
-        for issue in &issues {
-            if !write_export_issue_jsonl(writer, issue, &mut hasher, &mut buffer, &mut ctx)? {
-                continue;
-            }
-
-            exported_ids.push(issue.id.clone());
-            issue_hashes.push((
-                issue.id.clone(),
-                issue
-                    .content_hash
-                    .clone()
-                    .unwrap_or_else(|| crate::util::content_hash(issue)),
-            ));
-            report.issues_exported += 1;
-            report.dependencies_exported += issue.dependencies.len();
-            report.labels_exported += issue.labels.len();
-            report.comments_exported += issue.comments.len();
-        }
-    } else {
-        for id_batch in export_ids.chunks(EXPORT_ISSUE_BATCH_SIZE) {
-            let issues = hydrate_export_issue_batch(storage, id_batch, &mut ctx)?;
-            for issue in &issues {
-                if !write_export_issue_jsonl(writer, issue, &mut hasher, &mut buffer, &mut ctx)? {
-                    continue;
-                }
-
-                exported_ids.push(issue.id.clone());
-                issue_hashes.push((
-                    issue.id.clone(),
-                    issue
-                        .content_hash
-                        .clone()
-                        .unwrap_or_else(|| crate::util::content_hash(issue)),
-                ));
-                report.issues_exported += 1;
-                report.dependencies_exported += issue.dependencies.len();
-                report.labels_exported += issue.labels.len();
-                report.comments_exported += issue.comments.len();
-            }
-        }
-    }
-
-    let content_hash = hex_encode(&hasher.finalize());
+    let (exported_ids, _skipped_tombstone_ids, issue_hashes, content_hash) = stream.finish();
 
     let result = ExportResult {
         exported_count: exported_ids.len(),
         exported_ids,
         exported_marked_at: Vec::new(),
-        skipped_tombstone_ids,
         content_hash,
-        output_path: None,
         issue_hashes,
     };
 
@@ -2749,15 +2396,6 @@ fn refresh_jsonl_witness_best_effort(
     }
 }
 
-/// Result of an auto-import attempt.
-#[derive(Debug, Default)]
-pub struct AutoImportResult {
-    /// Whether an import was attempted.
-    pub attempted: bool,
-    /// Number of issues imported (created or updated).
-    pub imported_count: usize,
-}
-
 /// Auto-import JSONL if it is newer than the DB.
 ///
 /// Honors `--no-auto-import` and `--allow-stale` behavior.
@@ -2775,14 +2413,14 @@ pub fn auto_import_if_stale(
     allow_external_jsonl: bool,
     allow_stale: bool,
     no_auto_import: bool,
-) -> Result<AutoImportResult> {
+) -> Result<()> {
     if allow_stale || no_auto_import {
         tracing::debug!(
             allow_stale,
             no_auto_import,
             "Skipping auto-import staleness probe due to startup override"
         );
-        return Ok(AutoImportResult::default());
+        return Ok(());
     }
 
     if jsonl_path.exists() {
@@ -2790,7 +2428,7 @@ pub fn auto_import_if_stale(
     }
     let staleness = compute_staleness_refreshing_witnesses(storage, jsonl_path)?;
     if !staleness.jsonl_newer {
-        return Ok(AutoImportResult::default());
+        return Ok(());
     }
 
     // When both JSONL and DB have changed, skip the auto-import with a
@@ -2809,7 +2447,7 @@ pub fn auto_import_if_stale(
              Run `br sync --merge` to reconcile.",
             staleness.dirty_count,
         );
-        return Ok(AutoImportResult::default());
+        return Ok(());
     }
 
     let import_config = ImportConfig {
@@ -2830,10 +2468,7 @@ pub fn auto_import_if_stale(
         "Auto-import completed"
     );
 
-    Ok(AutoImportResult {
-        attempted: true,
-        imported_count: result.imported_count,
-    })
+    Ok(())
 }
 
 /// Finalize an export by updating metadata, clearing dirty flags, and recording export hashes.
@@ -3476,7 +3111,6 @@ fn try_existing_line_auto_flush(
             Ok(Some(AutoFlushResult {
                 flushed: true,
                 exported_count,
-                content_hash,
             }))
         }
     }
@@ -3556,7 +3190,6 @@ fn try_incremental_auto_flush(
     Ok(Some(AutoFlushResult {
         flushed: true,
         exported_count: lines_by_id.len(),
-        content_hash,
     }))
 }
 
@@ -3567,8 +3200,6 @@ pub struct AutoFlushResult {
     pub flushed: bool,
     /// Number of issues exported (0 if not flushed).
     pub exported_count: usize,
-    /// Content hash of the exported JSONL (empty if not flushed).
-    pub content_hash: String,
 }
 
 /// Perform an automatic flush of dirty issues to JSONL.
@@ -3685,7 +3316,6 @@ pub fn auto_flush(
     Ok(AutoFlushResult {
         flushed: true,
         exported_count: export_result.exported_count,
-        content_hash: export_result.content_hash,
     })
 }
 
@@ -3758,10 +3388,6 @@ pub enum CollisionResult {
     Match {
         /// The existing issue ID.
         existing_id: String,
-        /// How the match was determined.
-        match_type: MatchType,
-        /// Which phase found the match (1-3).
-        phase: u8,
     },
 }
 
@@ -3790,8 +3416,6 @@ fn detect_collision(
     {
         return CollisionResult::Match {
             existing_id: existing_id.clone(),
-            match_type: MatchType::ExternalRef,
-            phase: 1,
         };
     }
 
@@ -3799,8 +3423,6 @@ fn detect_collision(
     if meta_by_id.contains_key(&incoming.id) {
         return CollisionResult::Match {
             existing_id: incoming.id.clone(),
-            match_type: MatchType::Id,
-            phase: 2,
         };
     }
 
@@ -3808,8 +3430,6 @@ fn detect_collision(
     if let Some(existing_id) = id_by_hash.get(computed_hash) {
         return CollisionResult::Match {
             existing_id: existing_id.clone(),
-            match_type: MatchType::ContentHash,
-            phase: 3,
         };
     }
 
@@ -4796,12 +4416,6 @@ impl MergeReport {
     pub fn has_conflicts(&self) -> bool {
         !self.conflicts.is_empty()
     }
-
-    /// Total number of actions taken.
-    #[must_use]
-    pub fn total_actions(&self) -> usize {
-        self.kept.len() + self.deleted.len()
-    }
 }
 
 /// Strategy for resolving conflicts during merge.
@@ -5602,7 +5216,7 @@ mod tests {
         let beads_dir = temp_dir.path().join(".beads");
         fs::create_dir_all(beads_dir.join(".write.lock")).unwrap();
 
-        let err = blocking_write_lock(&beads_dir).unwrap_err();
+        let err = blocking_write_lock_with_timeout(&beads_dir, None).unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -6144,13 +5758,13 @@ mod tests {
     }
 
     #[test]
-    fn test_count_issues_in_jsonl() {
+    fn test_analyze_jsonl_counts_issues() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("test.jsonl");
 
         // Empty file
         fs::write(&path, "").unwrap();
-        assert_eq!(count_issues_in_jsonl(&path).unwrap(), 0);
+        assert_eq!(analyze_jsonl(&path).unwrap().0, 0);
 
         // Two issues
         let issue1 = make_test_issue("bd-001", "One");
@@ -6161,7 +5775,7 @@ mod tests {
             serde_json::to_string(&issue2).unwrap()
         );
         fs::write(&path, content).unwrap();
-        assert_eq!(count_issues_in_jsonl(&path).unwrap(), 2);
+        assert_eq!(analyze_jsonl(&path).unwrap().0, 2);
     }
 
     #[test]
@@ -6387,7 +6001,7 @@ mod tests {
             .set_metadata(METADATA_JSONL_CONTENT_HASH, "stale-hash")
             .unwrap();
 
-        let result = auto_import_if_stale(
+        auto_import_if_stale(
             &mut storage,
             &beads_dir,
             &jsonl_path,
@@ -6397,8 +6011,11 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(!result.attempted);
-        assert_eq!(result.imported_count, 0);
+
+        // The override must short-circuit before the staleness probe: the JSONL
+        // here is not valid UTF-8, so any import attempt would have errored out
+        // of the `unwrap` above rather than reaching this assertion.
+        assert_eq!(storage.count_issues().unwrap(), 0);
     }
 
     #[test]
@@ -6414,7 +6031,7 @@ mod tests {
             .set_metadata(METADATA_JSONL_CONTENT_HASH, "stale-hash")
             .unwrap();
 
-        let result = auto_import_if_stale(
+        auto_import_if_stale(
             &mut storage,
             &beads_dir,
             &jsonl_path,
@@ -6424,8 +6041,11 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(!result.attempted);
-        assert_eq!(result.imported_count, 0);
+
+        // The override must short-circuit before the staleness probe: the JSONL
+        // here is not valid UTF-8, so any import attempt would have errored out
+        // of the `unwrap` above rather than reaching this assertion.
+        assert_eq!(storage.count_issues().unwrap(), 0);
     }
 
     #[test]
@@ -7062,15 +6682,11 @@ mod tests {
             matches!(collision, CollisionResult::Match { .. }),
             "expected match"
         );
-        if let CollisionResult::Match {
-            existing_id,
-            match_type,
-            phase,
-        } = collision
-        {
+        // `bd-ext` is reachable only through the external-ref phase here: a
+        // content-hash match would have returned `bd-hash`, and no issue in the
+        // database carries the incoming ID.
+        if let CollisionResult::Match { existing_id } = collision {
             assert_eq!(existing_id, "bd-ext");
-            assert_eq!(match_type, MatchType::ExternalRef);
-            assert_eq!(phase, 1);
         }
     }
 
@@ -7154,11 +6770,11 @@ mod tests {
     }
 
     #[test]
-    fn test_count_issues_missing_file_returns_zero() {
+    fn test_analyze_jsonl_missing_file_counts_zero() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("nonexistent.jsonl");
 
-        let count = count_issues_in_jsonl(&path).unwrap();
+        let count = analyze_jsonl(&path).unwrap().0;
         assert_eq!(count, 0);
     }
 
@@ -7516,15 +7132,11 @@ mod tests {
             matches!(collision, CollisionResult::Match { .. }),
             "expected match"
         );
-        if let CollisionResult::Match {
-            existing_id,
-            match_type,
-            phase,
-        } = collision
-        {
+        // `bd-ext` is reachable only through the external-ref phase here: a
+        // content-hash match would have returned `bd-hash`, and no issue in the
+        // database carries the incoming ID.
+        if let CollisionResult::Match { existing_id } = collision {
             assert_eq!(existing_id, "bd-ext");
-            assert_eq!(match_type, MatchType::ExternalRef);
-            assert_eq!(phase, 1);
         }
     }
 
@@ -7555,15 +7167,8 @@ mod tests {
             matches!(collision, CollisionResult::Match { .. }),
             "expected match"
         );
-        if let CollisionResult::Match {
-            existing_id,
-            match_type,
-            phase,
-        } = collision
-        {
+        if let CollisionResult::Match { existing_id } = collision {
             assert_eq!(existing_id, "bd-same");
-            assert_eq!(match_type, MatchType::Id);
-            assert_eq!(phase, 2);
         }
     }
 
@@ -7595,15 +7200,8 @@ mod tests {
             matches!(collision, CollisionResult::Match { .. }),
             "expected match"
         );
-        if let CollisionResult::Match {
-            existing_id,
-            match_type,
-            phase,
-        } = collision
-        {
+        if let CollisionResult::Match { existing_id } = collision {
             assert_eq!(existing_id, "bd-first");
-            assert_eq!(match_type, MatchType::ContentHash);
-            assert_eq!(phase, 3);
         }
     }
 
@@ -7669,15 +7267,8 @@ mod tests {
             matches!(collision, CollisionResult::Match { .. }),
             "expected match"
         );
-        if let CollisionResult::Match {
-            existing_id,
-            match_type,
-            phase,
-        } = collision
-        {
+        if let CollisionResult::Match { existing_id } = collision {
             assert_eq!(existing_id, "bd-1");
-            assert_eq!(match_type, MatchType::Id);
-            assert_eq!(phase, 2);
         }
     }
 
@@ -7691,8 +7282,6 @@ mod tests {
         let incoming = make_issue_at("bd-1", "Incoming", fixed_time(200));
         let collision = CollisionResult::Match {
             existing_id: "bd-1".to_string(),
-            match_type: MatchType::Id,
-            phase: 3,
         };
         let (_, _, meta_by_id) = build_collision_maps(&storage);
         let action = determine_action(&collision, &incoming, &meta_by_id, false).unwrap();
@@ -7713,8 +7302,6 @@ mod tests {
 
         let collision = CollisionResult::Match {
             existing_id: "bd-1".to_string(),
-            match_type: MatchType::Id,
-            phase: 3,
         };
         let (_, _, meta_by_id) = build_collision_maps(&storage);
 
@@ -7957,9 +7544,7 @@ mod tests {
             exported_count: 1,
             exported_ids: vec!["bd-1".to_string()],
             exported_marked_at: Vec::new(),
-            skipped_tombstone_ids: Vec::new(),
             content_hash: "content-hash".to_string(),
-            output_path: None,
             issue_hashes: vec![("bd-1".to_string(), "issue-hash".to_string())],
         };
 
@@ -8227,34 +7812,35 @@ mod tests {
 
         // Initial state is Pass
         assert_eq!(result.overall_status, PreflightCheckStatus::Pass);
-        assert!(result.is_ok());
-        assert!(result.has_no_failures());
 
         // Add a passing check
-        result.add(PreflightCheck::pass("test1", "Test 1", "Passed"));
+        result.add(PreflightCheck::pass("test1", "Passed"));
         assert_eq!(result.overall_status, PreflightCheckStatus::Pass);
 
         // Add a warning - overall becomes Warn
-        result.add(PreflightCheck::warn("test2", "Test 2", "Warning", "Fix it"));
+        result.add(PreflightCheck::warn("test2", "Warning", "Fix it"));
         assert_eq!(result.overall_status, PreflightCheckStatus::Warn);
-        assert!(!result.is_ok());
-        assert!(result.has_no_failures());
 
         // Add a failure - overall becomes Fail
-        result.add(PreflightCheck::fail("test3", "Test 3", "Failed", "Fix it"));
+        result.add(PreflightCheck::fail("test3", "Failed", "Fix it"));
         assert_eq!(result.overall_status, PreflightCheckStatus::Fail);
-        assert!(!result.is_ok());
-        assert!(!result.has_no_failures());
 
-        // Check counts
+        // A later failure does not erase the earlier warning.
         assert_eq!(result.failures().len(), 1);
-        assert_eq!(result.warnings().len(), 1);
+        assert_eq!(
+            result
+                .checks
+                .iter()
+                .filter(|c| c.status == PreflightCheckStatus::Warn)
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn test_preflight_result_into_result_succeeds_on_pass() {
         let mut result = PreflightResult::new();
-        result.add(PreflightCheck::pass("test", "Test", "OK"));
+        result.add(PreflightCheck::pass("test", "OK"));
 
         let converted = result.into_result();
         assert!(converted.is_ok());
@@ -8263,7 +7849,7 @@ mod tests {
     #[test]
     fn test_preflight_result_into_result_succeeds_on_warn() {
         let mut result = PreflightResult::new();
-        result.add(PreflightCheck::warn("test", "Test", "Warning", "Fix"));
+        result.add(PreflightCheck::warn("test", "Warning", "Fix"));
 
         let converted = result.into_result();
         assert!(converted.is_ok());
@@ -8272,7 +7858,7 @@ mod tests {
     #[test]
     fn test_preflight_result_into_result_fails_on_fail() {
         let mut result = PreflightResult::new();
-        result.add(PreflightCheck::fail("test", "Test", "Failed", "Fix it"));
+        result.add(PreflightCheck::fail("test", "Failed", "Fix it"));
 
         let converted = result.into_result();
         assert!(converted.is_err());
@@ -8389,31 +7975,6 @@ mod tests {
         let result = preflight_import(&jsonl_path, &config, None).unwrap();
 
         assert_eq!(result.overall_status, PreflightCheckStatus::Pass);
-        assert!(result.failures().is_empty());
-    }
-
-    #[test]
-    fn test_preflight_export_passes_with_valid_setup() {
-        let temp = TempDir::new().unwrap();
-        let beads_dir = temp.path().join(".beads");
-        std::fs::create_dir_all(&beads_dir).unwrap();
-        let jsonl_path = beads_dir.join("issues.jsonl");
-
-        let storage = SqliteStorage::open_memory().unwrap();
-        let config = ExportConfig {
-            beads_dir: Some(beads_dir),
-            ..Default::default()
-        };
-
-        let result = preflight_export(&storage, &jsonl_path, &config).unwrap();
-
-        assert_eq!(
-            result.overall_status,
-            PreflightCheckStatus::Pass,
-            "Expected Pass, got {:?}. Failures: {:?}",
-            result.overall_status,
-            result.failures()
-        );
         assert!(result.failures().is_empty());
     }
 
@@ -9300,17 +8861,6 @@ mod tests {
         assert!(report.has_conflicts());
     }
 
-    #[test]
-    fn test_merge_report_total_actions() {
-        let mut report = MergeReport::default();
-        assert_eq!(report.total_actions(), 0);
-
-        report.kept.push(make_test_issue("bd-001", "Kept"));
-        report.kept.push(make_test_issue("bd-002", "Kept"));
-        report.deleted.push("bd-003".to_string());
-        assert_eq!(report.total_actions(), 3);
-    }
-
     // ========================================================================
     // three_way_merge orchestration tests
     // ========================================================================
@@ -9470,7 +9020,6 @@ mod tests {
         assert!(report.conflicts.is_empty());
         assert!(report.tombstone_protected.is_empty());
         assert!(report.notes.is_empty());
-        assert_eq!(report.total_actions(), 0);
     }
 
     #[test]

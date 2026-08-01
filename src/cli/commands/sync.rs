@@ -19,10 +19,10 @@ use crate::sync::witness::{
 use crate::sync::{
     ConflictResolution, ExportConfig, ExportEntityType, ExportError, ExportErrorPolicy,
     ImportConfig, METADATA_JSONL_CONTENT_HASH, METADATA_LAST_EXPORT_TIME,
-    METADATA_LAST_IMPORT_TIME, MergeContext, OrphanMode, PathValidation, analyze_jsonl,
-    compute_jsonl_hash, compute_staleness, export_temp_path, export_to_jsonl_with_policy,
-    finalize_export, get_issue_ids_from_jsonl, id_matches_expected_prefix, import_from_jsonl,
-    load_base_snapshot, read_issues_from_jsonl, refresh_base_snapshot_from_flushed_jsonl,
+    METADATA_LAST_IMPORT_TIME, MergeContext, PathValidation, analyze_jsonl, compute_jsonl_hash,
+    compute_staleness, export_temp_path, export_to_jsonl_with_policy, finalize_export,
+    get_issue_ids_from_jsonl, id_matches_expected_prefix, import_from_jsonl, load_base_snapshot,
+    read_issues_from_jsonl, refresh_base_snapshot_from_flushed_jsonl,
     require_safe_sync_overwrite_path, require_valid_sync_path, restore_tombstones_after_rebuild,
     save_base_snapshot_from_jsonl, scan_jsonl_for_tombstone_filter, snapshot_tombstones,
     three_way_merge, tombstones_missing_from_jsonl_tombstones, validate_no_git_path,
@@ -428,12 +428,6 @@ fn merge_conflict_resolution_label(strategy: ConflictResolution) -> &'static str
 /// `rename_on_import = false`. That means the delegation would silently
 /// skip the requested rename behavior.
 ///
-/// `--orphans` is intentionally *not* part of this guard today. The
-/// current import engine parses `orphan_mode` into `ImportConfig`, but it
-/// does not consult that field during import, so delegating does not
-/// change effective behavior. If orphan-mode semantics become active in
-/// the future, revisit this guard and the auto-rebuild conflict
-/// detection below.
 fn maybe_delegate_rebuild(
     args: &SyncArgs,
     open_result: &mut config::OpenStorageResult,
@@ -1501,7 +1495,6 @@ fn execute_flush(
     // Configure export
     let export_config = ExportConfig {
         force: args.force || needs_flush,
-        is_default_path: true,
         error_policy: export_policy,
         retention_days,
         beads_dir: Some(path_policy.beads_dir.clone()),
@@ -2250,30 +2243,12 @@ fn execute_import(
         }
     }
 
-    // Parse orphan mode
-    let orphan_mode = match args.orphans.as_deref() {
-        Some("strict") | None => OrphanMode::Strict,
-        Some("resurrect") => OrphanMode::Resurrect,
-        Some("skip") => OrphanMode::Skip,
-        Some("allow") => OrphanMode::Allow,
-        Some(other) => {
-            return Err(BeadsError::Validation {
-                field: "orphans".to_string(),
-                reason: format!(
-                    "Invalid orphan mode: {other}. Must be one of: strict, resurrect, skip, allow"
-                ),
-            });
-        }
-    };
-    debug!(orphan_mode = ?orphan_mode, "Import orphan handling configured");
-
     // Configure import
     let import_config = ImportConfig {
         // Keep prefix validation when explicitly renaming prefixes.
         skip_prefix_validation: args.force && !args.rename_prefix,
         rename_on_import: args.rename_prefix,
         clear_duplicate_external_refs: args.rename_prefix,
-        orphan_mode,
         force_upsert: args.force,
         beads_dir: Some(path_policy.beads_dir.clone()),
         allow_external_jsonl: path_policy.allow_external_jsonl,
@@ -2824,7 +2799,6 @@ fn execute_merge(
     info!(path = %jsonl_path.display(), "Writing merged issues.jsonl");
     let export_config = ExportConfig {
         force: true, // Force export to ensure JSONL matches DB
-        is_default_path: true,
         error_policy: ExportErrorPolicy::Strict,
         retention_days,
         beads_dir: Some(path_policy.beads_dir.clone()),
@@ -3479,7 +3453,7 @@ mod tests {
             format!("{}\n", serde_json::to_string(&issue).unwrap()),
         )
         .unwrap();
-        let _held_lock = crate::sync::blocking_write_lock(&beads_dir).unwrap();
+        let _held_lock = crate::sync::blocking_write_lock_with_timeout(&beads_dir, None).unwrap();
         let args = SyncArgs {
             status: true,
             ..SyncArgs::default()
@@ -4271,26 +4245,11 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_rebuild_semantic_flag_conflict_reason_ignores_orphans_only_request() {
-        let args = SyncArgs {
-            rebuild: true,
-            orphans: Some("resurrect".to_string()),
-            ..SyncArgs::default()
-        };
-
-        assert!(
-            auto_rebuild_semantic_flag_conflict_reason(&args, &CliOverrides::default(), None)
-                .is_none()
-        );
-    }
-
-    #[test]
     fn test_auto_rebuild_semantic_flag_conflict_reason_mentions_both_flags() {
         let args = SyncArgs {
             force: true,
             rebuild: true,
             rename_prefix: true,
-            orphans: Some("skip".to_string()),
             ..SyncArgs::default()
         };
 

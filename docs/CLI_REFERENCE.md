@@ -791,7 +791,6 @@ br sync [OPTIONS]
 | `--allow-external-jsonl` | Allow JSONL path outside `.beads/` |
 | `--manifest` | Write manifest file with export summary |
 | `--error-policy <POLICY>` | Export error handling: strict, best-effort, partial, required-core |
-| `--orphans <MODE>` | Orphan handling: strict, resurrect, skip, allow |
 | `--rename-prefix` | During import, rewrite mismatched issue IDs into the configured default prefix |
 | `--rebuild` | During import, rebuild SQLite from JSONL and remove DB entries absent from JSONL |
 

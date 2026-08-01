@@ -155,7 +155,12 @@ fn golden_create_update_close_sqlite_rows_and_jsonl() {
     push_issue_row_snapshot(&mut snapshot, &conn);
 
     let mut jsonl = Vec::new();
-    beads::sync::export_to_writer(&storage, &mut jsonl).expect("export JSONL");
+    beads::sync::export_to_writer_with_policy(
+        &storage,
+        &mut jsonl,
+        beads::sync::ExportErrorPolicy::Strict,
+    )
+    .expect("export JSONL");
     writeln!(snapshot, "jsonl:").unwrap();
     snapshot.push_str(&normalized_jsonl(&jsonl));
 

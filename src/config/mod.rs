@@ -2459,7 +2459,6 @@ impl OpenStorageResult {
             // guard does not block export of a DB that intentionally has fewer
             // issues than the on-disk JSONL.
             force: needs_flush,
-            is_default_path: self.paths.jsonl_path == self.paths.beads_dir.join("issues.jsonl"),
             beads_dir: Some(self.paths.beads_dir.clone()),
             allow_external_jsonl: self.allow_external_jsonl,
             show_progress: false,
@@ -6970,7 +6969,8 @@ routing:
         fs::create_dir_all(&beads_dir).expect("create beads dir");
 
         write_single_issue_jsonl(&jsonl_path, "bd-recovered", "Recovered from JSONL only");
-        let _held_lock = crate::sync::blocking_write_lock(&beads_dir).expect("hold write lock");
+        let _held_lock = crate::sync::blocking_write_lock_with_timeout(&beads_dir, None)
+            .expect("hold write lock");
         let cli = CliOverrides {
             lock_timeout: Some(1),
             read_only_fast_open: true,
@@ -6996,7 +6996,8 @@ routing:
         fs::create_dir_all(&beads_dir).expect("create beads dir");
 
         write_single_issue_jsonl(&jsonl_path, "bd-recovered", "Recovered from JSONL only");
-        let _held_lock = crate::sync::blocking_write_lock(&beads_dir).expect("hold write lock");
+        let _held_lock = crate::sync::blocking_write_lock_with_timeout(&beads_dir, None)
+            .expect("hold write lock");
         let cli = CliOverrides {
             lock_timeout: Some(1),
             held_write_lock_beads_dir: Some(beads_dir.clone()),

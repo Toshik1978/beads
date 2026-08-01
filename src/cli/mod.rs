@@ -185,13 +185,6 @@ const EXPORT_ERROR_POLICY_CANDIDATES: &[(&str, &str)] = &[
     ),
 ];
 
-const ORPHAN_MODE_CANDIDATES: &[(&str, &str)] = &[
-    ("strict", "Fail if any issue references a missing parent"),
-    ("resurrect", "Attempt to resurrect missing parents if found"),
-    ("skip", "Skip orphaned issues"),
-    ("allow", "Allow orphans (no parent validation)"),
-];
-
 fn completion_index() -> &'static CompletionIndex {
     COMPLETION_INDEX.get_or_init(build_completion_index)
 }
@@ -585,13 +578,6 @@ fn export_error_policy_completer(current: &OsStr) -> Vec<CompletionCandidate> {
         return Vec::new();
     };
     static_candidates(prefix, EXPORT_ERROR_POLICY_CANDIDATES)
-}
-
-fn orphan_mode_completer(current: &OsStr) -> Vec<CompletionCandidate> {
-    let Some(prefix) = current.to_str() else {
-        return Vec::new();
-    };
-    static_candidates(prefix, ORPHAN_MODE_CANDIDATES)
 }
 
 fn sort_key_completer(current: &OsStr) -> Vec<CompletionCandidate> {
@@ -1885,12 +1871,6 @@ pub struct SyncArgs {
     /// Controls how export handles serialization errors for individual issues.
     #[arg(long = "error-policy", add = ArgValueCompleter::new(export_error_policy_completer))]
     pub error_policy: Option<String>,
-
-    /// Orphan handling mode: strict (default), resurrect, skip, allow
-    ///
-    /// Controls how import handles orphaned dependencies (refs to deleted issues).
-    #[arg(long, add = ArgValueCompleter::new(orphan_mode_completer))]
-    pub orphans: Option<String>,
 
     /// Rename issues with wrong prefix to expected prefix during import
     #[arg(long)]

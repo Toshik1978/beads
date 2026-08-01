@@ -294,7 +294,6 @@ pub(super) fn auto_import_storage_ctx_if_stale(
         cli.allow_stale.unwrap_or(false),
         no_auto_import,
     )
-    .map(|_| ())
 }
 
 pub(super) fn cli_for_routed_workspace(
@@ -597,7 +596,8 @@ mod tests {
         let beads_dir = temp.path().join(".beads");
         fs::create_dir_all(&beads_dir).expect("create beads dir");
 
-        let _held = crate::sync::blocking_write_lock(&beads_dir).expect("hold write lock");
+        let _held = crate::sync::blocking_write_lock_with_timeout(&beads_dir, None)
+            .expect("hold write lock");
         let result = acquire_routed_workspace_write_lock(&beads_dir, true, Some(1));
         let err = result.err().ok_or_else(|| {
             "external routed lock should wait for and time out on held lock".to_string()

@@ -39,7 +39,6 @@ fn import_config(beads_dir: &std::path::Path) -> ImportConfig {
 fn export_config(beads_dir: &std::path::Path) -> ExportConfig {
     ExportConfig {
         force: true,
-        is_default_path: true,
         beads_dir: Some(beads_dir.to_path_buf()),
         show_progress: false,
         ..ExportConfig::default()
