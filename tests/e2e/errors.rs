@@ -3359,8 +3359,8 @@ fn e2e_delete_child_with_parent_child_dependency_previews_parent() {
 }
 
 #[test]
-fn e2e_delete_hard_json_reports_removed_labels_and_events() {
-    let _log = common::test_log("e2e_delete_hard_json_reports_removed_labels_and_events");
+fn e2e_delete_hard_json_reports_removed_labels() {
+    let _log = common::test_log("e2e_delete_hard_json_reports_removed_labels");
     let workspace = BrWorkspace::new();
 
     let init = run_br(&workspace, ["init"], "init");
@@ -3395,10 +3395,6 @@ fn e2e_delete_hard_json_reports_removed_labels_and_events() {
     let payload = extract_json_payload(&delete.stdout);
     let json: Value = serde_json::from_str(&payload).expect("delete hard json");
     assert_eq!(json["labels_removed"], 1);
-    assert!(
-        json["events_removed"].as_u64().unwrap_or(0) >= 2,
-        "hard delete should report removed audit events: {json}"
-    );
 }
 
 #[test]

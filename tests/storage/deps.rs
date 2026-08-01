@@ -10,7 +10,7 @@
 // `common::` paths in this suite keep working unchanged.
 use crate::common;
 
-use beads::model::{DependencyType, EventType, Status};
+use beads::model::{DependencyType, Status};
 use beads::storage::{ReadyFilters, ReadySortPolicy, SqliteStorage};
 #[allow(unused_imports)]
 use common::ordering::{
@@ -95,42 +95,6 @@ fn add_dependency_duplicate_returns_false() {
 }
 
 #[test]
-fn add_dependency_records_event() {
-    let mut storage = test_db();
-
-    let blocker = fixtures::issue("event-blocker");
-    let blocked = fixtures::issue("event-blocked");
-
-    storage.create_issue(&blocker, "tester").unwrap();
-    storage.create_issue(&blocked, "tester").unwrap();
-
-    storage
-        .add_dependency(
-            &blocked.id,
-            &blocker.id,
-            DependencyType::Blocks.as_str(),
-            "dep-actor",
-        )
-        .unwrap();
-
-    let details = storage
-        .get_issue_details(&blocked.id, true, true, 200)
-        .unwrap()
-        .expect("issue exists");
-
-    // Find dependency added event
-    let dep_event = details
-        .events
-        .iter()
-        .find(|e| e.event_type == EventType::DependencyAdded);
-
-    assert!(dep_event.is_some());
-    let event = dep_event.unwrap();
-    assert_eq!(event.actor, "dep-actor");
-    assert!(event.comment.as_ref().unwrap().contains(&blocker.id));
-}
-
-#[test]
 fn add_dependency_marks_dirty() {
     let mut storage = test_db();
 
@@ -205,45 +169,6 @@ fn remove_dependency_nonexistent_returns_false() {
         .remove_dependency(&issue1.id, &issue2.id, "tester")
         .unwrap();
     assert!(!removed);
-}
-
-#[test]
-fn remove_dependency_records_event() {
-    let mut storage = test_db();
-
-    let blocker = fixtures::issue("rm-event-blocker");
-    let blocked = fixtures::issue("rm-event-blocked");
-
-    storage.create_issue(&blocker, "tester").unwrap();
-    storage.create_issue(&blocked, "tester").unwrap();
-
-    storage
-        .add_dependency(
-            &blocked.id,
-            &blocker.id,
-            DependencyType::Blocks.as_str(),
-            "tester",
-        )
-        .unwrap();
-
-    storage
-        .remove_dependency(&blocked.id, &blocker.id, "remover")
-        .unwrap();
-
-    let details = storage
-        .get_issue_details(&blocked.id, true, true, 200)
-        .unwrap()
-        .expect("issue exists");
-
-    // Find dependency removed event
-    let rm_event = details
-        .events
-        .iter()
-        .find(|e| e.event_type == EventType::DependencyRemoved);
-
-    assert!(rm_event.is_some());
-    let event = rm_event.unwrap();
-    assert_eq!(event.actor, "remover");
 }
 
 #[test]

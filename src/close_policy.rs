@@ -11,7 +11,6 @@
 //!   acceptance criteria boxes)
 //! - Actor constraints (forbid self-close after `in_progress` was set by the
 //!   same actor)
-//! - Agent attribution Tier 1 (capture, never reject) via env vars + CLI flags
 //! - Typed structured references in close reasons
 //!
 //! Long-form closeout documents, signatures, and full observability are
@@ -25,13 +24,6 @@ use std::path::Path;
 
 /// Default file name for the policy document inside `.beads/`.
 pub const POLICY_FILE_NAME: &str = "policy.yaml";
-
-/// Environment variable for agent name (Tier 1 attribution).
-pub const ENV_AGENT_NAME: &str = "BR_AGENT_NAME";
-/// Environment variable for harness identifier.
-pub const ENV_HARNESS: &str = "BR_HARNESS";
-/// Environment variable for model identifier.
-pub const ENV_MODEL: &str = "BR_MODEL";
 
 /// Top-level policy document loaded from `.beads/policy.yaml`.
 ///
@@ -87,16 +79,11 @@ pub struct ClosePolicy {
     /// Reject closes when the issue body's `## Acceptance Criteria` section
     /// still has unchecked `- [ ]` items.
     pub require_acceptance_criteria_satisfied: ToggleGate,
-    /// Reject closes when the closing actor matches the actor who last set
-    /// status to `in_progress`.
-    pub forbid_self_close_after_in_progress: ToggleGate,
     /// Reject closes when the issue has a `blocks` edge to a dependent that
     /// is currently in `deferred` status (beads#303). Closing a prereq
     /// is the natural touch-point that forces the closer to confront every
     /// deferred dependent before the prereq disappears from the graph.
     pub forbid_close_with_deferred_dependents: ToggleGate,
-    /// Tier 1 attribution capture (default: off).
-    pub attribution: Attribution,
     /// Typed structured references gate (capability #3 of #274). When
     /// `enabled`, the close `--reason` must contain at least one
     /// `kind:value` reference matching one of `required_kinds` (e.g.
@@ -112,10 +99,8 @@ impl ClosePolicy {
     pub fn is_active(&self) -> bool {
         self.require_close_reason.enabled
             || self.require_acceptance_criteria_satisfied.enabled
-            || self.forbid_self_close_after_in_progress.enabled
             || self.forbid_close_with_deferred_dependents.enabled
             || self.require_typed_references.enabled
-            || self.attribution.tier != AttributionTier::Off
     }
 }
 
@@ -1178,83 +1163,6 @@ impl Default for RequireCloseReason {
     }
 }
 
-/// Agent-attribution capture configuration.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Attribution {
-    pub tier: AttributionTier,
-    /// Optional list of fields the project wants captured. When omitted, all
-    /// known fields are captured. Phase 1 only honours
-    /// `agent_name` / `harness` / `model`; unknown values are tolerated to
-    /// keep forward compatibility for Tier 2/3 fields landing later.
-    #[serde(default)]
-    pub fields: Vec<String>,
-}
-
-/// Attribution tier. Phase 1 ships `Off` and `Capture` only.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttributionTier {
-    #[default]
-    Off,
-    Capture,
-}
-
-/// Agent attribution values resolved from CLI flags + env vars.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AttributionValues {
-    pub agent_name: Option<String>,
-    pub harness: Option<String>,
-    pub model: Option<String>,
-}
-
-impl AttributionValues {
-    /// Resolve attribution values using the precedence: CLI flag > env var > absent.
-    #[must_use]
-    pub fn resolve(
-        cli_agent_name: Option<&str>,
-        cli_harness: Option<&str>,
-        cli_model: Option<&str>,
-        env_lookup: &dyn Fn(&str) -> Option<String>,
-    ) -> Self {
-        Self {
-            agent_name: cli_agent_name
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .or_else(|| env_lookup(ENV_AGENT_NAME).filter(|s| !s.trim().is_empty())),
-            harness: cli_harness
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .or_else(|| env_lookup(ENV_HARNESS).filter(|s| !s.trim().is_empty())),
-            model: cli_model
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .or_else(|| env_lookup(ENV_MODEL).filter(|s| !s.trim().is_empty())),
-        }
-    }
-
-    /// Resolve from process env. Convenience wrapper.
-    #[must_use]
-    pub fn resolve_from_env(
-        cli_agent_name: Option<&str>,
-        cli_harness: Option<&str>,
-        cli_model: Option<&str>,
-    ) -> Self {
-        Self::resolve(cli_agent_name, cli_harness, cli_model, &|key| {
-            std::env::var(key).ok()
-        })
-    }
-
-    /// True when all attribution fields are absent.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.agent_name.is_none() && self.harness.is_none() && self.model.is_none()
-    }
-}
-
 /// A single policy violation discovered while evaluating gates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyViolation {
@@ -1282,15 +1190,9 @@ pub struct CloseEvidence<'a> {
     pub notes: Option<&'a str>,
     /// The actor performing the close.
     pub close_actor: &'a str,
-    /// The actor who last set status to `in_progress` (if any).
-    pub in_progress_actor: Option<&'a str>,
 }
 
 /// Evaluate every enabled gate against the supplied evidence.
-///
-/// Tier 1 attribution is intentionally NOT evaluated here: capture happens
-/// regardless of any rejection logic, and Phase 1 explicitly never rejects
-/// on missing attribution.
 #[must_use]
 pub fn evaluate(policy: &ClosePolicy, evidence: &CloseEvidence<'_>) -> Vec<PolicyViolation> {
     let mut violations = Vec::new();
@@ -1301,10 +1203,6 @@ pub fn evaluate(policy: &ClosePolicy, evidence: &CloseEvidence<'_>) -> Vec<Polic
 
     if policy.require_acceptance_criteria_satisfied.enabled {
         evaluate_acceptance_criteria(evidence, &mut violations);
-    }
-
-    if policy.forbid_self_close_after_in_progress.enabled {
-        evaluate_self_close(evidence, &mut violations);
     }
 
     if policy.require_typed_references.enabled {
@@ -1520,31 +1418,6 @@ fn evaluate_acceptance_criteria(evidence: &CloseEvidence<'_>, out: &mut Vec<Poli
             detail: Some(serde_json::json!({
                 "unchecked_count": unchecked.len(),
                 "unchecked_items": unchecked,
-                "issue_id": evidence.issue_id,
-            })),
-        });
-    }
-}
-
-fn evaluate_self_close(evidence: &CloseEvidence<'_>, out: &mut Vec<PolicyViolation>) {
-    let Some(in_progress_actor) = evidence.in_progress_actor else {
-        // No in_progress transition recorded — gate is satisfied by definition
-        // (open → closed is unconstrained for this rule).
-        return;
-    };
-    if in_progress_actor.is_empty() || evidence.close_actor.is_empty() {
-        return;
-    }
-    if in_progress_actor == evidence.close_actor {
-        out.push(PolicyViolation {
-            gate: "forbid_self_close_after_in_progress".to_string(),
-            message: format!(
-                "actor policy: close.actor '{}' matches the actor who set in_progress; cross-validation required",
-                evidence.close_actor
-            ),
-            detail: Some(serde_json::json!({
-                "close_actor": evidence.close_actor,
-                "in_progress_actor": in_progress_actor,
                 "issue_id": evidence.issue_id,
             })),
         });
@@ -1853,8 +1726,6 @@ enum PolicyNode {
     RequireCloseReason,
     /// Any plain `{enabled: bool}` toggle gate.
     ToggleGate,
-    /// `close_policy.attribution:` block.
-    Attribution,
     /// `close_policy.require_typed_references:` block.
     RequireTypedReferences,
     /// `workflow:` block (issue #311).
@@ -1878,9 +1749,7 @@ impl PolicyNode {
             Self::ClosePolicy => &[
                 ("require_close_reason", Self::RequireCloseReason),
                 ("require_acceptance_criteria_satisfied", Self::ToggleGate),
-                ("forbid_self_close_after_in_progress", Self::ToggleGate),
                 ("forbid_close_with_deferred_dependents", Self::ToggleGate),
-                ("attribution", Self::Attribution),
                 ("require_typed_references", Self::RequireTypedReferences),
             ],
             Self::RequireCloseReason => &[
@@ -1889,7 +1758,6 @@ impl PolicyNode {
                 ("regex", Self::Scalar),
             ],
             Self::ToggleGate => &[("enabled", Self::Scalar)],
-            Self::Attribution => &[("tier", Self::Scalar), ("fields", Self::Scalar)],
             Self::RequireTypedReferences => {
                 &[("enabled", Self::Scalar), ("required_kinds", Self::Scalar)]
             }
@@ -2379,41 +2247,6 @@ mod tests {
         assert!(violations[0].message.contains("Second"));
     }
 
-    #[test]
-    fn forbid_self_close_blocks_when_actors_match() {
-        let mut policy = ClosePolicy::default();
-        policy.forbid_self_close_after_in_progress.enabled = true;
-        let mut evidence = evidence_with_reason("done done done done done", "bd-1");
-        evidence.close_actor = "alice";
-        evidence.in_progress_actor = Some("alice");
-
-        let violations = evaluate(&policy, &evidence);
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].gate, "forbid_self_close_after_in_progress");
-    }
-
-    #[test]
-    fn forbid_self_close_passes_when_actors_differ() {
-        let mut policy = ClosePolicy::default();
-        policy.forbid_self_close_after_in_progress.enabled = true;
-        let mut evidence = evidence_with_reason("done done done done done", "bd-1");
-        evidence.close_actor = "alice";
-        evidence.in_progress_actor = Some("bob");
-
-        assert!(evaluate(&policy, &evidence).is_empty());
-    }
-
-    #[test]
-    fn forbid_self_close_passes_when_no_in_progress_recorded() {
-        let mut policy = ClosePolicy::default();
-        policy.forbid_self_close_after_in_progress.enabled = true;
-        let mut evidence = evidence_with_reason("done done done done done", "bd-1");
-        evidence.close_actor = "alice";
-        evidence.in_progress_actor = None;
-
-        assert!(evaluate(&policy, &evidence).is_empty());
-    }
-
     // =========================================================================
     // Deferred-dependents gate (beads#303)
     // =========================================================================
@@ -2487,59 +2320,22 @@ mod tests {
     }
 
     #[test]
-    fn attribution_resolve_prefers_cli_over_env() {
-        let env = |key: &str| match key {
-            ENV_AGENT_NAME => Some("env-agent".to_string()),
-            ENV_HARNESS => Some("env-harness".to_string()),
-            ENV_MODEL => Some("env-model".to_string()),
-            _ => None,
-        };
-        let values = AttributionValues::resolve(Some("cli-agent"), Some("cli-harness"), None, &env);
-        assert_eq!(values.agent_name.as_deref(), Some("cli-agent"));
-        assert_eq!(values.harness.as_deref(), Some("cli-harness"));
-        // Falls back to env when CLI absent.
-        assert_eq!(values.model.as_deref(), Some("env-model"));
-    }
-
-    #[test]
-    fn attribution_resolve_treats_blank_strings_as_absent() {
-        let env = |key: &str| {
-            if key == ENV_HARNESS {
-                Some("   ".to_string())
-            } else {
-                None
-            }
-        };
-        let values = AttributionValues::resolve(Some(""), None, None, &env);
-        assert!(values.agent_name.is_none());
-        assert!(
-            values.harness.is_none(),
-            "blank env var should not populate"
-        );
-        assert!(values.model.is_none());
-        assert!(values.is_empty());
-    }
-
-    #[test]
     fn multiple_gates_aggregate_violations() {
         let mut policy = ClosePolicy::default();
         policy.require_close_reason.enabled = true;
         policy.require_close_reason.min_length = 50;
-        policy.forbid_self_close_after_in_progress.enabled = true;
         policy.require_acceptance_criteria_satisfied.enabled = true;
 
         let body = "## Acceptance Criteria\n- [ ] Outstanding\n";
         let mut evidence = evidence_with_reason("short", "bd-1");
         evidence.description = Some(body);
         evidence.close_actor = "alice";
-        evidence.in_progress_actor = Some("alice");
 
         let violations = evaluate(&policy, &evidence);
-        assert_eq!(violations.len(), 3);
+        assert_eq!(violations.len(), 2);
         let gates: Vec<&str> = violations.iter().map(|v| v.gate.as_str()).collect();
         assert!(gates.contains(&"close_reason_min_length"));
         assert!(gates.contains(&"acceptance_criteria_unchecked"));
-        assert!(gates.contains(&"forbid_self_close_after_in_progress"));
     }
 
     #[test]
@@ -2562,14 +2358,9 @@ close_policy:
     regex: "^Fix: "
   require_acceptance_criteria_satisfied:
     enabled: true
-  forbid_self_close_after_in_progress:
-    enabled: true
   require_typed_references:
     enabled: true
     required_kinds: ["commit", "reviewer"]
-  attribution:
-    tier: capture
-    fields: ["agent_name", "harness", "model"]
 allow_bypass: false
 "#;
         std::fs::write(dir.path().join(POLICY_FILE_NAME), yaml).unwrap();
@@ -2586,20 +2377,10 @@ allow_bypass: false
                 .require_acceptance_criteria_satisfied
                 .enabled
         );
-        assert!(
-            policy
-                .close_policy
-                .forbid_self_close_after_in_progress
-                .enabled
-        );
         assert!(policy.close_policy.require_typed_references.enabled);
         assert_eq!(
             policy.close_policy.require_typed_references.required_kinds,
             vec!["commit".to_string(), "reviewer".to_string()]
-        );
-        assert_eq!(
-            policy.close_policy.attribution.tier,
-            AttributionTier::Capture
         );
         assert!(!policy.allow_bypass);
         assert!(policy.close_policy.is_active());
@@ -2656,23 +2437,17 @@ close_policy:
     /// their full dotted path.
     #[test]
     fn detect_unknown_policy_fields_walks_nested_structs() {
-        let yaml = r#"
+        let yaml = r"
 close_policy:
   require_close_reason:
     enabled: true
     min_lenght: 20            # typo: should be min_length
-  attribution:
-    tier: capture
-    fileds: ["agent_name"]    # typo: should be fields
-"#;
+";
         let raw: serde_yml::Value = serde_yml::from_str(yaml).unwrap();
         let unknown = detect_unknown_policy_fields(&raw);
         assert_eq!(
             unknown,
-            vec![
-                "close_policy.attribution.fileds".to_string(),
-                "close_policy.require_close_reason.min_lenght".to_string(),
-            ]
+            vec!["close_policy.require_close_reason.min_lenght".to_string()]
         );
     }
 
@@ -2688,14 +2463,9 @@ close_policy:
     regex: "^Fix: "
   require_acceptance_criteria_satisfied:
     enabled: true
-  forbid_self_close_after_in_progress:
-    enabled: true
   require_typed_references:
     enabled: true
     required_kinds: ["commit", "reviewer"]
-  attribution:
-    tier: capture
-    fields: ["agent_name", "harness", "model"]
 "#;
         let raw: serde_yml::Value = serde_yml::from_str(yaml).unwrap();
         assert!(detect_unknown_policy_fields(&raw).is_empty());
@@ -2913,11 +2683,6 @@ close_policy:
             "ToggleGate",
         );
         assert_table_covers(
-            PolicyNode::Attribution,
-            &field_names_of::<Attribution>(),
-            "Attribution",
-        );
-        assert_table_covers(
             PolicyNode::RequireTypedReferences,
             &field_names_of::<RequireTypedReferences>(),
             "RequireTypedReferences",
@@ -2987,11 +2752,6 @@ close_policy:
             PolicyNode::ToggleGate,
             &field_names_of::<ToggleGate>(),
             "ToggleGate",
-        );
-        assert_no_stale(
-            PolicyNode::Attribution,
-            &field_names_of::<Attribution>(),
-            "Attribution",
         );
         assert_no_stale(
             PolicyNode::RequireTypedReferences,
@@ -3112,7 +2872,7 @@ workflow:
         let dir = tempfile::tempdir().expect("tempdir");
         // A policy.yaml that configures close gates but NO workflow section
         // must not enforce any status set.
-        let yaml = "close_policy:\n  forbid_self_close_after_in_progress:\n    enabled: true\n";
+        let yaml = "close_policy:\n  require_acceptance_criteria_satisfied:\n    enabled: true\n";
         std::fs::write(dir.path().join(POLICY_FILE_NAME), yaml).unwrap();
         let policy = load_for_beads_dir(dir.path()).expect("load");
         assert!(!policy.workflow.is_enforced());

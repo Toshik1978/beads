@@ -6,7 +6,6 @@
 //! - `IssueType` - Categories of issues
 //! - `Dependency` - Relationships between issues
 //! - `Comment` - Issue comments
-//! - `Event` - Audit log entries
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
@@ -361,83 +360,6 @@ impl FromStr for DependencyType {
             "caused-by" => Ok(Self::CausedBy),
             other => Ok(Self::Custom(other.to_string())),
         }
-    }
-}
-
-/// Audit event type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum EventType {
-    Created,
-    Updated,
-    StatusChanged,
-    PriorityChanged,
-    AssigneeChanged,
-    Commented,
-    Closed,
-    Reopened,
-    DependencyAdded,
-    DependencyRemoved,
-    LabelAdded,
-    LabelRemoved,
-    Compacted,
-    Deleted,
-    Restored,
-    Custom(String),
-}
-
-impl EventType {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Created => "created",
-            Self::Updated => "updated",
-            Self::StatusChanged => "status_changed",
-            Self::PriorityChanged => "priority_changed",
-            Self::AssigneeChanged => "assignee_changed",
-            Self::Commented => "commented",
-            Self::Closed => "closed",
-            Self::Reopened => "reopened",
-            Self::DependencyAdded => "dependency_added",
-            Self::DependencyRemoved => "dependency_removed",
-            Self::LabelAdded => "label_added",
-            Self::LabelRemoved => "label_removed",
-            Self::Compacted => "compacted",
-            Self::Deleted => "deleted",
-            Self::Restored => "restored",
-            Self::Custom(value) => value,
-        }
-    }
-}
-
-impl Serialize for EventType {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for EventType {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        let normalized = value.to_lowercase();
-        let event_type = match normalized.as_str() {
-            "created" => Self::Created,
-            "updated" => Self::Updated,
-            "status_changed" => Self::StatusChanged,
-            "priority_changed" => Self::PriorityChanged,
-            "assignee_changed" => Self::AssigneeChanged,
-            "commented" => Self::Commented,
-            "closed" => Self::Closed,
-            "reopened" => Self::Reopened,
-            "dependency_added" => Self::DependencyAdded,
-            "dependency_removed" => Self::DependencyRemoved,
-            "label_added" => Self::LabelAdded,
-            "label_removed" => Self::LabelRemoved,
-            "compacted" => Self::Compacted,
-            "deleted" => Self::Deleted,
-            "restored" => Self::Restored,
-            _ => Self::Custom(normalized),
-        };
-        Ok(event_type)
     }
 }
 
@@ -881,33 +803,6 @@ pub struct Comment {
     pub created_at: DateTime<Utc>,
 }
 
-/// An event in the issue's history (audit log).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Event {
-    pub id: i64,
-    pub issue_id: String,
-    pub event_type: EventType,
-    pub actor: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub old_value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment: Option<String>,
-    pub created_at: DateTime<Utc>,
-    /// Tier 1 attribution: self-reported agent name (issue #312, Layer 3
-    /// capture-only). Recorded as an audit trail; never gated/enforced on.
-    /// `None` when the mutating command supplied no attribution.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_name: Option<String>,
-    /// Tier 1 attribution: self-reported harness identifier (capture-only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-    /// Tier 1 attribution: self-reported model identifier (capture-only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,17 +931,6 @@ mod tests {
         let d = DependencyType::ParentChild;
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(json, "\"parent-child\"");
-    }
-
-    #[test]
-    fn test_event_type_serialization() {
-        let e = EventType::StatusChanged;
-        let json = serde_json::to_string(&e).unwrap();
-        assert_eq!(json, "\"status_changed\"");
-
-        let e = EventType::Custom("foobar".to_string());
-        let json = serde_json::to_string(&e).unwrap();
-        assert_eq!(json, "\"foobar\"");
     }
 
     // ========================================================================
@@ -1718,73 +1602,6 @@ mod tests {
     // EVENT TYPE TESTS
     // ========================================================================
 
-    #[test]
-    fn test_event_type_as_str() {
-        assert_eq!(EventType::Created.as_str(), "created");
-        assert_eq!(EventType::Updated.as_str(), "updated");
-        assert_eq!(EventType::StatusChanged.as_str(), "status_changed");
-        assert_eq!(EventType::PriorityChanged.as_str(), "priority_changed");
-        assert_eq!(EventType::AssigneeChanged.as_str(), "assignee_changed");
-        assert_eq!(EventType::Commented.as_str(), "commented");
-        assert_eq!(EventType::Closed.as_str(), "closed");
-        assert_eq!(EventType::Reopened.as_str(), "reopened");
-        assert_eq!(EventType::DependencyAdded.as_str(), "dependency_added");
-        assert_eq!(EventType::DependencyRemoved.as_str(), "dependency_removed");
-        assert_eq!(EventType::LabelAdded.as_str(), "label_added");
-        assert_eq!(EventType::LabelRemoved.as_str(), "label_removed");
-        assert_eq!(EventType::Compacted.as_str(), "compacted");
-        assert_eq!(EventType::Deleted.as_str(), "deleted");
-        assert_eq!(EventType::Restored.as_str(), "restored");
-        assert_eq!(
-            EventType::Custom("my_event".to_string()).as_str(),
-            "my_event"
-        );
-    }
-
-    #[test]
-    fn test_event_type_deserialize_all() {
-        let events = [
-            ("\"created\"", EventType::Created),
-            ("\"updated\"", EventType::Updated),
-            ("\"status_changed\"", EventType::StatusChanged),
-            ("\"priority_changed\"", EventType::PriorityChanged),
-            ("\"assignee_changed\"", EventType::AssigneeChanged),
-            ("\"commented\"", EventType::Commented),
-            ("\"closed\"", EventType::Closed),
-            ("\"reopened\"", EventType::Reopened),
-            ("\"dependency_added\"", EventType::DependencyAdded),
-            ("\"dependency_removed\"", EventType::DependencyRemoved),
-            ("\"label_added\"", EventType::LabelAdded),
-            ("\"label_removed\"", EventType::LabelRemoved),
-            ("\"compacted\"", EventType::Compacted),
-            ("\"deleted\"", EventType::Deleted),
-            ("\"restored\"", EventType::Restored),
-        ];
-
-        for (json, expected) in events {
-            let result: EventType = serde_json::from_str(json).unwrap();
-            assert_eq!(result, expected, "Failed to deserialize {json}");
-        }
-    }
-
-    #[test]
-    fn test_event_type_deserialize_custom() {
-        let result: EventType = serde_json::from_str("\"my_custom_event\"").unwrap();
-        assert_eq!(result, EventType::Custom("my_custom_event".to_string()));
-
-        let mixed_case: EventType = serde_json::from_str("\"My_Custom_Event\"").unwrap();
-        assert_eq!(mixed_case, EventType::Custom("my_custom_event".to_string()));
-    }
-
-    #[test]
-    fn test_event_type_deserialize_normalizes_case() {
-        let result: EventType = serde_json::from_str("\"CREATED\"").unwrap();
-        assert_eq!(result, EventType::Created);
-
-        let result: EventType = serde_json::from_str("\"Status_Changed\"").unwrap();
-        assert_eq!(result, EventType::StatusChanged);
-    }
-
     // ========================================================================
     // COMMENT TESTS
     // ========================================================================
@@ -1887,28 +1704,6 @@ mod tests {
     // ========================================================================
     // EVENT TESTS
     // ========================================================================
-
-    #[test]
-    fn test_event_serialization_roundtrip() {
-        let event = Event {
-            id: 456,
-            issue_id: "bd-abc".to_string(),
-            event_type: EventType::StatusChanged,
-            actor: "testuser".to_string(),
-            old_value: Some("open".to_string()),
-            new_value: Some("closed".to_string()),
-            comment: None,
-            created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            agent_name: Some("agent-1".to_string()),
-            harness: Some("codex-cli".to_string()),
-            model: Some("opus-4".to_string()),
-        };
-
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: Event = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(event, deserialized);
-    }
 
     // ========================================================================
     // EPIC STATUS TESTS

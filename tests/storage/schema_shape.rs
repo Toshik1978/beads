@@ -116,7 +116,6 @@ const EXPECTED_TABLES: &[&str] = &[
     "config",
     "dependencies",
     "dirty_issues",
-    "events",
     "export_hashes",
     "issues",
     "labels",
@@ -155,9 +154,6 @@ const EXPECTED_TABLE_COLUMNS: &[(&str, &[ColumnShape])] = &[
         "close_metadata",
         &[
             ("issue_id", "TEXT", false, None, 1),
-            ("closed_by_agent_name", "TEXT", false, None, 0),
-            ("closed_by_harness", "TEXT", false, None, 0),
-            ("closed_by_model", "TEXT", false, None, 0),
             ("bypassed_policy", "INTEGER", true, Some("0"), 0),
             ("bypass_reason", "TEXT", false, None, 0),
             ("policy_gates_fired", "TEXT", false, None, 0),
@@ -204,22 +200,6 @@ const EXPECTED_TABLE_COLUMNS: &[(&str, &[ColumnShape])] = &[
         &[
             ("issue_id", "TEXT", false, None, 1),
             ("marked_at", "DATETIME", true, Some("CURRENT_TIMESTAMP"), 0),
-        ],
-    ),
-    (
-        "events",
-        &[
-            ("id", "INTEGER", false, None, 1),
-            ("issue_id", "TEXT", true, None, 0),
-            ("event_type", "TEXT", true, None, 0),
-            ("actor", "TEXT", true, Some("''"), 0),
-            ("old_value", "TEXT", false, None, 0),
-            ("new_value", "TEXT", false, None, 0),
-            ("comment", "TEXT", false, None, 0),
-            ("created_at", "DATETIME", true, Some("CURRENT_TIMESTAMP"), 0),
-            ("agent_name", "TEXT", false, None, 0),
-            ("harness", "TEXT", false, None, 0),
-            ("model", "TEXT", false, None, 0),
         ],
     ),
     (
@@ -346,7 +326,6 @@ const EXPECTED_FOREIGN_KEYS: &[ForeignKey] = &[
         "NO ACTION",
         "CASCADE",
     ),
-    ("events", "issue_id", "issues", "id", "NO ACTION", "CASCADE"),
     (
         "export_hashes",
         "issue_id",
@@ -384,11 +363,10 @@ const EXPECTED_TABLE_DDL: &[(&str, &str)] = &[
     ),
     (
         "close_metadata",
-        "create table close_metadata issue_id text primary key, closed_by_agent_name text, \
-         closed_by_harness text, closed_by_model text, bypassed_policy integer not null \
-         default 0, bypass_reason text, policy_gates_fired text, recorded_at datetime not \
-         null default current_timestamp, foreign key issue_id references issues id on delete \
-         cascade",
+        "create table close_metadata issue_id text primary key, bypassed_policy integer not \
+         null default 0, bypass_reason text, policy_gates_fired text, recorded_at datetime \
+         not null default current_timestamp, foreign key issue_id references issues id on \
+         delete cascade",
     ),
     (
         "comments",
@@ -413,14 +391,6 @@ const EXPECTED_TABLE_DDL: &[(&str, &str)] = &[
         "create table dirty_issues issue_id text primary key, marked_at datetime not null \
          default current_timestamp, foreign key issue_id references issues id on delete \
          cascade",
-    ),
-    (
-        "events",
-        "create table events id integer primary key autoincrement, issue_id text not null, \
-         event_type text not null, actor text not null default '', old_value text, new_value \
-         text, comment text, created_at datetime not null default current_timestamp, \
-         agent_name text, harness text, model text, foreign key issue_id references issues id \
-         on delete cascade",
     ),
     (
         "export_hashes",
@@ -545,22 +515,6 @@ const EXPECTED_INDEX_SHAPE: &[IndexShape] = &[
         &["marked_at"],
         None,
     ),
-    (
-        "events",
-        "idx_events_actor",
-        false,
-        &["actor"],
-        Some("actor != ''"),
-    ),
-    (
-        "events",
-        "idx_events_created_at",
-        false,
-        &["created_at"],
-        None,
-    ),
-    ("events", "idx_events_issue", false, &["issue_id"], None),
-    ("events", "idx_events_type", false, &["event_type"], None),
     (
         "issues",
         "idx_issues_assignee",
@@ -1043,7 +997,7 @@ fn autoincrement_bookkeeping_table_is_present() {
 
     // No PRAGMA reports AUTOINCREMENT, and `sqlite_sequence` is filtered out of
     // `table_names` by the `sqlite_%` clause, so without this assertion a port
-    // that dropped AUTOINCREMENT from `comments` and `events` would be
+    // that dropped AUTOINCREMENT from `comments` would be
     // invisible to every other test here except the DDL comparison. Rowid reuse after a delete would silently follow.
     assert!(
         master_object_exists(&conn, "sqlite_sequence"),
@@ -1195,7 +1149,7 @@ fn fresh_init_stamps_the_current_schema_version() {
     // migrated without the stamp being written.
     assert_eq!(
         user_version(&conn),
-        16,
+        17,
         "PRAGMA user_version on a fresh database changed"
     );
     assert_eq!(

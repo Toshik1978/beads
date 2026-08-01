@@ -913,7 +913,6 @@ mod tests {
             "config".to_string(),
             "dependencies".to_string(),
             "dirty_issues".to_string(),
-            "events".to_string(),
             "export_hashes".to_string(),
             "issues".to_string(),
             "labels".to_string(),

@@ -2,12 +2,9 @@
 
 use crate::error::{BeadsError, Result};
 use crate::format::{IssueDetails, IssueWithDependencyMetadata};
-use crate::model::{
-    Comment, Dependency, DependencyType, Event, EventType, Issue, IssueType, Priority, Status,
-};
+use crate::model::{Comment, Dependency, DependencyType, Issue, IssueType, Priority, Status};
 use crate::storage::conn::compat::{OpenFlags, open_with_flags};
 use crate::storage::conn::{Connection, DbError, Row, SqliteValue};
-use crate::storage::events::get_events;
 use crate::storage::schema::CURRENT_SCHEMA_VERSION;
 use crate::storage::schema::{
     apply_runtime_compatible_schema, apply_schema, execute_batch, runtime_schema_compatible,
@@ -422,17 +419,6 @@ pub struct SqliteStorage {
     /// cleanup the files accumulate in `TMPDIR` (#299). `None` for persistent
     /// databases, which must never be deleted on drop.
     temp_db_path: Option<PathBuf>,
-    /// Tier 1 attribution to stamp onto the audit events of the NEXT mutation
-    /// (issue #312, Layer 3 capture-only). Set via
-    /// [`SqliteStorage::set_pending_event_attribution`] immediately before a
-    /// `create`/`update` call so the command layer can attach self-reported
-    /// agent identity without threading it through every storage signature.
-    /// Consumed by exactly one COMMITTING `mutate()` (cleared only after the
-    /// write transaction commits, so a JSONL-recovery retry can still stamp it),
-    /// or cleared by any staged-mutation entry point that returns without
-    /// committing (e.g. an empty-`updates` no-op). It therefore never leaks into
-    /// an unrelated subsequent operation. Capture-only — never used for gating.
-    pending_event_attribution: Option<EventAttribution>,
     /// Repository-level workflow capacity policy loaded by the command/config
     /// layer.  Direct storage users default to an inactive policy and may opt
     /// in with [`SqliteStorage::set_workflow_capacity_policy`].  Enforcement
@@ -451,50 +437,9 @@ pub struct SqliteStorage {
 }
 
 /// Context for a mutation operation, tracking side effects.
-/// Tier 1 attribution captured on status-mutating commands (issue #312,
-/// Layer 3 capture-only). Self-reported agent/harness/model identity that is
-/// recorded onto emitted audit events as a trail ONLY — it is never gated or
-/// enforced on. Empty/whitespace-only inputs are coerced to `None` so absent
-/// attribution never produces blank-string noise in the audit log.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EventAttribution {
-    pub agent_name: Option<String>,
-    pub harness: Option<String>,
-    pub model: Option<String>,
-}
-
-impl EventAttribution {
-    /// Build attribution from raw CLI/env inputs, normalizing empty or
-    /// whitespace-only values to `None`.
-    #[must_use]
-    pub fn new(agent_name: Option<&str>, harness: Option<&str>, model: Option<&str>) -> Self {
-        let norm = |v: Option<&str>| {
-            v.map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToString::to_string)
-        };
-        Self {
-            agent_name: norm(agent_name),
-            harness: norm(harness),
-            model: norm(model),
-        }
-    }
-
-    /// True when no attribution value was supplied.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.agent_name.is_none() && self.harness.is_none() && self.model.is_none()
-    }
-}
-
 pub struct MutationContext {
     pub op_name: String,
     pub actor: String,
-    /// Attribution stamped onto every event this context records (issue #312,
-    /// Layer 3 capture-only). Defaults to empty; set per-command before the
-    /// mutation runs. Capture-only — never used for gating.
-    pub attribution: EventAttribution,
-    pub events: Vec<Event>,
     pub dirty_ids: HashSet<String>,
     pub invalidate_blocked_cache: bool,
     /// When set, only these issue IDs (and their transitive parent-child
@@ -719,8 +664,6 @@ impl MutationContext {
         Self {
             op_name: op_name.to_string(),
             actor: actor.to_string(),
-            attribution: EventAttribution::default(),
-            events: Vec::new(),
             dirty_ids: HashSet::new(),
             invalidate_blocked_cache: false,
             cache_affected_ids: None,
@@ -728,46 +671,6 @@ impl MutationContext {
             force_flush: false,
             capacity_warnings: Vec::new(),
         }
-    }
-
-    pub fn record_event(&mut self, event_type: EventType, issue_id: &str, details: Option<String>) {
-        self.events.push(Event {
-            id: 0, // Placeholder, DB assigns auto-inc ID
-            issue_id: issue_id.to_string(),
-            event_type,
-            actor: self.actor.clone(),
-            old_value: None,
-            new_value: None,
-            comment: details,
-            created_at: Utc::now(),
-            agent_name: self.attribution.agent_name.clone(),
-            harness: self.attribution.harness.clone(),
-            model: self.attribution.model.clone(),
-        });
-    }
-
-    /// Record a field change event with old and new values.
-    pub fn record_field_change(
-        &mut self,
-        event_type: EventType,
-        issue_id: &str,
-        old_value: Option<String>,
-        new_value: Option<String>,
-        comment: Option<String>,
-    ) {
-        self.events.push(Event {
-            id: 0,
-            issue_id: issue_id.to_string(),
-            event_type,
-            actor: self.actor.clone(),
-            old_value,
-            new_value,
-            comment,
-            created_at: Utc::now(),
-            agent_name: self.attribution.agent_name.clone(),
-            harness: self.attribution.harness.clone(),
-            model: self.attribution.model.clone(),
-        });
     }
 
     pub fn mark_dirty(&mut self, issue_id: &str) {
@@ -1174,7 +1077,6 @@ impl SqliteStorage {
             conn,
             mutation_count: 0,
             temp_db_path: None,
-            pending_event_attribution: None,
             workflow_capacity_policy: crate::close_policy::CapacityPolicy::default(),
             workflow_transition_policy: crate::close_policy::Workflow::default(),
             last_capacity_warnings: Vec::new(),
@@ -1210,7 +1112,6 @@ impl SqliteStorage {
             conn,
             mutation_count: 0,
             temp_db_path: None,
-            pending_event_attribution: None,
             workflow_capacity_policy: crate::close_policy::CapacityPolicy::default(),
             workflow_transition_policy: crate::close_policy::Workflow::default(),
             last_capacity_warnings: Vec::new(),
@@ -1262,7 +1163,6 @@ impl SqliteStorage {
             conn,
             mutation_count: 0,
             temp_db_path: Some(path.to_path_buf()),
-            pending_event_attribution: None,
             workflow_capacity_policy: crate::close_policy::CapacityPolicy::default(),
             workflow_transition_policy: crate::close_policy::Workflow::default(),
             last_capacity_warnings: Vec::new(),
@@ -1456,7 +1356,6 @@ impl SqliteStorage {
             ("dependencies", "depends_on_id"),
             ("labels", "issue_id"),
             ("comments", "issue_id"),
-            ("events", "issue_id"),
             ("dirty_issues", "issue_id"),
             ("export_hashes", "issue_id"),
             ("blocked_issues_cache", "issue_id"),
@@ -1494,7 +1393,6 @@ impl SqliteStorage {
             ("dependencies", "depends_on_id"),
             ("labels", "issue_id"),
             ("comments", "issue_id"),
-            ("events", "issue_id"),
             ("dirty_issues", "issue_id"),
             ("export_hashes", "issue_id"),
             ("blocked_issues_cache", "issue_id"),
@@ -1938,61 +1836,10 @@ impl SqliteStorage {
         Ok(messages)
     }
 
-    /// Get audit events for a specific issue.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn get_events(&self, issue_id: &str, limit: usize) -> Result<Vec<Event>> {
-        crate::storage::events::get_events(&self.conn, issue_id, limit)
-    }
-
-    /// Get all audit events (for summary).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn get_all_events(&self, limit: usize) -> Result<Vec<Event>> {
-        crate::storage::events::get_all_events(&self.conn, limit)
-    }
-
-    /// Find the actor who most recently transitioned `issue_id` into the
-    /// `in_progress` state. Returns `None` when the issue never had such a
-    /// transition recorded — typical of issues that went from `open` to
-    /// `closed` without a claim step.
-    ///
-    /// Used by the closure-time `forbid_self_close_after_in_progress` policy
-    /// gate (issue #274 Phase 1).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying event query fails.
-    pub fn find_last_in_progress_actor(&self, issue_id: &str) -> Result<Option<String>> {
-        let events = crate::storage::events::get_events(&self.conn, issue_id, 0)?;
-        // get_events returns DESC ordering by created_at then id, so the first
-        // matching event is the most recent transition into in_progress.
-        for event in events {
-            if event.event_type == crate::model::EventType::StatusChanged
-                && event
-                    .new_value
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|v| v.eq_ignore_ascii_case("in_progress"))
-            {
-                let actor = event.actor.trim();
-                if actor.is_empty() {
-                    return Ok(None);
-                }
-                return Ok(Some(actor.to_string()));
-            }
-        }
-        Ok(None)
-    }
-
     /// Persist closure-time policy metadata (issue #274 Phase 1) for `issue_id`.
     ///
     /// Inserts (or replaces) one row in the `close_metadata` table with the
-    /// supplied attribution + bypass auditing values. All fields are optional:
+    /// bypass auditing values. All fields are optional:
     /// passing every-`None` still records a row that pins `bypassed_policy = 0`
     /// for the close, which keeps the table strictly additive — every close
     /// performed under an active policy is queryable later. Callers decide
@@ -2009,7 +1856,6 @@ impl SqliteStorage {
     pub fn record_close_metadata(
         &self,
         issue_id: &str,
-        attribution: &crate::close_policy::AttributionValues,
         bypassed: bool,
         bypass_reason: Option<&str>,
         policy_gates_fired: &[String],
@@ -2017,34 +1863,18 @@ impl SqliteStorage {
         let gates_json = serde_json::to_string(policy_gates_fired).map_err(BeadsError::from)?;
 
         // INSERT OR REPLACE: a re-close (e.g. close → reopen → close) overwrites
-        // the prior row. If the project ever needs full history, querying the
-        // events table gives an audit trail; `close_metadata` is the
-        // currently-effective metadata for the most recent close.
+        // the prior row. `close_metadata` records the currently-effective
+        // metadata for the most recent close, not a history of them.
         self.conn.execute_with_params(
             "INSERT OR REPLACE INTO close_metadata (
                 issue_id,
-                closed_by_agent_name,
-                closed_by_harness,
-                closed_by_model,
                 bypassed_policy,
                 bypass_reason,
                 policy_gates_fired,
                 recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
             &[
                 SqliteValue::from(issue_id),
-                attribution
-                    .agent_name
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                attribution
-                    .harness
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                attribution
-                    .model
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
                 SqliteValue::from(i64::from(bypassed)),
                 bypass_reason.map_or(SqliteValue::Null, SqliteValue::from),
                 SqliteValue::from(gates_json.as_str()),
@@ -2065,8 +1895,7 @@ impl SqliteStorage {
             return Ok(None);
         }
         let rows = self.conn.query_with_params(
-            "SELECT closed_by_agent_name, closed_by_harness, closed_by_model, \
-                    bypassed_policy, bypass_reason, policy_gates_fired, recorded_at \
+            "SELECT bypassed_policy, bypass_reason, policy_gates_fired, recorded_at \
              FROM close_metadata WHERE issue_id = ?",
             &[SqliteValue::from(issue_id)],
         )?;
@@ -2074,12 +1903,12 @@ impl SqliteStorage {
             return Ok(None);
         };
         let bypassed = row
-            .get(3)
+            .get(0)
             .and_then(SqliteValue::as_integer)
             .unwrap_or_default()
             != 0;
         let gates_json: Option<String> =
-            row.get(5).and_then(SqliteValue::as_text).map(String::from);
+            row.get(2).and_then(SqliteValue::as_text).map(String::from);
         let policy_gates_fired = match gates_json.as_deref() {
             Some(json) if !json.is_empty() => {
                 serde_json::from_str::<Vec<String>>(json).map_err(BeadsError::from)?
@@ -2087,55 +1916,15 @@ impl SqliteStorage {
             _ => Vec::new(),
         };
         Ok(Some(CloseMetadataRow {
-            closed_by_agent_name: row.get(0).and_then(SqliteValue::as_text).map(String::from),
-            closed_by_harness: row.get(1).and_then(SqliteValue::as_text).map(String::from),
-            closed_by_model: row.get(2).and_then(SqliteValue::as_text).map(String::from),
             bypassed_policy: bypassed,
-            bypass_reason: row.get(4).and_then(SqliteValue::as_text).map(String::from),
+            bypass_reason: row.get(1).and_then(SqliteValue::as_text).map(String::from),
             policy_gates_fired,
             recorded_at: row
-                .get(6)
+                .get(3)
                 .and_then(SqliteValue::as_text)
                 .map(String::from)
                 .unwrap_or_default(),
         }))
-    }
-
-    fn status_revision_in_tx(conn: &Connection, issue_id: &str) -> Result<i64> {
-        let rows = conn.query_with_params(
-            "SELECT id FROM events
-             WHERE issue_id = ? AND event_type = 'status_changed'
-             ORDER BY id DESC LIMIT 1",
-            &[SqliteValue::from(issue_id)],
-        )?;
-        Ok(rows
-            .first()
-            .and_then(|row| row.get(0))
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(0))
-    }
-
-    /// Return the current status-revision id for an issue.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn status_revision(&self, issue_id: &str) -> Result<i64> {
-        Self::status_revision_in_tx(&self.conn, issue_id)
-    }
-
-    /// Stage Tier 1 attribution for the next mutation (issue #312, Layer 3
-    /// capture-only). The values are stamped onto every audit event produced by
-    /// the immediately following `create`/`update`/status-mutating call, then
-    /// cleared. Pass an empty [`EventAttribution`] (or never call this) to record
-    /// no attribution. This is a recorded audit trail only — it is never used to
-    /// gate, reject, or alter any transition.
-    pub fn set_pending_event_attribution(&mut self, attribution: EventAttribution) {
-        self.pending_event_attribution = if attribution.is_empty() {
-            None
-        } else {
-            Some(attribution)
-        };
     }
 
     /// Install the already-validated repository workflow-capacity policy used
@@ -2778,16 +2567,6 @@ impl SqliteStorage {
         Ok(warnings)
     }
 
-    /// Remove and return any staged Tier 1 attribution without consuming it via
-    /// a mutation (issue #312, Layer 3). Used by the JSONL-recovery path to
-    /// carry a not-yet-committed staged value across a storage rebuild so the
-    /// post-recovery retry can still stamp it (F1). Preserves the invariant that
-    /// pending attribution is consumed by exactly one committing mutation, or
-    /// transferred/cleared — it never leaks into an unrelated operation.
-    pub(crate) fn take_pending_event_attribution(&mut self) -> Option<EventAttribution> {
-        self.pending_event_attribution.take()
-    }
-
     /// Execute a mutation with the 4-step transaction protocol.
     ///
     /// Retries on all transient BUSY errors (from BEGIN, DML, or COMMIT) with
@@ -2833,50 +2612,10 @@ impl SqliteStorage {
         // Invariant: pending attribution is consumed by exactly one committing
         // mutation, or cleared — it never leaks into a later, unrelated
         // operation. It is `.take()`n below only after a successful commit.
-        let pending_attribution = self.pending_event_attribution.clone().unwrap_or_default();
 
         let tx_result: Result<_> = self.with_write_transaction(|storage| {
             let mut ctx = MutationContext::new(op, actor);
-            ctx.attribution = pending_attribution.clone();
             let result = f(&storage.conn, &mut ctx)?;
-
-            // Write events
-            if !ctx.events.is_empty() {
-                let sql = "INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, agent_name, harness, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-                for event in &ctx.events {
-                    let params = vec![
-                        SqliteValue::from(event.issue_id.as_str()),
-                        SqliteValue::from(event.event_type.as_str()),
-                        SqliteValue::from(event.actor.as_str()),
-                        event
-                            .old_value
-                            .as_deref()
-                            .map_or(SqliteValue::Null, SqliteValue::from),
-                        event
-                            .new_value
-                            .as_deref()
-                            .map_or(SqliteValue::Null, SqliteValue::from),
-                        event
-                            .comment
-                            .as_deref()
-                            .map_or(SqliteValue::Null, SqliteValue::from),
-                        SqliteValue::from(event.created_at.to_rfc3339()),
-                        event
-                            .agent_name
-                            .as_deref()
-                            .map_or(SqliteValue::Null, SqliteValue::from),
-                        event
-                            .harness
-                            .as_deref()
-                            .map_or(SqliteValue::Null, SqliteValue::from),
-                        event
-                            .model
-                            .as_deref()
-                            .map_or(SqliteValue::Null, SqliteValue::from),
-                    ];
-                    storage.conn.execute_with_params(sql, &params)?;
-                }
-            }
 
             // Mark dirty
             if !ctx.dirty_ids.is_empty() {
@@ -2925,9 +2664,6 @@ impl SqliteStorage {
         // Consume the staged attribution only now that the transaction has
         // COMMITTED (#312 hardening, F1). On a recoverable error the slot is
         // intentionally left intact so the JSONL-recovery retry can re-stamp it.
-        if tx_result.is_ok() {
-            self.pending_event_attribution = None;
-        }
 
         // Re-enable FK enforcement after the transaction completes
         // (regardless of success or failure).
@@ -3094,11 +2830,6 @@ impl SqliteStorage {
                     "INSERT INTO labels (issue_id, label) VALUES (?, ?)",
                     &[SqliteValue::from(issue.id.as_str()), SqliteValue::from(label.as_str())],
                 )?;
-                ctx.record_event(
-                    EventType::LabelAdded,
-                    &issue.id,
-                    Some(format!("Added label {label}")),
-                );
             }
 
             // Insert Dependencies
@@ -3142,14 +2873,6 @@ impl SqliteStorage {
                     ],
                 )?;
 
-                ctx.record_event(
-                    EventType::DependencyAdded,
-                    &issue.id,
-                    Some(format!(
-                        "Added dependency on {} ({})",
-                        dep.depends_on_id, dep.dep_type
-                    )),
-                );
                 ctx.invalidate_cache_for(&[issue.id.as_str(), dep.depends_on_id.as_str()]);
             }
 
@@ -3164,18 +2887,7 @@ impl SqliteStorage {
                         SqliteValue::from(comment.created_at.to_rfc3339()),
                     ],
                 )?;
-                ctx.record_event(
-                    EventType::Commented,
-                    &issue.id,
-                    Some(comment.body.clone()),
-                );
             }
-
-            ctx.record_event(
-                EventType::Created,
-                &issue.id,
-                Some(format!("Created issue: {}", issue.title)),
-            );
 
             ctx.mark_dirty(&issue.id);
 
@@ -3431,7 +3143,6 @@ impl SqliteStorage {
         let mut seen = HashSet::with_capacity(updates.len());
         for (id, _) in updates {
             if !seen.insert(id.as_str()) {
-                self.pending_event_attribution = None;
                 return Err(BeadsError::validation(
                     "issue_ids",
                     format!("duplicate issue ID in atomic update batch: {id}"),
@@ -3442,7 +3153,6 @@ impl SqliteStorage {
         if updates.iter().all(|(_, update)| update.is_empty()) {
             // This path does not call `mutate()`, so explicitly consume staged
             // attribution just like the historical single-update no-op path.
-            self.pending_event_attribution = None;
         } else {
             let capacity_policy = self.workflow_capacity_policy.clone();
             let workflow_policy = self.workflow_transition_policy.clone();
@@ -3565,16 +3275,8 @@ impl SqliteStorage {
 
         // Title
         if let Some(ref title) = updates.title {
-            let old_title = issue.title.clone();
             issue.title.clone_from(title);
             add_update("title", SqliteValue::from(title.as_str()));
-            ctx.record_field_change(
-                EventType::Updated,
-                id,
-                Some(old_title),
-                Some(title.clone()),
-                Some("Title changed".to_string()),
-            );
         }
 
         // Simple text fields - use empty string instead of NULL for bd compatibility
@@ -3609,37 +3311,15 @@ impl SqliteStorage {
             issue.status.clone_from(status);
             add_update("status", SqliteValue::from(status.as_str()));
 
-            if status.as_str() != old_status {
-                ctx.record_field_change(
-                    EventType::StatusChanged,
-                    id,
-                    Some(old_status),
-                    Some(status.as_str().to_string()),
-                    None,
-                );
-
-                if let Some(comment) = updates.transition_comment.as_deref() {
-                    let comment = comment.trim();
-                    validate_new_comment(id, actor, comment)?;
-                    insert_comment_row(conn, id, actor, comment)?;
-                    ctx.record_event(EventType::Commented, id, Some(comment.to_string()));
-                }
-                if let Some(reason) = updates.workflow_policy_bypass_reason.as_deref() {
-                    ctx.record_event(
-                        EventType::Custom("workflow_policy_bypassed".to_string()),
-                        id,
-                        Some(reason.trim().to_string()),
-                    );
-                }
+            if status.as_str() != old_status
+                && let Some(comment) = updates.transition_comment.as_deref()
+            {
+                let comment = comment.trim();
+                validate_new_comment(id, actor, comment)?;
+                insert_comment_row(conn, id, actor, comment)?;
             }
 
-            // Record Closed event if status is now Closed and wasn't before
             if *status == Status::Closed {
-                if !was_terminal {
-                    let reason = updates.close_reason.as_ref().and_then(Clone::clone);
-                    ctx.record_event(EventType::Closed, id, reason);
-                }
-
                 // Auto-set closed_at if not provided
                 if updates.closed_at.is_none() && issue.closed_at.is_none() {
                     let now = Utc::now();
@@ -3658,10 +3338,6 @@ impl SqliteStorage {
             } else if *status == Status::Tombstone {
                 let reason = updates.close_reason.as_ref().and_then(Clone::clone);
 
-                if !was_terminal {
-                    ctx.record_event(EventType::Deleted, id, reason.clone());
-                }
-
                 let now = Utc::now();
                 issue.deleted_at = Some(now);
                 issue.deleted_by = Some(actor.to_string());
@@ -3676,7 +3352,6 @@ impl SqliteStorage {
                 );
             } else {
                 if was_terminal && !status.is_terminal() {
-                    ctx.record_event(EventType::Reopened, id, None);
                     conn.execute_with_params(
                         "DELETE FROM close_metadata WHERE issue_id = ?",
                         &[SqliteValue::from(id)],
@@ -3714,13 +3389,6 @@ impl SqliteStorage {
             if priority.0 != old_priority {
                 issue.priority = priority;
                 add_update("priority", SqliteValue::from(i64::from(priority.0)));
-                ctx.record_field_change(
-                    EventType::PriorityChanged,
-                    id,
-                    Some(old_priority.to_string()),
-                    Some(priority.0.to_string()),
-                    None,
-                );
             }
         }
 
@@ -3732,7 +3400,6 @@ impl SqliteStorage {
 
         // Assignee
         if let Some(ref assignee_opt) = updates.assignee {
-            let old_assignee = issue.assignee.clone();
             issue.assignee.clone_from(assignee_opt);
             add_update(
                 "assignee",
@@ -3740,15 +3407,6 @@ impl SqliteStorage {
                     .as_deref()
                     .map_or(SqliteValue::Null, SqliteValue::from),
             );
-            if old_assignee != *assignee_opt {
-                ctx.record_field_change(
-                    EventType::AssigneeChanged,
-                    id,
-                    old_assignee,
-                    assignee_opt.clone(),
-                    None,
-                );
-            }
         }
 
         // Simple Option fields - use empty string instead of NULL for bd compatibility
@@ -3967,7 +3625,6 @@ impl SqliteStorage {
             return Ok(issue);
         }
 
-        let was_terminal = issue.status.is_terminal();
         let previous_status = issue.status.as_str().to_string();
         let original_type = issue.issue_type.as_str().to_string();
         let timestamp = deleted_at.unwrap_or_else(Utc::now);
@@ -4010,13 +3667,6 @@ impl SqliteStorage {
                 &[SqliteValue::from(id)],
             )?;
 
-            if !was_terminal {
-                ctx.record_event(
-                    EventType::Deleted,
-                    id,
-                    Some(format!("Deleted issue: {reason}")),
-                );
-            }
             ctx.mark_dirty(id);
             ctx.invalidate_cache();
 
@@ -4056,10 +3706,6 @@ impl SqliteStorage {
             )?;
             conn.execute_with_params(
                 "DELETE FROM dependencies WHERE depends_on_id = ?",
-                &[SqliteValue::from(id)],
-            )?;
-            conn.execute_with_params(
-                "DELETE FROM events WHERE issue_id = ?",
                 &[SqliteValue::from(id)],
             )?;
             conn.execute_with_params(
@@ -8309,11 +7955,6 @@ impl SqliteStorage {
                 ],
             )?;
 
-            ctx.record_event(
-                EventType::DependencyAdded,
-                issue_id,
-                Some(format!("Added dependency on {depends_on_id} ({dep_type})")),
-            );
             ctx.mark_dirty(issue_id);
             // Defer the blocked-cache rebuild to the next read rather than
             // doing it eagerly in a second write transaction.  This eliminates
@@ -8486,14 +8127,6 @@ impl SqliteStorage {
 
                 inserted_count += 1;
                 touched_issue_ids.insert(dep.issue_id.clone());
-                ctx.record_event(
-                    EventType::DependencyAdded,
-                    &dep.issue_id,
-                    Some(format!(
-                        "Added dependency on {} ({})",
-                        dep.depends_on_id, dep_type
-                    )),
-                );
                 ctx.mark_dirty(&dep.issue_id);
             }
 
@@ -8546,11 +8179,6 @@ impl SqliteStorage {
                     ],
                 )?;
 
-                ctx.record_event(
-                    EventType::DependencyRemoved,
-                    issue_id,
-                    Some(format!("Removed dependency on {depends_on_id}")),
-                );
                 ctx.mark_dirty(issue_id);
                 // Defer rebuild for the same reason as add_dependency_with_metadata.
                 ctx.invalidate_cache_deferred();
@@ -8606,11 +8234,6 @@ impl SqliteStorage {
                     }
                 }
 
-                ctx.record_event(
-                    EventType::DependencyRemoved,
-                    issue_id,
-                    Some(format!("Removed {total} dependency links")),
-                );
                 ctx.mark_dirty(issue_id);
                 for affected_id in &affected {
                     ctx.mark_dirty(affected_id);
@@ -8657,11 +8280,6 @@ impl SqliteStorage {
                     ],
                 )?;
 
-                ctx.record_event(
-                    EventType::DependencyRemoved,
-                    issue_id,
-                    Some("Removed parent".to_string()),
-                );
                 ctx.mark_dirty(issue_id);
                 let mut cache_ids = vec![issue_id];
                 for previous_parent in &previous_parents {
@@ -8758,18 +8376,6 @@ impl SqliteStorage {
                         SqliteValue::from(actor),
                     ],
                 )?;
-
-                ctx.record_event(
-                    EventType::DependencyAdded,
-                    issue_id,
-                    Some(format!("Set parent to {pid}")),
-                );
-            } else {
-                ctx.record_event(
-                    EventType::DependencyRemoved,
-                    issue_id,
-                    Some("Removed parent".to_string()),
-                );
             }
 
             conn.execute_with_params(
@@ -8854,11 +8460,6 @@ impl SqliteStorage {
                 &[SqliteValue::from(issue_id), SqliteValue::from(label)],
             )?;
 
-            ctx.record_event(
-                EventType::LabelAdded,
-                issue_id,
-                Some(format!("Added label {label}")),
-            );
             ctx.mark_dirty(issue_id);
 
             conn.execute_with_params(
@@ -9034,11 +8635,6 @@ impl SqliteStorage {
                         ],
                     )?;
 
-                    ctx.record_event(
-                        EventType::LabelAdded,
-                        issue_id,
-                        Some(format!("Added label {label}")),
-                    );
                     ctx.mark_dirty(issue_id);
                     changed_ids.insert((*issue_id).clone());
                 }
@@ -9104,11 +8700,6 @@ impl SqliteStorage {
                     ],
                 )?;
 
-                ctx.record_event(
-                    EventType::LabelRemoved,
-                    issue_id,
-                    Some(format!("Removed label {label}")),
-                );
                 ctx.mark_dirty(issue_id);
             }
 
@@ -9239,11 +8830,6 @@ impl SqliteStorage {
                 )?;
 
                 for issue_id in &removable_ids {
-                    ctx.record_event(
-                        EventType::LabelRemoved,
-                        issue_id,
-                        Some(format!("Removed label {label}")),
-                    );
                     ctx.mark_dirty(issue_id);
                     changed_ids.insert((*issue_id).clone());
                 }
@@ -9294,11 +8880,6 @@ impl SqliteStorage {
                     ],
                 )?;
 
-                ctx.record_event(
-                    EventType::LabelRemoved,
-                    issue_id,
-                    Some(format!("Removed {rows} labels")),
-                );
                 ctx.mark_dirty(issue_id);
             }
 
@@ -9356,46 +8937,16 @@ impl SqliteStorage {
                 )?;
             }
 
-            // Record changes
-            let removed: Vec<_> = old_labels
+            // The label set changed (or duplicates were normalised), so the
+            // issue's updated_at moves and it is marked dirty for re-export.
+            let removed_any = old_labels
                 .iter()
-                .filter(|label| !desired_labels.contains(label))
-                .collect();
-            let added: Vec<_> = desired_labels
+                .any(|label| !desired_labels.contains(label));
+            let added_any = desired_labels
                 .iter()
-                .filter(|label| !old_labels.contains(label))
-                .collect();
+                .any(|label| !old_labels.contains(label));
 
-            if !removed.is_empty() || !added.is_empty() || db_has_duplicate_labels {
-                let mut details = Vec::new();
-                if !removed.is_empty() {
-                    details.push(format!(
-                        "removed: {}",
-                        removed
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                if !added.is_empty() {
-                    details.push(format!(
-                        "added: {}",
-                        added
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                if db_has_duplicate_labels && removed.is_empty() && added.is_empty() {
-                    details.push("normalized duplicate labels".to_string());
-                }
-                ctx.record_event(
-                    EventType::Updated,
-                    issue_id,
-                    Some(format!("Labels {}", details.join("; "))),
-                );
+            if removed_any || added_any || db_has_duplicate_labels {
                 ctx.mark_dirty(issue_id);
 
                 conn.execute_with_params(
@@ -9730,11 +9281,6 @@ impl SqliteStorage {
 
             let now = Utc::now().to_rfc3339();
             for issue_id in &issue_ids {
-                ctx.record_event(
-                    EventType::LabelRemoved,
-                    issue_id,
-                    Some(format!("Renamed label {old_name} to {new_name}")),
-                );
                 ctx.mark_dirty(issue_id);
 
                 conn.execute_with_params(
@@ -9872,24 +9418,6 @@ impl SqliteStorage {
         Ok(map)
     }
 
-    /// Count how many audit events belong to an issue.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn count_issue_events(&self, issue_id: &str) -> Result<usize> {
-        let count = self
-            .conn
-            .query_row_with_params(
-                "SELECT count(*) FROM events WHERE issue_id = ?",
-                &[SqliteValue::from(issue_id)],
-            )?
-            .get(0)
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(0);
-        Ok(usize::try_from(count).unwrap_or(0))
-    }
-
     /// Add a comment to an issue.
     ///
     /// # Errors
@@ -9911,7 +9439,6 @@ impl SqliteStorage {
                 ],
             )?;
 
-            ctx.record_event(EventType::Commented, issue_id, Some(text.to_string()));
             ctx.mark_dirty(issue_id);
 
             fetch_comment(conn, comment_id)
@@ -11170,8 +10697,6 @@ impl SqliteStorage {
         &self,
         id: &str,
         include_comments: bool,
-        include_events: bool,
-        event_limit: usize,
     ) -> Result<Option<IssueDetails>> {
         let Some(issue) = self.get_issue(id)? else {
             return Ok(None);
@@ -11198,11 +10723,6 @@ impl SqliteStorage {
         } else {
             vec![]
         };
-        let events = if include_events {
-            get_events(&self.conn, id, event_limit)?
-        } else {
-            vec![]
-        };
         let parent = relation_presence.parent;
 
         Ok(Some(IssueDetails {
@@ -11211,7 +10731,6 @@ impl SqliteStorage {
             dependencies,
             dependents,
             comments,
-            events,
             parent,
         }))
     }
@@ -11968,9 +11487,6 @@ pub struct ListFilters {
 /// attribution, a `--bypass-policy` waiver, or the list of gates that fired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseMetadataRow {
-    pub closed_by_agent_name: Option<String>,
-    pub closed_by_harness: Option<String>,
-    pub closed_by_model: Option<String>,
     pub bypassed_policy: bool,
     pub bypass_reason: Option<String>,
     /// Names of gates that fired during evaluation. Always serialised as a
@@ -14358,16 +13874,6 @@ mod tests {
                 "operator",
             )
             .unwrap();
-
-        let events = storage.get_events("bd-bypass", 0).unwrap();
-        let bypass = events
-            .iter()
-            .find(|event| {
-                event.event_type == EventType::Custom("workflow_policy_bypassed".to_string())
-            })
-            .expect("bypass event");
-        assert_eq!(bypass.actor, "operator");
-        assert_eq!(bypass.comment.as_deref(), Some("incident response"));
     }
 
     #[test]
@@ -15166,19 +14672,6 @@ mod tests {
             "create_issue should persist the canonical content hash"
         );
 
-        // Verify event
-        let event_count = storage
-            .conn
-            .query_row_with_params(
-                "SELECT count(*) FROM events WHERE issue_id = ?",
-                &[SqliteValue::from("bd-1")],
-            )
-            .unwrap()
-            .get(0)
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(0);
-        assert_eq!(event_count, 1);
-
         // Verify dirty
         let dirty_count = storage
             .conn
@@ -15225,13 +14718,6 @@ mod tests {
                 .expect("lookup invalid issue")
                 .is_none(),
             "invalid issue must not be persisted"
-        );
-        assert!(
-            storage
-                .get_events("bd-invalid-create", 100)
-                .expect("events")
-                .is_empty(),
-            "invalid issue must not emit events"
         );
         let dirty_ids = storage.get_dirty_issue_ids().expect("dirty marker");
         assert!(
@@ -15302,25 +14788,12 @@ mod tests {
         storage.create_issue(&issue, "tester").unwrap();
 
         // Attempt a mutation that fails
-        let result: Result<()> = storage.mutate("fail_op", "tester", |_tx, ctx| {
-            // Do something valid first (record an event)
-            ctx.record_event(
-                EventType::Updated,
-                "bd-tx1",
-                Some("Should be rolled back".to_string()),
-            );
-
+        let result: Result<()> = storage.mutate("fail_op", "tester", |_tx, _ctx| {
             // Return error to trigger rollback
             Err(BeadsError::Config("Planned failure".to_string()))
         });
 
         assert!(result.is_err());
-
-        // Verify side effects (event) are gone
-        let events = storage.get_events("bd-tx1", 100).unwrap();
-        // Should only have the creation event
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, EventType::Created);
     }
 
     #[test]
@@ -15384,14 +14857,7 @@ mod tests {
         );
         storage.create_issue(&issue, "tester").unwrap();
 
-        let result: Result<()> = storage.mutate("fk_tolerance", "tester", |_tx, ctx| {
-            ctx.record_event(
-                EventType::Updated,
-                "bd-missing",
-                Some("Event for non-existent issue".to_string()),
-            );
-            Ok(())
-        });
+        let result: Result<()> = storage.mutate("fk_tolerance", "tester", |_tx, _ctx| Ok(()));
 
         assert!(
             result.is_ok(),
@@ -16072,42 +15538,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reopen_records_reopened_event() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
-
-        let issue = make_issue("bd-r1", "Reopen me", Status::Open, 2, None, t1, None);
-        storage.create_issue(&issue, "tester").unwrap();
-
-        let close_update = IssueUpdate {
-            status: Some(Status::Closed),
-            ..IssueUpdate::default()
-        };
-        storage
-            .update_issue("bd-r1", &close_update, "tester")
-            .unwrap();
-
-        let reopen_update = IssueUpdate {
-            status: Some(Status::Open),
-            closed_at: Some(None),
-            close_reason: Some(None),
-            closed_by_session: Some(None),
-            ..IssueUpdate::default()
-        };
-        storage
-            .update_issue("bd-r1", &reopen_update, "tester")
-            .unwrap();
-
-        let events = storage.get_events("bd-r1", 10).unwrap();
-        println!("Events: {:#?}", events);
-        assert!(
-            events
-                .iter()
-                .any(|event| event.event_type == EventType::Reopened)
-        );
-    }
-
-    #[test]
     fn test_reopen_clears_close_metadata() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
@@ -16132,13 +15562,7 @@ mod tests {
             .update_issue("bd-rmeta", &close_update, "tester")
             .unwrap();
         storage
-            .record_close_metadata(
-                "bd-rmeta",
-                &crate::close_policy::AttributionValues::default(),
-                false,
-                None,
-                &[],
-            )
+            .record_close_metadata("bd-rmeta", false, None, &[])
             .unwrap();
         assert!(storage.get_close_metadata("bd-rmeta").unwrap().is_some());
 
@@ -16181,13 +15605,7 @@ mod tests {
             .update_issue("bd-dmeta", &close_update, "tester")
             .unwrap();
         storage
-            .record_close_metadata(
-                "bd-dmeta",
-                &crate::close_policy::AttributionValues::default(),
-                false,
-                None,
-                &[],
-            )
+            .record_close_metadata("bd-dmeta", false, None, &[])
             .unwrap();
         assert!(storage.get_close_metadata("bd-dmeta").unwrap().is_some());
 
@@ -16242,15 +15660,6 @@ mod tests {
         assert_eq!(second.delete_reason, first.delete_reason);
         assert_eq!(second.updated_at, first.updated_at);
         assert_eq!(storage.get_dirty_issue_ids().unwrap(), Vec::<String>::new());
-        assert_eq!(
-            storage
-                .get_events("bd-d3", 10)
-                .unwrap()
-                .iter()
-                .filter(|event| event.event_type == EventType::Deleted)
-                .count(),
-            1
-        );
     }
 
     #[test]
@@ -16273,15 +15682,6 @@ mod tests {
             .and_then(SqliteValue::as_integer)
             .unwrap_or(0);
         assert_eq!(dirty_count, 0);
-
-        let event_count = storage
-            .conn
-            .query_row("SELECT COUNT(*) FROM events WHERE issue_id = 'bd-p1'")
-            .unwrap()
-            .get(0)
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(0);
-        assert_eq!(event_count, 0);
     }
 
     #[test]
@@ -17157,7 +16557,6 @@ mod tests {
         let issue = make_issue("bd-l3", "Rename label", Status::Open, 2, None, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
         storage.add_label("bd-l3", "backend", "tester").unwrap();
-        let event_count_before = storage.get_events("bd-l3", 100).unwrap().len();
 
         let affected = storage
             .rename_label("backend", "backend", "tester")
@@ -17167,10 +16566,6 @@ mod tests {
         assert_eq!(
             storage.get_labels("bd-l3").unwrap(),
             vec!["backend".to_string()]
-        );
-        assert_eq!(
-            storage.get_events("bd-l3", 100).unwrap().len(),
-            event_count_before
         );
     }
 
@@ -17818,10 +17213,6 @@ mod tests {
             .get_issue("bd-parent-noop-child")
             .unwrap()
             .expect("child exists");
-        let event_count_before = storage
-            .get_events("bd-parent-noop-child", 100)
-            .unwrap()
-            .len();
 
         storage
             .set_parent(
@@ -17842,13 +17233,6 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("bd-parent-noop-parent")
-        );
-        assert_eq!(
-            storage
-                .get_events("bd-parent-noop-child", 100)
-                .unwrap()
-                .len(),
-            event_count_before
         );
         assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
     }
@@ -18049,10 +17433,6 @@ mod tests {
             .get_issue("bd-parent-clear-noop")
             .unwrap()
             .expect("issue exists");
-        let event_count_before = storage
-            .get_events("bd-parent-clear-noop", 100)
-            .unwrap()
-            .len();
 
         storage
             .set_parent("bd-parent-clear-noop", None, "tester")
@@ -18064,13 +17444,6 @@ mod tests {
             .expect("issue exists");
         assert_eq!(after.updated_at, before.updated_at);
         assert_eq!(storage.get_parent_id("bd-parent-clear-noop").unwrap(), None);
-        assert_eq!(
-            storage
-                .get_events("bd-parent-clear-noop", 100)
-                .unwrap()
-                .len(),
-            event_count_before
-        );
         assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
     }
 
@@ -19354,40 +18727,6 @@ mod tests {
             .and_then(SqliteValue::as_integer)
             .unwrap_or(0);
         assert_eq!(dirty_count, 1);
-    }
-
-    #[test]
-    fn test_events_have_timestamps() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let issue = make_issue(
-            "bd-e1",
-            "Event Test",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
-        storage.create_issue(&issue, "tester").unwrap();
-
-        // Verify event has timestamp
-        let created_at: String = storage
-            .conn
-            .query_row_with_params(
-                "SELECT created_at FROM events WHERE issue_id = ?",
-                &[SqliteValue::from("bd-e1")],
-            )
-            .unwrap()
-            .get(0)
-            .and_then(SqliteValue::as_text)
-            .unwrap_or("")
-            .to_string();
-
-        // Should be a valid RFC3339 timestamp
-        assert!(
-            chrono::DateTime::parse_from_rfc3339(&created_at).is_ok(),
-            "Event timestamp should be valid RFC3339"
-        );
     }
 
     #[test]
@@ -21747,12 +21086,6 @@ mod tests {
             None,
         );
         storage.create_issue(&issue, "tester").unwrap();
-        let events_before = storage.get_events(&issue.id, 20).unwrap();
-        assert!(
-            !events_before.is_empty(),
-            "fixture: create_issue should produce at least one event row"
-        );
-
         let mut imported = issue.clone();
         imported.title = "Imported title".to_string();
         imported.updated_at = stamp + chrono::Duration::minutes(1);
@@ -21763,17 +21096,6 @@ mod tests {
 
         let updated = storage.get_issue(&issue.id).unwrap().unwrap();
         assert_eq!(updated.title, "Imported title");
-        assert_eq!(
-            storage.get_events(&issue.id, 20).unwrap().len(),
-            events_before.len(),
-            "child events must survive an import that touches the parent row",
-        );
-        assert!(
-            !storage
-                .has_missing_issue_reference("events", "issue_id")
-                .unwrap(),
-            "import upsert must not leave dangling event rows referencing a deleted parent",
-        );
     }
 
     /// Regression test for issue #263 (a) — secondary contract: import
@@ -24477,7 +23799,6 @@ mod tests {
             conn,
             mutation_count: 0,
             temp_db_path: None,
-            pending_event_attribution: None,
             workflow_capacity_policy: crate::close_policy::CapacityPolicy::default(),
             workflow_transition_policy: crate::close_policy::Workflow::default(),
             last_capacity_warnings: Vec::new(),
@@ -25915,213 +25236,8 @@ mod tests {
     // Issue #312, Layer 3 — attribution capture-only tests
     // ========================================================================
 
-    #[test]
-    fn pending_attribution_is_stamped_onto_create_event() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 6, 7, 12, 0, 0).unwrap();
-        let issue = make_issue(
-            "bd-attr-1",
-            "Attributed create",
-            Status::Open,
-            2,
-            None,
-            now,
-            None,
-        );
-
-        storage.set_pending_event_attribution(EventAttribution::new(
-            Some("agent-7"),
-            Some("codex-cli"),
-            Some("opus-4"),
-        ));
-        storage.create_issue(&issue, "tester").expect("create");
-
-        let events = storage.get_events("bd-attr-1", 0).expect("events");
-        let created = events
-            .iter()
-            .find(|e| e.event_type == EventType::Created)
-            .expect("created event present");
-        assert_eq!(created.agent_name.as_deref(), Some("agent-7"));
-        assert_eq!(created.harness.as_deref(), Some("codex-cli"));
-        assert_eq!(created.model.as_deref(), Some("opus-4"));
-    }
-
-    #[test]
-    fn pending_attribution_is_stamped_onto_update_status_change_without_blocking() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 6, 7, 12, 0, 0).unwrap();
-        let issue = make_issue(
-            "bd-attr-2",
-            "Attributed update",
-            Status::Open,
-            2,
-            None,
-            now,
-            None,
-        );
-        storage.create_issue(&issue, "tester").expect("create");
-
-        storage.set_pending_event_attribution(EventAttribution::new(
-            Some("agent-9"),
-            None,
-            Some("opus-4"),
-        ));
-        let update = IssueUpdate {
-            status: Some(Status::InProgress),
-            ..Default::default()
-        };
-        // The transition must NOT be gated/rejected by the attribution; it is a
-        // recorded audit trail only.
-        let updated = storage
-            .update_issue("bd-attr-2", &update, "tester")
-            .expect("status change should not be blocked by attribution");
-        assert_eq!(updated.status, Status::InProgress);
-
-        let events = storage.get_events("bd-attr-2", 0).expect("events");
-        let status_event = events
-            .iter()
-            .find(|e| e.event_type == EventType::StatusChanged)
-            .expect("status_changed event present");
-        assert_eq!(status_event.agent_name.as_deref(), Some("agent-9"));
-        assert!(status_event.harness.is_none());
-        assert_eq!(status_event.model.as_deref(), Some("opus-4"));
-    }
-
-    #[test]
-    fn absent_attribution_records_no_values_and_does_not_leak() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 6, 7, 12, 0, 0).unwrap();
-
-        // First create stages attribution...
-        storage.set_pending_event_attribution(EventAttribution::new(Some("agent-x"), None, None));
-        let first = make_issue("bd-attr-3", "First", Status::Open, 2, None, now, None);
-        storage
-            .create_issue(&first, "tester")
-            .expect("create first");
-
-        // ...the second create stages NONE, so it must record no attribution
-        // (the prior staging must not leak into this unrelated mutation).
-        let second = make_issue("bd-attr-4", "Second", Status::Open, 2, None, now, None);
-        storage
-            .create_issue(&second, "tester")
-            .expect("create second");
-
-        let second_events = storage.get_events("bd-attr-4", 0).expect("events");
-        let created = second_events
-            .iter()
-            .find(|e| e.event_type == EventType::Created)
-            .expect("created event present");
-        assert!(created.agent_name.is_none());
-        assert!(created.harness.is_none());
-        assert!(created.model.is_none());
-    }
-
-    #[test]
-    fn event_attribution_normalizes_blank_inputs_to_none() {
-        let attribution = EventAttribution::new(Some("  "), Some(""), Some("opus-4"));
-        assert!(attribution.agent_name.is_none());
-        assert!(attribution.harness.is_none());
-        assert_eq!(attribution.model.as_deref(), Some("opus-4"));
-        assert!(!attribution.is_empty());
-        assert!(EventAttribution::new(None, None, None).is_empty());
-    }
-
     // ---- #312 hardening (F1): attribution survives a non-committing mutation
     // and is consumed only after a successful commit -----------------------
 
-    #[test]
-    fn pending_attribution_survives_failed_mutation_and_stamps_on_retry() {
-        // Models the JSONL-recovery retry path: the first `mutate()` does NOT
-        // commit (its closure errors → rollback), so the staged attribution must
-        // remain available for the *next* `mutate()` to stamp. Previously the
-        // start-of-`mutate()` `.take()` consumed it on the failed attempt,
-        // dropping attribution from the recovered write (F1).
-        let mut storage = SqliteStorage::open_memory().unwrap();
-
-        storage.set_pending_event_attribution(EventAttribution::new(
-            Some("agent-retry"),
-            None,
-            Some("opus-4"),
-        ));
-
-        // A mutation whose closure fails with a non-transient error: it rolls
-        // back and never commits. The staged slot must be left intact.
-        let failed: Result<()> = storage.mutate("noop_fail", "tester", |_conn, _ctx| {
-            Err(BeadsError::Config("simulated mutation failure".into()))
-        });
-        assert!(failed.is_err(), "mutation closure error should propagate");
-        assert!(
-            storage.pending_event_attribution.is_some(),
-            "attribution must survive a non-committing mutation so the recovery \
-             retry can still stamp it",
-        );
-
-        // The retry: a committing mutation must now record the (still-staged)
-        // attribution onto its events.
-        let now = Utc.with_ymd_and_hms(2026, 6, 7, 12, 0, 0).unwrap();
-        let issue = make_issue("bd-attr-retry", "Retried", Status::Open, 2, None, now, None);
-        storage.create_issue(&issue, "tester").expect("create");
-
-        let events = storage.get_events("bd-attr-retry", 0).expect("events");
-        let created = events
-            .iter()
-            .find(|e| e.event_type == EventType::Created)
-            .expect("created event present");
-        assert_eq!(created.agent_name.as_deref(), Some("agent-retry"));
-        assert_eq!(created.model.as_deref(), Some("opus-4"));
-
-        // And after the committing mutation, the slot is cleared (consumed once).
-        assert!(
-            storage.pending_event_attribution.is_none(),
-            "attribution must be consumed by exactly one committing mutation",
-        );
-    }
-
     // ---- #312 hardening (F2): no-op update clears the staged slot ----------
-
-    #[test]
-    fn empty_update_clears_pending_attribution_so_it_does_not_leak() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 6, 7, 12, 0, 0).unwrap();
-        let issue = make_issue(
-            "bd-attr-noop",
-            "No-op target",
-            Status::Open,
-            2,
-            None,
-            now,
-            None,
-        );
-        storage.create_issue(&issue, "tester").expect("create");
-
-        // Stage attribution, then call update_issue with EMPTY updates: this
-        // early-returns without calling `mutate()`, but must still drain the
-        // staged slot so it cannot leak onto the next, unrelated mutation (F2).
-        storage.set_pending_event_attribution(EventAttribution::new(
-            Some("agent-leak"),
-            None,
-            None,
-        ));
-        let empty = IssueUpdate::default();
-        storage
-            .update_issue("bd-attr-noop", &empty, "tester")
-            .expect("empty update is a no-op read");
-        assert!(
-            storage.pending_event_attribution.is_none(),
-            "empty-update no-op must clear the staged attribution",
-        );
-
-        // Confirm no leak: a subsequent create (which stages nothing) records
-        // no attribution.
-        let next = make_issue("bd-attr-next", "Next", Status::Open, 2, None, now, None);
-        storage.create_issue(&next, "tester").expect("create next");
-        let events = storage.get_events("bd-attr-next", 0).expect("events");
-        let created = events
-            .iter()
-            .find(|e| e.event_type == EventType::Created)
-            .expect("created event present");
-        assert!(created.agent_name.is_none());
-        assert!(created.harness.is_none());
-        assert!(created.model.is_none());
-    }
 }

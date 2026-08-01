@@ -16,12 +16,6 @@ issue:
   updated_at: <updated_at>
   closed_at: 2026-04-23T08:30:00+00:00
   content_hash: 68de7a4e48995c1d78f057e7a61e7b46b6f76cf9ec0caaa00b8531f46d10738d
-events:
-  - id=1 type=created actor=golden-create old= new= comment=Created issue: Golden storage lifecycle
-  - id=2 type=updated actor=golden-update old=Golden storage lifecycle new=Golden storage lifecycle updated comment=Title changed
-  - id=3 type=priority_changed actor=golden-update old=2 new=1 comment=
-  - id=4 type=status_changed actor=golden-close old=open new=closed comment=
-  - id=5 type=closed actor=golden-close old= new= comment=completed golden flow
 jsonl:
 {
   "id": "storage-golden-1",

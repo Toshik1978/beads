@@ -964,21 +964,6 @@ pub struct CreateArgs {
     /// Create issues from a markdown file (bulk import)
     #[arg(long, short = 'f')]
     pub file: Option<std::path::PathBuf>,
-
-    // Tier 1 attribution (issue #312, Layer 3 — capture-only). Recorded on the
-    // creation audit event as a trail; NEVER gated or enforced on. Match the
-    // flag/env names used by `br close`.
-    /// Tier 1 attribution: agent name (env: BR_AGENT_NAME). Recorded only.
-    #[arg(long, value_name = "NAME", env = "BR_AGENT_NAME")]
-    pub agent_name: Option<String>,
-
-    /// Tier 1 attribution: harness identifier (env: BR_HARNESS). Recorded only.
-    #[arg(long, value_name = "HARNESS", env = "BR_HARNESS")]
-    pub harness: Option<String>,
-
-    /// Tier 1 attribution: model identifier (env: BR_MODEL). Recorded only.
-    #[arg(long, value_name = "MODEL", env = "BR_MODEL")]
-    pub model: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -1106,21 +1091,6 @@ pub struct UpdateArgs {
     /// Set `closed_by_session` when closing
     #[arg(long)]
     pub session: Option<String>,
-
-    // Tier 1 attribution (issue #312, Layer 3 — capture-only). Recorded on the
-    // update/status-change audit event as a trail; NEVER gated or enforced on.
-    // Match the flag/env names used by `br close`.
-    /// Tier 1 attribution: agent name (env: BR_AGENT_NAME). Recorded only.
-    #[arg(long, value_name = "NAME", env = "BR_AGENT_NAME")]
-    pub agent_name: Option<String>,
-
-    /// Tier 1 attribution: harness identifier (env: BR_HARNESS). Recorded only.
-    #[arg(long, value_name = "HARNESS", env = "BR_HARNESS")]
-    pub harness: Option<String>,
-
-    /// Tier 1 attribution: model identifier (env: BR_MODEL). Recorded only.
-    #[arg(long, value_name = "MODEL", env = "BR_MODEL")]
-    pub model: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1844,20 +1814,8 @@ pub struct CloseArgs {
     //
     // All fields below are inert when the project has no `.beads/policy.yaml`
     // file. Solo-dev workflows see no behavior change; only opt-in repos
-    // observe gating or attribution capture.
+    // observe gating.
     //
-    /// Tier 1 attribution: agent name (env: BR_AGENT_NAME).
-    #[arg(long, value_name = "NAME", env = "BR_AGENT_NAME")]
-    pub agent_name: Option<String>,
-
-    /// Tier 1 attribution: harness identifier (env: BR_HARNESS).
-    #[arg(long, value_name = "HARNESS", env = "BR_HARNESS")]
-    pub harness: Option<String>,
-
-    /// Tier 1 attribution: model identifier (env: BR_MODEL).
-    #[arg(long, value_name = "MODEL", env = "BR_MODEL")]
-    pub model: Option<String>,
-
     /// Bypass closure-time policy gates. Requires `--bypass-reason`.
     /// Only honoured when `.beads/policy.yaml` has `allow_bypass: true`
     /// (which is the default).
@@ -1879,20 +1837,6 @@ pub struct ReopenArgs {
     /// Reason for reopening (stored as a comment)
     #[arg(long, short = 'r')]
     pub reason: Option<String>,
-
-    // Tier 1 attribution (issue #312, Layer 3 — capture-only). Recorded on the
-    // reopen status-change audit event; NEVER gated or enforced on.
-    /// Tier 1 attribution: agent name (env: BR_AGENT_NAME). Recorded only.
-    #[arg(long, value_name = "NAME", env = "BR_AGENT_NAME")]
-    pub agent_name: Option<String>,
-
-    /// Tier 1 attribution: harness identifier (env: BR_HARNESS). Recorded only.
-    #[arg(long, value_name = "HARNESS", env = "BR_HARNESS")]
-    pub harness: Option<String>,
-
-    /// Tier 1 attribution: model identifier (env: BR_MODEL). Recorded only.
-    #[arg(long, value_name = "MODEL", env = "BR_MODEL")]
-    pub model: Option<String>,
 }
 
 /// Sort policy for ready command.

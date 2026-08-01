@@ -290,13 +290,6 @@ fn execute_route(
 
     let mut capacity_warnings = Vec::new();
     if !atomic_updates.is_empty() {
-        storage_ctx
-            .storage
-            .set_pending_event_attribution(crate::storage::EventAttribution::new(
-                args.agent_name.as_deref(),
-                args.harness.as_deref(),
-                args.model.as_deref(),
-            ));
         let update_result = update_issues_atomically_with_recovery(
             &mut storage_ctx,
             true,

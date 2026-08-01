@@ -1,4 +1,4 @@
-use crate::model::{Comment, Event, Issue, IssueType, Priority, Status};
+use crate::model::{Comment, Issue, IssueType, Priority, Status};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -132,8 +132,6 @@ pub struct IssueDetails {
     pub dependents: Vec<IssueWithDependencyMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<Comment>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub events: Vec<Event>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
 }
@@ -296,7 +294,6 @@ mod tests {
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
-            events: vec![],
             parent: Some("bd-parent".to_string()),
         };
 

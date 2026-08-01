@@ -7,7 +7,7 @@ use crate::error::{BeadsError, Result};
 use crate::model::{IssueType, Priority, Status};
 use crate::util::content_hash_from_parts;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 16;
+pub const CURRENT_SCHEMA_VERSION: i32 = 17;
 const ISSUES_CLOSED_AT_CHECK: &str = "CHECK ((status = 'closed' AND closed_at IS NOT NULL) OR (status = 'tombstone') OR (status NOT IN ('closed', 'tombstone') AND closed_at IS NULL))";
 
 /// The complete SQL schema for the beads database.
@@ -165,32 +165,6 @@ pub const SCHEMA_SQL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id);
     CREATE INDEX IF NOT EXISTS idx_comments_created_at ON comments(created_at);
 
-    -- Events (Audit)
-    CREATE TABLE IF NOT EXISTS events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        issue_id TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        actor TEXT NOT NULL DEFAULT '',
-        old_value TEXT,
-        new_value TEXT,
-        comment TEXT,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        -- Tier 1 attribution captured on status-mutating commands (issue #312,
-        -- Layer 3 capture-only). Self-reported agent/harness/model identity is
-        -- recorded as an audit trail ONLY — never gated/enforced on. All three
-        -- are nullable so events without attribution (the common case) and
-        -- older databases stay valid. Like `close_metadata` attribution these
-        -- columns are DB-only and are not part of the JSONL sync surface.
-        agent_name TEXT,
-        harness TEXT,
-        model TEXT,
-        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_events_issue ON events(issue_id);
-    CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-    CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
-    CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor) WHERE actor != '';
-
     -- Config (Runtime)
     -- NOTE: Avoid PRIMARY KEY/UNIQUE constraints here because the current
     -- storage engine does not reliably maintain unique autoindexes.
@@ -247,17 +221,14 @@ pub const SCHEMA_SQL: &str = r"
 
     -- Close metadata (issue #274 — closure-time policy gates Phase 1).
     --
-    -- One row per terminal close. Tier 1 attribution + bypass-policy auditing
-    -- live here so the issues table stays untouched (avoids breaking JSONL
-    -- round-trip and the wide SELECT statements throughout sqlite.rs).
+    -- One row per terminal close. Bypass-policy auditing lives here so the
+    -- issues table stays untouched (avoids breaking JSONL round-trip and the
+    -- wide SELECT statements throughout sqlite.rs).
     --
     -- All gate-related columns are nullable / default-valued so older
     -- databases upgraded with a single ALTER TABLE chain remain valid.
     CREATE TABLE IF NOT EXISTS close_metadata (
         issue_id TEXT PRIMARY KEY,
-        closed_by_agent_name TEXT,
-        closed_by_harness TEXT,
-        closed_by_model TEXT,
         bypassed_policy INTEGER NOT NULL DEFAULT 0,
         bypass_reason TEXT,
         policy_gates_fired TEXT,
@@ -640,9 +611,6 @@ const ISSUE_COLUMNS: &[(&str, &str)] = &[
 // legacy shape missing one of those is beyond repair by migration, which is
 // what the JSONL-recovery backstop in `should_attempt_jsonl_recovery` is for.
 const CLOSE_METADATA_COLUMNS: &[(&str, &str)] = &[
-    ("closed_by_agent_name", "TEXT"),
-    ("closed_by_harness", "TEXT"),
-    ("closed_by_model", "TEXT"),
     ("bypassed_policy", "INTEGER NOT NULL DEFAULT 0"),
     ("bypass_reason", "TEXT"),
     ("policy_gates_fired", "TEXT"),
@@ -664,20 +632,6 @@ const COMMENT_COLUMNS: &[(&str, &str)] = &[
     ("author", "TEXT NOT NULL DEFAULT ''"),
     ("text", "TEXT NOT NULL DEFAULT ''"),
     ("created_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-];
-
-const EVENT_COLUMNS: &[(&str, &str)] = &[
-    ("event_type", "TEXT NOT NULL DEFAULT ''"),
-    ("actor", "TEXT NOT NULL DEFAULT ''"),
-    ("old_value", "TEXT"),
-    ("new_value", "TEXT"),
-    ("comment", "TEXT"),
-    ("created_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-    // Tier 1 attribution audit columns (issue #312, Layer 3 capture-only).
-    // Nullable and additive: older databases gain them via ensure_columns().
-    ("agent_name", "TEXT"),
-    ("harness", "TEXT"),
-    ("model", "TEXT"),
 ];
 
 /// SQLite keywords that are legal as a column DEFAULT in `CREATE TABLE` but
@@ -804,7 +758,6 @@ fn core_runtime_tables_exist(conn: &Connection) -> bool {
         "dependencies",
         "labels",
         "comments",
-        "events",
         "config",
         "metadata",
         "dirty_issues",
@@ -1202,9 +1155,6 @@ fn backfill_storage_null_in_default_columns(conn: &Connection) {
         // comments
         ("comments", "author", "''"),
         ("comments", "text", "''"),
-        // events
-        ("events", "event_type", "''"),
-        ("events", "actor", "''"),
     ];
 
     for (table, column, default) in COLUMNS {
@@ -1332,7 +1282,6 @@ fn run_pre_schema_migrations(conn: &Connection) -> Result<bool> {
     }
     ensure_columns(conn, "dependencies", DEPENDENCY_COLUMNS)?;
     ensure_columns(conn, "comments", COMMENT_COLUMNS)?;
-    ensure_columns(conn, "events", EVENT_COLUMNS)?;
     // bds-04l.18: the remaining tables SCHEMA_SQL indexes. Without these, a
     // legacy shape reaches CREATE INDEX with the indexed column missing and
     // the open fails outright rather than being migrated forward.
@@ -1371,10 +1320,6 @@ pub(crate) fn runtime_schema_compatible(conn: &Connection) -> bool {
         && COMMENT_COLUMNS
             .iter()
             .all(|(name, _)| column_exists(conn, "comments", name));
-    let events_ok = table_has_columns(conn, "events", &["id", "issue_id"])
-        && EVENT_COLUMNS
-            .iter()
-            .all(|(name, _)| column_exists(conn, "events", name));
     let config_ok = table_has_columns(conn, "config", &["key", "value"])
         && index_exists(conn, "idx_config_key")
         && !kv_table_uses_primary_key(conn, "config");
@@ -1394,7 +1339,6 @@ pub(crate) fn runtime_schema_compatible(conn: &Connection) -> bool {
         && dependencies_ok
         && labels_ok
         && comments_ok
-        && events_ok
         && config_ok
         && metadata_ok
         && dirty_issues_ok
@@ -1408,7 +1352,6 @@ pub(crate) fn runtime_schema_compatible(conn: &Connection) -> bool {
             dependencies_ok,
             labels_ok,
             comments_ok,
-            events_ok,
             config_ok,
             metadata_ok,
             dirty_issues_ok,
@@ -1576,9 +1519,6 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
             r"
             CREATE TABLE IF NOT EXISTS close_metadata (
                 issue_id TEXT PRIMARY KEY,
-                closed_by_agent_name TEXT,
-                closed_by_harness TEXT,
-                closed_by_model TEXT,
                 bypassed_policy INTEGER NOT NULL DEFAULT 0,
                 bypass_reason TEXT,
                 policy_gates_fired TEXT,
@@ -1656,20 +1596,6 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
         conn.execute("ALTER TABLE issues ADD COLUMN agent_context TEXT")?;
     }
 
-    // Migration v12 -> v13 (beads#312, Layer 3 capture-only): add Tier 1
-    // attribution columns (`agent_name`, `harness`, `model`) to the `events`
-    // table so create/update/status-mutating commands can record self-reported
-    // agent identity as an audit trail. Pure additive, nullable columns — no
-    // existing rows change, no enforcement is performed, and the JSONL sync
-    // surface is unaffected (events are DB-only). Idempotent: ensure_columns
-    // skips columns that already exist, mirroring the v10/v11 ADD COLUMN guards.
-    if user_version < 13 && table_exists(conn, "events") {
-        tracing::info!(
-            "Migrating database to schema version 13 (events attribution columns - beads#312)"
-        );
-        ensure_columns(conn, "events", EVENT_COLUMNS)?;
-    }
-
     // v14: Recompute stored issue content hashes after switching from
     // NUL-separated fields to length-prefixed fields. Existing v7-v13
     // databases may contain hashes where embedded NUL bytes can blur field
@@ -1695,6 +1621,48 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
             DROP TABLE IF EXISTS gate_results;
         ",
         )?;
+    }
+
+    // Migration v16 -> v17: drop the events audit table (bds-1zd).
+    //
+    // The subsystem is gone, not merely unused. Events were written on every
+    // mutation and read by exactly one opt-in close-policy gate, and they never
+    // reached `issues.jsonl` — `.beads/*.db` is a derived, gitignored cache, so
+    // the log neither travelled between clones nor survived a rebuild. Dropping
+    // the table rather than leaving it vestigial is the whole point: a table
+    // nothing writes is the next reader's puzzle.
+    //
+    // Nothing is preserved. The rows were local-only audit data that any rebuild
+    // already discarded, so there is no export step and no way for this to lose
+    // something a `br sync` would not have lost anyway.
+    if user_version < 17 {
+        tracing::info!("Migrating database to schema version 17 (drop events table)");
+        execute_batch(
+            conn,
+            r"
+            DROP INDEX IF EXISTS idx_events_issue;
+            DROP INDEX IF EXISTS idx_events_type;
+            DROP INDEX IF EXISTS idx_events_event_type;
+            DROP INDEX IF EXISTS idx_events_created_at;
+            DROP INDEX IF EXISTS idx_events_actor;
+            DROP TABLE IF EXISTS events;
+        ",
+        )?;
+
+        // The same change removes Tier 1 attribution capture, whose only other
+        // sink was `close_metadata`. `--agent-name`/`--harness`/`--model` and
+        // the `BR_*` env vars are gone, so these columns can no longer be
+        // written; drop them rather than leave three permanently-NULL columns
+        // on a table that is still in use for bypass auditing.
+        for column in [
+            "closed_by_agent_name",
+            "closed_by_harness",
+            "closed_by_model",
+        ] {
+            if column_exists(conn, "close_metadata", column) {
+                conn.execute(&format!("ALTER TABLE close_metadata DROP COLUMN {column}"))?;
+            }
+        }
     }
 
     // Migration: Add missing indexes for bd parity
@@ -1791,17 +1759,6 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
 
     if table_exists(conn, "comments") {
         conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id)")?;
-    }
-
-    if table_exists(conn, "events") {
-        execute_batch(
-            conn,
-            r"
-            CREATE INDEX IF NOT EXISTS idx_events_issue ON events(issue_id);
-            CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-            CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor) WHERE actor != '';
-        ",
-        )?;
     }
 
     Ok(())
@@ -3298,7 +3255,6 @@ mod tests {
             "issues",
             "dependencies",
             "comments",
-            "events",
             "close_metadata",
             "dirty_issues",
         ];

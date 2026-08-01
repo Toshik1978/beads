@@ -29,7 +29,6 @@ pub struct DeleteResult {
     pub deleted_count: usize,
     pub dependencies_removed: usize,
     pub labels_removed: usize,
-    pub events_removed: usize,
     pub references_updated: usize,
     pub orphaned_issues: Vec<String>,
 }
@@ -41,7 +40,6 @@ impl DeleteResult {
             deleted_count: 0,
             dependencies_removed: 0,
             labels_removed: 0,
-            events_removed: 0,
             references_updated: 0,
             orphaned_issues: Vec::new(),
         }
@@ -300,7 +298,6 @@ pub fn execute(
         for id in &final_ids {
             if args.hard {
                 result.labels_removed += storage_ctx.storage.get_labels(id)?.len();
-                result.events_removed += storage_ctx.storage.count_issue_events(id)?;
                 // Hard delete: physically remove from DB so it's pruned from JSONL
                 retry_mutation_with_jsonl_recovery(
                     &mut storage_ctx,
@@ -414,7 +411,6 @@ fn purge_all_tombstones(
     let mut batch_has_mutated = false;
     for id in &tombstone_ids {
         result.labels_removed += storage_ctx.storage.get_labels(id)?.len();
-        result.events_removed += storage_ctx.storage.count_issue_events(id)?;
         retry_mutation_with_jsonl_recovery(
             &mut storage_ctx,
             !batch_has_mutated,
@@ -666,7 +662,6 @@ fn apply_delete_route(
     for id in &route.final_delete_ids {
         if args.hard {
             result.labels_removed += storage_ctx.storage.get_labels(id)?.len();
-            result.events_removed += storage_ctx.storage.count_issue_events(id)?;
             retry_mutation_with_jsonl_recovery(
                 &mut storage_ctx,
                 !batch_has_mutated,
@@ -783,7 +778,6 @@ fn merge_delete_result(result: &mut DeleteResult, mut batch_result: DeleteResult
     result.deleted.append(&mut batch_result.deleted);
     result.dependencies_removed += batch_result.dependencies_removed;
     result.labels_removed += batch_result.labels_removed;
-    result.events_removed += batch_result.events_removed;
     result.references_updated += batch_result.references_updated;
     result
         .orphaned_issues

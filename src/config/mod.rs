@@ -1694,12 +1694,6 @@ fn verify_rebuilt_database_postconditions(
     )?;
     verify_rebuilt_table_count(
         storage,
-        "events",
-        0,
-        "events are local-only and not in JSONL",
-    )?;
-    verify_rebuilt_table_count(
-        storage,
         "dirty_issues",
         0,
         "dirty markers should be absent immediately after JSONL rebuild",
@@ -1743,7 +1737,6 @@ fn count_recovery_table_rows(storage: &SqliteStorage, table: &str) -> Result<usi
         "labels",
         "dependencies",
         "comments",
-        "events",
         "dirty_issues",
         "export_hashes",
         "blocked_issues_cache",
@@ -2427,12 +2420,6 @@ impl OpenStorageResult {
             ));
         }
 
-        // Preserve any attribution staged on the storage being replaced so the
-        // post-recovery retry can still stamp it (#312 hardening, F1). The
-        // failed first write did NOT commit, so `mutate()` left the staged value
-        // intact — but recovery swaps in a brand-new `SqliteStorage`, which would
-        // otherwise start with an empty pending slot and drop the attribution.
-        let preserved_attribution = self.storage.take_pending_event_attribution();
         let preserved_workflow_policy = self.storage.workflow_policy();
 
         // Close the old connection before rebuilding at the same path.
@@ -2452,9 +2439,6 @@ impl OpenStorageResult {
         )?;
         self.storage = storage;
         self.storage.set_workflow_policy(preserved_workflow_policy);
-        if let Some(attribution) = preserved_attribution {
-            self.storage.set_pending_event_attribution(attribution);
-        }
         self.loaded_jsonl_hash = None;
         self.auto_rebuilt = true;
         self.pending_recovery_backup = None;
@@ -7258,24 +7242,6 @@ routing:
             .expect_err("missing comments should fail validation");
         assert!(
             err.to_string().contains("comments row count mismatch"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn rebuilt_database_postconditions_reject_stale_events() {
-        let fixture = relation_rich_rebuild_fixture();
-        fixture
-            .storage
-            .execute_raw(
-                "INSERT INTO events (issue_id, event_type, actor) VALUES ('bd-parent', 'created', 'tester')",
-            )
-            .expect("insert stale event");
-
-        let err = verify_rebuilt_database_postconditions(&fixture.storage, &fixture.import_result)
-            .expect_err("stale events should fail validation");
-        assert!(
-            err.to_string().contains("events row count mismatch"),
             "unexpected error: {err}"
         );
     }

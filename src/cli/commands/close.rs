@@ -6,16 +6,13 @@ use crate::cli::commands::{
     finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error,
     report_auto_flush_failure, resolve_issue_ids, update_issues_atomically_with_recovery,
 };
-use crate::close_policy::{
-    self, AttributionTier, AttributionValues, CloseEvidence, ClosePolicy, PolicyDocument,
-    PolicyViolation,
-};
+use crate::close_policy::{self, CloseEvidence, ClosePolicy, PolicyViolation};
 use crate::config;
 use crate::error::{BeadsError, Result};
 use crate::format::sanitize_terminal_inline;
 use crate::model::{Issue, IssueType, Status};
 use crate::output::OutputContext;
-use crate::storage::{EventAttribution, IssueUpdate, SqliteStorage};
+use crate::storage::{IssueUpdate, SqliteStorage};
 use crate::util::id::{IdResolver, ResolverConfig};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -37,12 +34,6 @@ pub struct CloseArgs {
     pub session: Option<String>,
     /// Return newly unblocked issues (single ID only)
     pub suggest_next: bool,
-    /// Tier 1 attribution: agent name (issue #274 Phase 1).
-    pub agent_name: Option<String>,
-    /// Tier 1 attribution: harness identifier.
-    pub harness: Option<String>,
-    /// Tier 1 attribution: model identifier.
-    pub model: Option<String>,
     /// Bypass closure-time policy gates.
     pub bypass_policy: bool,
     /// Reason for bypass. Required when `bypass_policy = true`.
@@ -58,9 +49,6 @@ impl From<&CliCloseArgs> for CloseArgs {
             force: cli.force,
             session: cli.session.clone(),
             suggest_next: cli.suggest_next,
-            agent_name: cli.agent_name.clone(),
-            harness: cli.harness.clone(),
-            model: cli.model.clone(),
             bypass_policy: cli.bypass_policy,
             bypass_reason: cli.bypass_reason.clone(),
         }
@@ -102,23 +90,6 @@ fn validate_bypass_args(args: &CloseArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve attribution values for the close. CLI flags take precedence over
-/// env vars; both are ignored when the policy.yaml `attribution.tier` is
-/// `off`. Tier 2/3 ("require"/"allowlist") are out of scope for Phase 1.
-fn resolve_attribution_for_close(
-    args: &CloseArgs,
-    policy_doc: &PolicyDocument,
-) -> AttributionValues {
-    if policy_doc.close_policy.attribution.tier == AttributionTier::Off {
-        return AttributionValues::default();
-    }
-    AttributionValues::resolve_from_env(
-        args.agent_name.as_deref(),
-        args.harness.as_deref(),
-        args.model.as_deref(),
-    )
-}
-
 /// Run every enabled gate against `issue` and produce the (possibly empty)
 /// violation list. This includes the close-policy gates (issue #274) *and* the
 /// workflow gate engine (issue #312, layer 2): closing an issue is a transition
@@ -133,15 +104,6 @@ fn evaluate_close_policy(
     args: &CloseArgs,
     close_actor: &str,
 ) -> Result<EvaluatedGates> {
-    // Look up the in_progress actor only when the gate is enabled — this
-    // saves a query per close for repos that don't enable that specific
-    // gate.
-    let in_progress_actor = if policy.forbid_self_close_after_in_progress.enabled {
-        storage.find_last_in_progress_actor(issue_id)?
-    } else {
-        None
-    };
-
     let evidence = CloseEvidence {
         issue_id,
         close_reason: args.reason.as_deref(),
@@ -150,7 +112,6 @@ fn evaluate_close_policy(
         acceptance_criteria: issue.acceptance_criteria.as_deref(),
         notes: issue.notes.as_deref(),
         close_actor,
-        in_progress_actor: in_progress_actor.as_deref(),
     };
 
     let mut violations = close_policy::evaluate(policy, &evidence);
@@ -192,8 +153,7 @@ fn evaluate_close_policy(
         // therefore a permanent, uninspectable block on closing an issue.
         //
         // The close-policy toggles above (`require_acceptance_criteria_
-        // satisfied`, `forbid_self_close_after_in_progress`,
-        // `forbid_close_with_deferred_dependents`) and the required-fields
+        // satisfied`, `forbid_close_with_deferred_dependents`) and the required-fields
         // rules are unaffected: those evaluate from data br itself holds, so
         // they can be satisfied and are reported by name.
     }
@@ -778,7 +738,6 @@ fn execute_route(
     // that used to be a third trigger here was removed in bds-04l.23.
     let policy_active =
         policy_doc.close_policy.is_active() || !policy_doc.workflow.required_fields.is_empty();
-    let attribution = resolve_attribution_for_close(args, &policy_doc);
     if args.bypass_policy && !policy_doc.allow_bypass {
         return Err(BeadsError::validation(
             "bypass-policy",
@@ -1058,13 +1017,6 @@ fn execute_route(
     }
 
     if !atomic_updates.is_empty() {
-        storage_ctx
-            .storage
-            .set_pending_event_attribution(EventAttribution::new(
-                attribution.agent_name.as_deref(),
-                attribution.harness.as_deref(),
-                attribution.model.as_deref(),
-            ));
         let update_result = update_issues_atomically_with_recovery(
             &mut storage_ctx,
             true,
@@ -1093,7 +1045,6 @@ fn execute_route(
             };
             let metadata_result = storage_ctx.storage.record_close_metadata(
                 &id,
-                &attribution,
                 args.bypass_policy && !gates_fired.is_empty(),
                 bypass_reason,
                 &gates_fired,
@@ -1301,9 +1252,6 @@ mod tests {
             force: true,
             session: Some("session-456".to_string()),
             suggest_next: true,
-            agent_name: Some("agent-1".to_string()),
-            harness: Some("codex-cli".to_string()),
-            model: Some("gpt-5".to_string()),
             bypass_policy: true,
             bypass_reason: Some("Manual override approved".to_string()),
         };
@@ -1317,9 +1265,6 @@ mod tests {
         assert!(args.force);
         assert_eq!(args.session.as_deref(), Some("session-456"));
         assert!(args.suggest_next);
-        assert_eq!(args.agent_name.as_deref(), Some("agent-1"));
-        assert_eq!(args.harness.as_deref(), Some("codex-cli"));
-        assert_eq!(args.model.as_deref(), Some("gpt-5"));
         assert!(args.bypass_policy);
         assert_eq!(
             args.bypass_reason.as_deref(),
@@ -1736,9 +1681,6 @@ mod tests {
             force: true,
             session: Some("sess".to_string()),
             suggest_next: true,
-            agent_name: Some("agent-clone".to_string()),
-            harness: Some("harness-clone".to_string()),
-            model: Some("model-clone".to_string()),
             bypass_policy: true,
             bypass_reason: Some("Clone bypass reason".to_string()),
         };
@@ -1749,9 +1691,6 @@ mod tests {
         assert_eq!(cloned.force, args.force);
         assert_eq!(cloned.session, args.session);
         assert_eq!(cloned.suggest_next, args.suggest_next);
-        assert_eq!(cloned.agent_name, args.agent_name);
-        assert_eq!(cloned.harness, args.harness);
-        assert_eq!(cloned.model, args.model);
         assert_eq!(cloned.bypass_policy, args.bypass_policy);
         assert_eq!(cloned.bypass_reason, args.bypass_reason);
         assert_eq!(cloned.suggest_next, args.suggest_next);
@@ -2116,9 +2055,6 @@ mod tests {
         assert!(!metadata.bypassed_policy);
         assert!(metadata.bypass_reason.is_none());
         assert!(metadata.policy_gates_fired.is_empty());
-        assert!(metadata.closed_by_agent_name.is_none());
-        assert!(metadata.closed_by_harness.is_none());
-        assert!(metadata.closed_by_model.is_none());
     }
 
     #[test]

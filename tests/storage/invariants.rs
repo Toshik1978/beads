@@ -46,7 +46,6 @@ fn schema_tables_and_columns_exist() {
         "dependencies",
         "labels",
         "comments",
-        "events",
         "config",
         "metadata",
         "dirty_issues",

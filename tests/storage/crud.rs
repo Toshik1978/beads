@@ -8,7 +8,7 @@
 // `common::` paths in this suite keep working unchanged.
 use crate::common;
 
-use beads::model::{Comment, DependencyType, EventType, Issue, IssueType, Priority, Status};
+use beads::model::{Comment, DependencyType, Issue, IssueType, Priority, Status};
 use beads::storage::{IssueUpdate, SqliteStorage};
 use chrono::{Duration, Utc};
 use common::{fixtures, test_db, test_db_with_dir};
@@ -105,28 +105,6 @@ fn create_issue_all_fields_populated() {
     assert!(!retrieved.is_template);
     assert!(retrieved.due_at.is_some());
     assert!(retrieved.defer_until.is_some());
-}
-
-#[test]
-fn create_issue_records_created_event() {
-    let mut storage = test_db();
-    let issue = fixtures::issue("event-create");
-
-    storage.create_issue(&issue, "event-actor").unwrap();
-
-    // Get events for the issue
-    let details = storage
-        .get_issue_details(&issue.id, false, true, 100)
-        .unwrap()
-        .expect("issue exists");
-
-    assert!(!details.events.is_empty());
-    let created_event = details
-        .events
-        .iter()
-        .find(|e| e.event_type == EventType::Created);
-    assert!(created_event.is_some());
-    assert_eq!(created_event.unwrap().actor, "event-actor");
 }
 
 #[test]
@@ -272,7 +250,7 @@ fn comments_with_same_timestamp_are_ordered_by_id() {
 }
 
 #[test]
-fn get_issue_details_includes_events_and_relations() {
+fn get_issue_details_includes_relations() {
     let mut storage = test_db();
     let issue = fixtures::issue("details-test");
 
@@ -282,14 +260,12 @@ fn get_issue_details_includes_events_and_relations() {
         .unwrap();
 
     let details = storage
-        .get_issue_details(&issue.id, true, true, 100)
+        .get_issue_details(&issue.id, true)
         .unwrap()
         .expect("issue exists");
 
     assert_eq!(details.issue.id, issue.id);
     assert!(details.labels.contains(&"detail-label".to_string()));
-    // Should have at least the Created event
-    assert!(!details.events.is_empty());
 }
 
 // ============================================================================
@@ -336,62 +312,6 @@ fn update_issue_multiple_fields() {
     assert_eq!(updated.description, Some("New description".to_string()));
     assert_eq!(updated.priority, Priority::HIGH);
     assert_eq!(updated.assignee, Some("new-assignee".to_string()));
-}
-
-#[test]
-fn update_issue_status_records_event() {
-    let mut storage = test_db();
-    let issue = fixtures::issue("update-status-event");
-
-    storage.create_issue(&issue, "tester").unwrap();
-
-    let update = IssueUpdate {
-        status: Some(Status::InProgress),
-        ..Default::default()
-    };
-
-    storage.update_issue(&issue.id, &update, "updater").unwrap();
-
-    let details = storage
-        .get_issue_details(&issue.id, false, true, 100)
-        .unwrap()
-        .expect("issue exists");
-
-    let status_event = details
-        .events
-        .iter()
-        .find(|e| e.event_type == EventType::StatusChanged);
-    assert!(status_event.is_some());
-
-    let event = status_event.unwrap();
-    assert_eq!(event.old_value, Some("open".to_string()));
-    assert_eq!(event.new_value, Some("in_progress".to_string()));
-}
-
-#[test]
-fn update_issue_priority_records_event() {
-    let mut storage = test_db();
-    let issue = fixtures::issue("update-priority-event");
-
-    storage.create_issue(&issue, "tester").unwrap();
-
-    let update = IssueUpdate {
-        priority: Some(Priority::CRITICAL),
-        ..Default::default()
-    };
-
-    storage.update_issue(&issue.id, &update, "updater").unwrap();
-
-    let details = storage
-        .get_issue_details(&issue.id, false, true, 100)
-        .unwrap()
-        .expect("issue exists");
-
-    let priority_event = details
-        .events
-        .iter()
-        .find(|e| e.event_type == EventType::PriorityChanged);
-    assert!(priority_event.is_some());
 }
 
 #[test]
@@ -581,29 +501,6 @@ fn delete_issue_creates_tombstone() {
     assert_eq!(deleted.deleted_by, Some("deleter".to_string()));
     assert_eq!(deleted.delete_reason, Some("No longer needed".to_string()));
     assert_eq!(deleted.original_type, Some("task".to_string()));
-}
-
-#[test]
-fn delete_issue_records_event() {
-    let mut storage = test_db();
-    let issue = fixtures::issue("delete-event");
-
-    storage.create_issue(&issue, "tester").unwrap();
-    storage
-        .delete_issue(&issue.id, "deleter", "Test deletion", None)
-        .unwrap();
-
-    let details = storage
-        .get_issue_details(&issue.id, false, true, 100)
-        .unwrap()
-        .expect("issue exists");
-
-    let deleted_event = details
-        .events
-        .iter()
-        .find(|e| e.event_type == EventType::Deleted);
-    assert!(deleted_event.is_some());
-    assert_eq!(deleted_event.unwrap().actor, "deleter");
 }
 
 #[test]

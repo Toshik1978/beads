@@ -461,7 +461,7 @@ fn load_issue_details_from_storage(
             |hash| storage.find_ids_by_hash(hash),
         )?;
 
-        let Some(mut details) = storage.get_issue_details(&resolution.id, true, false, 10)? else {
+        let Some(mut details) = storage.get_issue_details(&resolution.id, true)? else {
             return Err(BeadsError::IssueNotFound { id: resolution.id });
         };
 
@@ -758,7 +758,6 @@ fn build_issue_details_from_exact_jsonl_index(
         dependencies: dependencies.into_iter().map(|(item, _, _)| item).collect(),
         dependents: dependents.into_iter().map(|(item, _, _)| item).collect(),
         comments,
-        events: Vec::new(),
         parent: issue
             .dependencies
             .iter()
@@ -827,7 +826,6 @@ fn build_issue_details_from_jsonl(
         dependencies: dependencies.into_iter().map(|(item, _, _)| item).collect(),
         dependents: dependents.into_iter().map(|(item, _, _)| item).collect(),
         comments,
-        events: Vec::new(),
         parent: issue
             .dependencies
             .iter()
@@ -1342,7 +1340,6 @@ mod tests {
             dependencies: Vec::new(),
             dependents: Vec::new(),
             comments: Vec::new(),
-            events: Vec::new(),
             parent: None,
         };
         let rendered = format_issue_details(&details, false, false);
@@ -1569,7 +1566,6 @@ mod tests {
             }],
             dependents: Vec::new(),
             comments: Vec::new(),
-            events: Vec::new(),
             parent: None,
         };
         let json = serde_json::to_string_pretty(&vec![details]).unwrap();
@@ -1605,7 +1601,6 @@ mod tests {
                 body: "Looks good".to_string(),
                 created_at: Utc.with_ymd_and_hms(2025, 1, 2, 3, 4, 0).unwrap(),
             }],
-            events: Vec::new(),
             parent: None,
         };
         let output = format_issue_details(&details, false, false);
@@ -1640,7 +1635,6 @@ mod tests {
                 dep_type: "waits-for\x07".to_string(),
             }],
             comments: Vec::new(),
-            events: Vec::new(),
             parent: None,
         };
 
@@ -1842,7 +1836,6 @@ mod tests {
             dependencies: Vec::new(),
             dependents: Vec::new(),
             comments: Vec::new(),
-            events: Vec::new(),
             parent: None,
         };
         let local_last = IssueDetails {
@@ -1851,7 +1844,6 @@ mod tests {
             dependencies: Vec::new(),
             dependents: Vec::new(),
             comments: Vec::new(),
-            events: Vec::new(),
             parent: None,
         };
         let external_middle = IssueDetails {
@@ -1860,7 +1852,6 @@ mod tests {
             dependencies: Vec::new(),
             dependents: Vec::new(),
             comments: Vec::new(),
-            events: Vec::new(),
             parent: None,
         };
 

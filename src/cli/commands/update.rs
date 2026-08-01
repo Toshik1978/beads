@@ -13,7 +13,7 @@ use crate::error::{BeadsError, Result};
 use crate::format::{format_status_label, format_type_label, sanitize_terminal_inline};
 use crate::model::{Issue, IssueType, Priority, Status};
 use crate::output::OutputContext;
-use crate::storage::{EventAttribution, IssueUpdate, SqliteStorage};
+use crate::storage::{IssueUpdate, SqliteStorage};
 use crate::util::id::{IdResolver, ResolverConfig};
 use crate::util::time::parse_flexible_timestamp;
 use crate::validation::LabelValidator;
@@ -151,9 +151,6 @@ struct PreparedUpdateRoute {
     valid_set_labels: Vec<String>,
     resolved_parent: ParentUpdatePlan,
     auto_flush_external: bool,
-    /// Tier 1 attribution (issue #312, Layer 3 capture-only) staged onto each
-    /// mutation's audit events. Recorded only — never gated or enforced on.
-    attribution: EventAttribution,
     _routed_write_lock: RoutedWorkspaceWriteLock,
 }
 
@@ -483,11 +480,6 @@ fn prepare_single_route(
         valid_set_labels,
         resolved_parent,
         auto_flush_external,
-        attribution: EventAttribution::new(
-            args.agent_name.as_deref(),
-            args.harness.as_deref(),
-            args.model.as_deref(),
-        ),
         _routed_write_lock: routed_write_lock,
     })
 }
@@ -539,10 +531,6 @@ fn execute_prepared_route(
             .map(|id| (id, issue_update.clone()))
             .collect::<Vec<_>>();
 
-        prepared
-            .storage_ctx
-            .storage
-            .set_pending_event_attribution(prepared.attribution.clone());
         let update_result = update_issues_atomically_with_recovery(
             &mut prepared.storage_ctx,
             true,
@@ -2121,7 +2109,6 @@ mod tests {
             valid_set_labels: Vec::new(),
             resolved_parent: ParentUpdatePlan::Unchanged,
             auto_flush_external: false,
-            attribution: EventAttribution::default(),
             _routed_write_lock: RoutedWorkspaceWriteLock::local(),
         };
 
@@ -2204,7 +2191,6 @@ mod tests {
             valid_set_labels: Vec::new(),
             resolved_parent: ParentUpdatePlan::Unchanged,
             auto_flush_external: false,
-            attribution: EventAttribution::default(),
             _routed_write_lock: RoutedWorkspaceWriteLock::local(),
         };
 
@@ -2326,7 +2312,6 @@ mod tests {
             valid_set_labels: Vec::new(),
             resolved_parent: ParentUpdatePlan::Unchanged,
             auto_flush_external: false,
-            attribution: EventAttribution::default(),
             _routed_write_lock: RoutedWorkspaceWriteLock::local(),
         };
 

@@ -7,7 +7,7 @@
 use proptest::prelude::*;
 use serde::de::DeserializeOwned;
 
-use beads::model::{DependencyType, EventType, Issue, IssueType, Priority, Status};
+use beads::model::{DependencyType, Issue, IssueType, Priority, Status};
 use beads::storage::SqliteStorage;
 use beads::sync::{ExportConfig, ImportConfig, export_to_jsonl, import_from_jsonl};
 use beads::util::{content_hash, content_hash_from_parts};
@@ -231,14 +231,6 @@ proptest! {
         prop_assert_eq!(original, lowercase);
     }
 
-    #[test]
-    fn event_type_deserialize_matches_lowercase_for_any_string(value in "\\PC{0,64}") {
-        let lowered = value.to_lowercase();
-        let original: EventType = deserialize_json_string(&value);
-        let lowercase: EventType = deserialize_json_string(&lowered);
-
-        prop_assert_eq!(original, lowercase);
-    }
 }
 
 proptest! {

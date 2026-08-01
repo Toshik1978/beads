@@ -1,7 +1,7 @@
 //! Golden storage snapshots for representative SQLite -> JSONL behavior.
 //!
 //! The snapshot intentionally masks volatile timestamps while preserving the
-//! row shape, event sequence, content hash, and JSONL field layout.
+//! row shape, content hash, and JSONL field layout.
 
 use beads::model::{Issue, IssueType, Priority, Status};
 use beads::storage::conn::Connection;
@@ -96,30 +96,6 @@ fn push_issue_row_snapshot(out: &mut String, conn: &Connection) {
     writeln!(out, "  content_hash: {}", value_text(&row, 12)).unwrap();
 }
 
-fn push_events_snapshot(out: &mut String, conn: &Connection) {
-    let rows = conn
-        .query(
-            "SELECT id, event_type, actor, old_value, new_value, comment \
-             FROM events WHERE issue_id = 'storage-golden-1' ORDER BY id ASC",
-        )
-        .expect("event rows");
-
-    writeln!(out, "events:").unwrap();
-    for row in &rows {
-        writeln!(
-            out,
-            "  - id={} type={} actor={} old={} new={} comment={}",
-            value_i64(row, 0),
-            value_text(row, 1),
-            value_text(row, 2),
-            value_text(row, 3),
-            value_text(row, 4),
-            value_text(row, 5)
-        )
-        .unwrap();
-    }
-}
-
 fn normalized_jsonl(jsonl: &[u8]) -> String {
     let mut out = String::new();
     for line in String::from_utf8_lossy(jsonl).lines() {
@@ -177,7 +153,6 @@ fn golden_create_update_close_sqlite_rows_and_jsonl() {
     let conn = Connection::open(db_path.to_string_lossy().into_owned()).expect("open raw db");
     let mut snapshot = String::new();
     push_issue_row_snapshot(&mut snapshot, &conn);
-    push_events_snapshot(&mut snapshot, &conn);
 
     let mut jsonl = Vec::new();
     beads::sync::export_to_writer(&storage, &mut jsonl).expect("export JSONL");
