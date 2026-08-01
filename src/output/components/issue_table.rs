@@ -276,9 +276,9 @@ impl<'a> IssueTable<'a> {
                     .as_ref()
                     .and_then(|snippets| snippets.get(&issue.id))
                     .map_or("", String::as_str);
-                let sanitized_snippet = sanitize_terminal_text(snippet);
+                let plaintext_snippet = plain_snippet(snippet);
                 let snippet_text = highlight_text(
-                    sanitized_snippet.as_ref(),
+                    plaintext_snippet.as_ref(),
                     highlight_regex.as_ref(),
                     self.theme,
                 );
@@ -334,9 +334,22 @@ fn highlight_text(text: &str, regex: Option<&Regex>, theme: &Theme) -> Text {
     rich_text
 }
 
+/// Flatten a search snippet for a one-line table cell.
+///
+/// The snippet arrives already stripped of markdown (done in `build_context_snippets`).
+/// This function sanitizes terminal escapes, strips any remaining markdown (belt-and-braces
+/// in case markdown somehow persists), and ensures single-line format for the cell.
+fn plain_snippet(snippet: &str) -> String {
+    let sanitized = sanitize_terminal_text(snippet);
+    let stripped = crate::format::markdown::strip_markdown(sanitized.as_ref());
+    // Collapse any remaining whitespace to single spaces (belt-and-braces; snippet
+    // should already be one line from normalize_whitespace in snippet_around_match).
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IssueTable, IssueTableColumns};
+    use super::{IssueTable, IssueTableColumns, plain_snippet};
     use crate::format::truncate_title;
     use crate::model::{Issue, IssueType, Status};
     use crate::output::Theme;
@@ -398,5 +411,26 @@ mod tests {
         assert!(!rendered.contains('\x07'));
         assert!(!rendered.contains('\r'));
         assert!(rendered.contains("Search: \\u{1b}]52;c;bad\\u{7}\\rreset"));
+    }
+
+    #[test]
+    fn plain_snippet_strips_markers_and_flattens_to_one_line() {
+        let snippet = "## Heading\n\nSome **bold** and `code` text.";
+        let out = plain_snippet(snippet);
+
+        assert!(!out.contains('#'), "got {out:?}");
+        assert!(!out.contains('*'), "got {out:?}");
+        assert!(
+            !out.contains('\n'),
+            "a table cell must be one line: {out:?}"
+        );
+        assert!(out.contains("Heading"));
+        assert!(out.contains("bold"));
+    }
+
+    #[test]
+    fn plain_snippet_sanitizes_terminal_escapes() {
+        let out = plain_snippet("danger \x1b[2J here");
+        assert!(!out.contains('\x1b'), "raw escape survived: {out:?}");
     }
 }

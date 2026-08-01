@@ -339,9 +339,6 @@ fn is_quoted_title(s: &str) -> bool {
 /// Strip markdown formatting and return plain text.
 ///
 /// Removes markdown syntax while preserving the underlying text content.
-///
-/// No caller yet — bds-jgk.4.1 wires this into the `--context` search snippet.
-#[allow(dead_code)]
 pub(crate) fn strip_markdown(content: &str) -> String {
     let mut result = String::new();
     let mut in_code_block = false;

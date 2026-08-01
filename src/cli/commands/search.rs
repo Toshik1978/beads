@@ -9,7 +9,8 @@ use crate::cli::{
 use crate::config;
 use crate::error::{BeadsError, Result};
 use crate::format::{
-    IssueWithCounts, TextFormatOptions, csv, format_issue_line_with, terminal_width,
+    IssueWithCounts, TextFormatOptions, csv, format_issue_line_with, markdown::strip_markdown,
+    terminal_width,
 };
 use crate::model::{Issue, IssueType, Priority, Status};
 use crate::output::{IssueTable, IssueTableColumns, OutputContext, OutputMode};
@@ -314,13 +315,27 @@ fn build_context_snippets(issues: &[crate::model::Issue], query: &str) -> HashMa
 
     let mut snippets = HashMap::new();
     for issue in issues {
-        if let Some(description) = issue.description.as_deref()
-            && let Some(mat) = regex.find(description)
-        {
-            let snippet = snippet_around_match(description, mat.start(), mat.end(), 32);
-            if !snippet.is_empty() {
-                snippets.insert(issue.id.clone(), snippet);
-                continue;
+        if let Some(description) = issue.description.as_deref() {
+            // Strip markdown first to ensure markers are recognized at line starts.
+            let stripped = strip_markdown(description);
+
+            // Try to find match in stripped text first
+            if let Some(mat) = regex.find(&stripped) {
+                let snippet = snippet_around_match(&stripped, mat.start(), mat.end(), 32);
+                if !snippet.is_empty() {
+                    snippets.insert(issue.id.clone(), snippet);
+                    continue;
+                }
+            }
+
+            // Fallback: if the match exists in raw but not stripped, use raw snippet
+            // (some matches may disappear after stripping; better to show something than nothing)
+            if let Some(mat) = regex.find(description) {
+                let snippet = snippet_around_match(description, mat.start(), mat.end(), 32);
+                if !snippet.is_empty() {
+                    snippets.insert(issue.id.clone(), snippet);
+                    continue;
+                }
             }
         }
 
@@ -1209,5 +1224,69 @@ mod tests {
             .collect();
         assert_eq!(hydrated.len(), 1);
         assert_eq!(hydrated[0].issue.labels, vec!["backend".to_string()]);
+    }
+
+    #[test]
+    fn build_context_snippets_strips_header_not_at_position_zero() {
+        let issue = Issue {
+            id: "bd-test".to_string(),
+            title: "Test".to_string(),
+            description: Some(
+                "Some text at the beginning before getting to the point.\n\n## Configuration Needle\n\nThe system requires careful consideration."
+                    .to_string(),
+            ),
+            ..Issue::default()
+        };
+        let snippets = build_context_snippets(&[issue], "Configuration");
+
+        let snippet = snippets.get("bd-test").expect("snippet exists");
+        // The header marker ## should be stripped even though the snippet starts with ...
+        assert!(
+            !snippet.contains("##"),
+            "header marker should be stripped from mid-document snippet: {snippet:?}"
+        );
+        assert!(snippet.contains("Configuration"));
+    }
+
+    #[test]
+    fn build_context_snippets_handles_unterminated_backtick() {
+        let issue = Issue {
+            id: "bd-test".to_string(),
+            title: "Test".to_string(),
+            description: Some(
+                "text with `unterminated code\n\nand even bold **word** here".to_string(),
+            ),
+            ..Issue::default()
+        };
+        let snippets = build_context_snippets(&[issue], "bold");
+
+        let snippet = snippets.get("bd-test").expect("snippet exists");
+        // Even though there's an unterminated backtick on an earlier line,
+        // the ** should still be stripped because strip_markdown processes lines independently.
+        assert!(
+            !snippet.contains("**"),
+            "bold marker should be stripped despite unterminated backtick on earlier line: {snippet:?}"
+        );
+        assert!(snippet.contains("word"));
+    }
+
+    #[test]
+    fn build_context_snippets_falls_back_to_raw_when_stripped_loses_match() {
+        let issue = Issue {
+            id: "bd-test".to_string(),
+            title: "Test".to_string(),
+            description: Some("This contains **bold-text** and nothing else.".to_string()),
+            ..Issue::default()
+        };
+        // Search for something that only matches raw markdown (the ** markers)
+        let snippets = build_context_snippets(&[issue], "**");
+
+        let snippet = snippets.get("bd-test").expect("snippet exists");
+        // Fallback should have produced a snippet with the raw text (** not stripped)
+        // because the match only exists in the raw form
+        assert!(
+            !snippet.is_empty(),
+            "fallback should produce a snippet when stripped loses the match"
+        );
     }
 }
