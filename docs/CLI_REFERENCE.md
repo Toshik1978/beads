@@ -33,7 +33,7 @@ Comprehensive reference for all `br` commands.
   - [sync](#sync)
   - [config](#config)
 - [Diagnostics & Info](#diagnostics--info)
-  - [stats / status](#stats--status)
+  - [stats](#stats)
   - [info](#info)
   - [version](#version)
   - [history](#history)
@@ -884,13 +884,12 @@ br config edit
 
 ## Diagnostics & Info
 
-### stats / status
+### stats
 
 Show project statistics.
 
 ```bash
 br stats [OPTIONS]
-br status [OPTIONS]  # alias
 ```
 
 **Options:**

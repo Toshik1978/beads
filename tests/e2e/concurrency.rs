@@ -2605,7 +2605,7 @@ fn e2e_parallel_mixed_db_commands_preserve_sqlite_integrity() {
                     1 => vec![
                         "--lock-timeout".to_string(),
                         "15000".to_string(),
-                        "status".to_string(),
+                        "stats".to_string(),
                         "--no-activity".to_string(),
                         "--json".to_string(),
                     ],
@@ -2642,7 +2642,7 @@ fn e2e_parallel_mixed_db_commands_preserve_sqlite_integrity() {
     assert_upstream_sqlite_integrity_ok(&root, "after mixed parallel DB load");
 
     for round in 0..4 {
-        let status = run_br_in_dir(&root, ["status", "--no-activity", "--json"]);
+        let status = run_br_in_dir(&root, ["stats", "--no-activity", "--json"]);
         assert!(
             status.success,
             "post-load status round {round} failed: stdout={} stderr={}",

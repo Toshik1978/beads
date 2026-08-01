@@ -786,9 +786,6 @@ pub enum Commands {
     /// Show project statistics
     Stats(StatsArgs),
 
-    /// Alias for stats
-    Status(StatsArgs),
-
     /// Sync database with JSONL file (export or import)
     ///
     /// IMPORTANT: br sync NEVER executes git commands or auto-commits.
@@ -1255,7 +1252,7 @@ pub const fn command_requests_robot_json(cmd: &Commands) -> bool {
         Commands::Reopen(args) => args.robot,
         Commands::Ready(args) => args.robot,
         Commands::Blocked(args) => args.robot,
-        Commands::Stats(args) | Commands::Status(args) => args.robot,
+        Commands::Stats(args) => args.robot,
         Commands::Sync(args) => args.robot,
         Commands::Dep { command } => match command {
             DepCommands::Import(args) => args.robot,
@@ -2642,9 +2639,6 @@ mod tests {
     }
 
     fn top_level_command_is_documented(name: &str) -> bool {
-        if name == "status" {
-            return CLI_REFERENCE.contains("### stats / status");
-        }
         CLI_REFERENCE.contains(&format!("### {name}"))
     }
 
@@ -2665,7 +2659,7 @@ mod tests {
     // question this project has to answer explicitly is whether every
     // command must still be *named* somewhere in each of them.
     //
-    // The answer here is yes, all 24, via a one-line "Command index" table in
+    // The answer here is yes, all 23, via a one-line "Command index" table in
     // each file. The alternative — an enforced explicit subset — was
     // rejected: a subset test only pins the subset that existed when someone
     // wrote it, so a newly added command is invisible to both the doc and

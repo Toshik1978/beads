@@ -138,7 +138,6 @@ All 24 top-level commands, for orientation. Full flags, subcommands, and
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |
 | `stats` | Show project statistics |
-| `status` | Alias for `stats` |
 | `info` | Show diagnostic metadata about the workspace |
 | `version` | Show version information |
 | `history` | Manage local history backups |

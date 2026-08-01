@@ -179,10 +179,6 @@ fn status_and_report_commands() -> Vec<MatrixCommand> {
             "stats_no_activity_json",
             strings(["stats", "--no-activity", "--json"]),
         ),
-        exact_command(
-            "status_no_activity_json",
-            strings(["status", "--no-activity", "--json"]),
-        ),
     ]
 }
 

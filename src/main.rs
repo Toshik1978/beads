@@ -408,7 +408,7 @@ fn main() {
         Commands::Info(args) => commands::info::execute(&args, &overrides, &output_ctx),
         Commands::Version(args) => commands::version::execute(&args, &output_ctx),
         Commands::Completions(args) => commands::completions::execute(&args, &output_ctx),
-        Commands::Stats(args) | Commands::Status(args) => {
+        Commands::Stats(args) => {
             if let (Some(res), Some(beads_dir)) = (storage_result.as_ref(), ctx.beads_dir.as_ref())
             {
                 commands::stats::execute_with_storage_ctx(
@@ -701,7 +701,6 @@ const fn needs_write_lock(cmd: &Commands) -> bool {
         | Commands::Blocked(_)
         | Commands::Stale(_)
         | Commands::Stats(_)
-        | Commands::Status(_)
         | Commands::Comments(_)
         | Commands::Dep { .. }
         | Commands::Label { .. }
@@ -733,7 +732,6 @@ const fn should_auto_import(cmd: &Commands) -> bool {
         | Commands::Blocked(_)
         | Commands::Stale(_)
         | Commands::Stats(_)
-        | Commands::Status(_)
         | Commands::Create(_)
         | Commands::Update(_)
         | Commands::Delete(_)
@@ -758,7 +756,6 @@ const fn supports_read_only_fast_open(cmd: &Commands) -> bool {
     match cmd {
         Commands::Sync(args) => args.status,
         Commands::Stats(_)
-        | Commands::Status(_)
         | Commands::List(_)
         | Commands::Show(_)
         | Commands::Search(_)
@@ -807,7 +804,7 @@ fn command_requested_output_format(cmd: &Commands) -> Option<OutputFormat> {
         Commands::Show(args) => args.format.map(Into::into),
         Commands::Ready(args) => args.format.map(Into::into),
         Commands::Blocked(args) => args.format.map(Into::into),
-        Commands::Stats(args) | Commands::Status(args) => args.format.map(Into::into),
+        Commands::Stats(args) => args.format.map(Into::into),
         Commands::Dep { command } => match command {
             beads::cli::DepCommands::List(args) => args.format.map(Into::into),
             beads::cli::DepCommands::Tree(_)
@@ -1053,16 +1050,6 @@ mod tests {
 
         let stats_no_activity = Cli::parse_from(["br", "stats", "--no-activity"]);
         assert!(!build_cli_overrides(&stats_no_activity).read_only_fast_open);
-
-        let status = Cli::parse_from(["br", "status"]);
-        assert!(!build_cli_overrides(&status).read_only_fast_open);
-
-        let status_no_auto =
-            Cli::parse_from(["br", "--no-auto-import", "--no-auto-flush", "status"]);
-        assert!(build_cli_overrides(&status_no_auto).read_only_fast_open);
-
-        let status_no_activity = Cli::parse_from(["br", "status", "--no-activity"]);
-        assert!(!build_cli_overrides(&status_no_activity).read_only_fast_open);
 
         let sync_status = Cli::parse_from(["br", "sync", "--status"]);
         assert!(!build_cli_overrides(&sync_status).read_only_fast_open);
