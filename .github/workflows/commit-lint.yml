@@ -1,25 +1,14 @@
 name: Commit messages
 
-# Conventional Commits, checked on every commit that reaches `main` and every
-# commit in a PR — so a contributor who never ran `pre-commit install` is still
-# caught before merge.
+# Conventional Commits on every commit reaching `main` and every commit in a PR,
+# so a contributor who never ran `pre-commit install` is still caught. It runs
+# the repo's own commit-msg hook rather than a third-party action, keeping one
+# definition of the rule.
 #
-# The check runs the repo's *own* commit-msg hook (see the script), rather than
-# a third-party conventional-commits action. Two reasons: the rule then has one
-# definition instead of two that can drift, and the wrapper actions in this
-# space go stale, while the hook's tool is actively maintained and already
-# pinned in .pre-commit-config.yaml.
-#
-# Deliberately its own workflow rather than a job in ci.yml. That file is the
-# expensive one — it installs a toolchain and builds the whole suite on two
-# operating systems — and a malformed commit subject should not have to wait
-# behind any of that to be reported. This job needs no Rust at all and finishes
-# in seconds.
-#
-# It is not cosmetic enforcement: `.cliff.toml` builds the CHANGELOG by parsing
-# these prefixes, and the generated section becomes the GitHub release body
-# (docs/RELEASING.md). A commit that does not parse is a commit missing from
-# the release notes.
+# Its own workflow rather than a job in ci.yml: that file installs a toolchain
+# and builds the suite on two operating systems, and a malformed subject should
+# not wait behind any of it. `.cliff.toml` parses these prefixes to build the
+# CHANGELOG, so a commit that does not parse is missing from the release notes.
 on:
   push:
     branches:
@@ -50,16 +39,16 @@ jobs:
       - name: Install pre-commit
         run: pipx install pre-commit
 
-      # The hook's own environment, keyed by the config that pins its rev — a
-      # miss just reinstalls it, so a rev bump invalidates the key by itself.
+      # Keyed by the config that pins the hook's rev, so a rev bump invalidates
+      # the key by itself and a miss just reinstalls.
       - uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-commit-msg-${{ hashFiles('.pre-commit-config.yaml') }}
 
-      # On a PR, the range is the PR's own commits; on a push to main, whatever
-      # that push added. `before` is all zeros for a branch's first push, which
-      # the script falls back out of.
+      # On a PR the range is the PR's commits; on a push, whatever it added.
+      # `before` is all zeros for a branch's first push, which the script falls
+      # back out of.
       - name: Check commit messages
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}

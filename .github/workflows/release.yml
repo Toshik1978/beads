@@ -1,16 +1,9 @@
 name: Release
 
-# Releases are cut by pushing a tag:
-#
-#   git tag v1.0.0 && git push origin v1.0.0
-#
-# The tag is the version. This workflow only reads the repository — it never
-# commits, bumps, or pushes anything back.
-#
-# Write the CHANGELOG.md section for the version and bump Cargo.toml before
-# tagging (`TAG=v1.1.0 task changelog`, then the prose on top). The job reads
-# that section as the release body and fails without one. See
-# docs/RELEASING.md for the full sequence.
+# A release is cut by pushing a `v*` tag. The tag is the version; this workflow
+# only reads the repository. Bump Cargo.toml and write the CHANGELOG.md section
+# first — the job uses that section as the release body and fails without one.
+# See docs/RELEASING.md.
 on:
   push:
     tags:
@@ -18,30 +11,27 @@ on:
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
-  # Never cancel a release midway: a half-finished run can leave a draft
-  # release or a partial asset set behind, which is worse than a slow one.
+  # Never cancel a release midway: a half-finished run can leave a draft release
+  # or a partial asset set behind.
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # A separate job purely so a bad tag fails in seconds. Both checks below are
-  # cheap, both catch mistakes that are otherwise only visible after
-  # publication, and neither needs the 1GB+ cross-compilation image that the
-  # build job spends its first minutes pulling.
+  # A separate job so a bad tag fails in seconds, before the build job pulls its
+  # 1GB+ cross-compilation image.
   guards:
     name: Check the tag is releasable
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      # A tag whose version disagrees with Cargo.toml would publish archives
-      # named after one version containing a binary that reports another.
+      # Otherwise the archives are named after one version and contain a binary
+      # reporting another.
       - name: Check the tag matches Cargo.toml
         run: .github/scripts/check-release-version.sh "$GITHUB_REF_NAME"
 
-      # A tag pushed without release notes would publish an empty release body.
       - name: Check the tag has release notes
         run: .github/scripts/extract-changelog.sh "$GITHUB_REF_NAME"
 
@@ -50,20 +40,12 @@ jobs:
     needs: guards
     runs-on: ubuntu-latest
 
-    # WHY THIS RUNS IN A CONTAINER AND NOT ON THE BARE RUNNER
-    #
-    # The two *-apple-darwin targets link against Apple frameworks —
-    # CoreFoundation, by way of chrono's local-timezone lookup. zig does not
-    # bundle those, so `cargo zigbuild` needs a macOS SDK on disk to resolve
-    # them. This image provides one and points SDKROOT at it
-    # (/opt/MacOSX11.3.sdk, which carries CoreFoundation.tbd).
-    #
-    # This is measured, not defensive. Building the release matrix against a
-    # plain cargo-zigbuild install with no SDK fails at link time with
-    # `undefined symbol: _CFRelease` and six of its neighbours, while every
-    # Linux targets sail through — so the failure mode is a release that
-    # silently ships most of its artifacts. bds-saq proved the matrix inside
-    # this image; `task build:cross` is the standing local reproduction.
+    # The container is required, not incidental: the *-apple-darwin targets link
+    # CoreFoundation (via chrono's local-timezone lookup) and zig bundles no
+    # macOS SDK. Without one they fail with `undefined symbol: _CFRelease` while
+    # every Linux target succeeds — i.e. a release that silently ships most of
+    # its artifacts. This image carries an SDK and points SDKROOT at it.
+    # `task build:cross` is the local reproduction.
     container:
       image: ghcr.io/rust-cross/cargo-zigbuild:0.23.0
 
@@ -74,25 +56,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # goreleaser derives the version from the tag, and needs the tag
-          # objects themselves rather than a shallow snapshot of one commit.
+          # goreleaser derives the version from the tag, so it needs the tag
+          # objects rather than a shallow snapshot.
           fetch-depth: 0
 
-      # Inside a container the workspace is not owned by the user git runs as,
-      # so git refuses to read the repository at all — including the tag
-      # goreleaser is about to name the release after.
+      # Inside the container the workspace is not owned by the user git runs as,
+      # so git otherwise refuses to read the repository at all.
       - name: Trust the workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: go-task/setup-task@v2
 
-      # LOAD-BEARING. The image ships rustc 1.93.0, which is below this crate's
-      # 1.95 floor. Left alone, every target fails with "rustc 1.93.0 is not
-      # supported by the following packages" — a message that blames the
-      # dependencies for what is actually a toolchain problem, and which
-      # confounded the first run of this matrix. GoReleaser runs
-      # `rustup target add` per target itself, so the toolchain version is the
-      # only part of this the workflow owns.
+      # LOAD-BEARING. The image ships rustc 1.93.0, below this crate's 1.95
+      # floor, and every target then fails with "rustc 1.93.0 is not supported
+      # by the following packages" — which blames the dependencies for a
+      # toolchain problem. GoReleaser runs `rustup target add` itself.
       - name: Update the toolchain past the crate's floor
         run: |
           rustup update stable
@@ -101,9 +79,8 @@ jobs:
       - name: Refuse a pre-release compiler
         run: env -u RUSTUP_TOOLCHAIN task toolchain:check
 
-      # Re-derived rather than passed from the `guards` job: the script is
-      # deterministic and reads a file already in the checkout, so an artifact
-      # upload would be plumbing for no gain.
+      # Re-derived rather than passed from `guards`: the script is deterministic
+      # and reads a file already in the checkout.
       - name: Build release body from CHANGELOG
         run: |
           .github/scripts/extract-changelog.sh "$GITHUB_REF_NAME" > release-body.md
@@ -113,21 +90,18 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          # This flag is read by GoReleaser's *changelog pipe*, not by the
-          # release pipe — so it only works while that pipe is enabled. See the
-          # `changelog:` block in .goreleaser.yaml before changing either.
+          # `--release-notes` is read by GoReleaser's *changelog pipe*, so it
+          # only works while that pipe is enabled — see `changelog:` in
+          # .goreleaser.yaml before changing either.
           args: release --clean --release-notes=release-body.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # v1.0.0 published four working archives and an empty body, and every step
-  # above reported success. The notes are the one part of a release that no
-  # earlier check can see: `guards` proves the CHANGELOG section exists, and
-  # the build step proves the file was written, but neither proves GoReleaser
-  # put it on the release. Only reading back the published body does.
-  #
-  # Separate job, on the bare runner, because `gh` is not in the
-  # cross-compilation image.
+  # v1.0.0 published four working archives and an empty body with every step
+  # green. No earlier check can see the notes: `guards` proves the CHANGELOG
+  # section exists and the build step proves the file was written, but only
+  # reading the published body proves GoReleaser used it. Separate job on the
+  # bare runner because `gh` is not in the cross-compilation image.
   verify:
     name: Check the published release has notes
     needs: release

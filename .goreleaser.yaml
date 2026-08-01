@@ -1,14 +1,8 @@
-# GoReleaser builds, packages, and publishes the `br` binaries for a release.
+# Turns a tag into four archives, a checksum file, and one GitHub release. It
+# does NOT own the release notes: those are hand-written in CHANGELOG.md and
+# passed in with `--release-notes` (see .github/workflows/release.yml).
 #
-# It owns exactly one layer: turning a tag into four archives, a checksum file,
-# and one GitHub release. It does NOT own the release notes — those are
-# written by hand into CHANGELOG.md and passed in with `--release-notes`
-# (see .github/workflows/release.yml), which is why `changelog` is disabled
-# below. Two sources of release notes would be one too many.
-#
-# Try the whole thing without publishing anything:
-#
-#   task release:snapshot
+# Try the whole thing without publishing: `task release:snapshot`.
 #
 # https://goreleaser.com/customization/builds/builders/rust
 version: 2
@@ -18,68 +12,42 @@ project_name: beads
 builds:
   - id: br
     builder: rust
-    # HARD INVARIANT. The binary is named `br` everywhere it is referenced —
-    # the [[bin]] section of Cargo.toml, the install smoke test in ci.yml, and
-    # external tooling that shells out to it. Renaming the release artifact's
-    # binary would break those silently, since a tarball extracts whatever
-    # name it was given without complaint.
+    # HARD INVARIANT: `br` is the name in Cargo.toml's [[bin]], the smoke test
+    # in ci.yml, and external tooling. A tarball extracts whatever name it was
+    # given, so renaming this breaks those silently.
     binary: br
 
-    # cargo-zigbuild (the builder's default tool) covers all four of these from
-    # a single machine, including the C SQLite amalgamation that rusqlite's
-    # `bundled` feature compiles. That is measured, not assumed: `task
-    # build:cross` reproduces this exact matrix and fails if any target stops
-    # linking.
+    # cargo-zigbuild covers all four from one machine, including the C SQLite
+    # amalgamation rusqlite's `bundled` feature compiles — but only where a
+    # macOS SDK is on disk, which is why the release workflow and
+    # `task release:snapshot` run inside ghcr.io/rust-cross/cargo-zigbuild.
+    # `task build:cross` reproduces this exact matrix and must stay equal to it.
     #
-    # It only holds where a macOS SDK is on disk, which is why both the
-    # release workflow and `task release:snapshot` run inside
-    # ghcr.io/rust-cross/cargo-zigbuild rather than on a bare host. Without one
-    # the two darwin targets fail to link CoreFoundation while the four Linux
-    # targets succeed — see docs/RELEASING.md.
+    # Windows is absent deliberately: cargo-zigbuild does not cover
+    # *-pc-windows-msvc, and ci.yml tests ubuntu and macos only — shipping it
+    # would mean shipping the one artifact no test has executed.
     #
-    # Windows is absent deliberately, not by oversight. cargo-zigbuild does
-    # not cover *-pc-windows-msvc, and — more decisively — .github/workflows/ci.yml
-    # runs the test suite on ubuntu and macos only. Shipping a Windows binary
-    # would mean shipping the one artifact no test has ever executed.
-    #
-    # LINUX IS musl ONLY, AND THE GLIBC BUILDS WERE DROPPED ON PURPOSE.
-    # musl links fully static (`not a dynamic executable`), so there is no
-    # GLIBC floor anywhere in the support matrix and one binary runs on any
-    # distribution including Alpine, which was verified by running it there.
-    #
-    # The usual objection — musl's allocator is slower under allocation-heavy
-    # load — does not apply to this binary. src/main.rs installs mimalloc as
-    # the `#[global_allocator]` on every non-Windows target, so musl's malloc
-    # never serves a Rust allocation. The remaining exposure is the bundled C
-    # SQLite, which allocates through libc directly because the mimalloc crate
-    # registers a Rust global allocator rather than interposing the C symbol.
-    # That is a far smaller surface than the whole program, and neither side
-    # of it has ever been benchmarked here.
+    # Linux is musl only. It links fully static, so there is no GLIBC floor
+    # anywhere in the support matrix. The usual objection (musl's slower
+    # allocator) does not apply: src/main.rs installs mimalloc as the
+    # `#[global_allocator]` on every non-Windows target, leaving only the
+    # bundled C SQLite on libc malloc. Re-adding the gnu targets needs no new
+    # knowledge, just the two triples back in both lists.
     targets:
       - x86_64-unknown-linux-musl
       - aarch64-unknown-linux-musl
       - x86_64-apple-darwin
       - aarch64-apple-darwin
 
-    # `--locked` is the point of the whole gate: it fails if Cargo.lock would
-    # have to change to build, so the published binary is built from the
-    # dependency graph that CI tested rather than from whatever resolved on
-    # release day.
+    # `--locked` is the point of the gate: the published binary is built from
+    # the dependency graph CI tested, not from whatever resolves on release day.
     #
-    # `--package=beads` IS REQUIRED, AND NOT FOR THE REASON THE ERROR SUGGESTS.
-    # Cargo.toml is both a package and a workspace root (`members =
-    # ["test-support"]`, added when the shared test harness became its own
-    # crate). GoReleaser's rust builder refuses outright to build any manifest
-    # carrying a `[workspace]` section unless the flags name a package, and it
-    # reports the *members array* as the candidates — so the message reads
-    # "one of the available workspaces: [test-support]", naming the one crate
-    # that must never be released and omitting the only one that should be.
-    # It is not a suggestion to build test-support; it is the builder declining
-    # to guess. `cargo build` alone would have picked the root package fine.
-    #
-    # The `=` is load-bearing: the check matches the `-p=` and `--package=`
-    # prefixes literally, so `--package beads` as two list entries passes cargo
-    # and still fails GoReleaser.
+    # `--package=beads` IS REQUIRED. Cargo.toml is both a package and a
+    # workspace root, and GoReleaser's rust builder refuses any manifest with a
+    # `[workspace]` section unless the flags name a package. Its error lists the
+    # *members* array, so it reads as "build test-support" — it is not; it is
+    # the builder declining to guess. The `=` is load-bearing too: the check
+    # matches the `-p=` and `--package=` prefixes literally.
     flags:
       - --release
       - --locked
@@ -91,13 +59,13 @@ archives:
       - br
     formats:
       - tar.gz
-    # Leads with the binary name rather than the project name: `br` is what
-    # someone is looking for in a downloads folder, and the two differ here.
+    # Leads with the binary name, not the project name: `br` is what someone
+    # looks for in a downloads folder, and the two differ here.
     name_template: "br_{{ .Version }}_{{ .Target }}"
     files:
       - LICENSE
-      # The rider and the project's lineage travel with every binary. Both are
-      # conditions of the licence, not documentation.
+      # The rider and the lineage travel with every binary — a licence
+      # condition, not documentation.
       - NOTICE.md
       - README.md
 
@@ -105,23 +73,12 @@ checksum:
   name_template: "br_{{ .Version }}_checksums.txt"
   algorithm: sha256
 
-# Release notes come from CHANGELOG.md via --release-notes.
-#
 # DO NOT SET `disable: true` HERE. It reads like the way to stop GoReleaser
 # generating its own notes, and it published v1.0.0 with an empty body while
-# reporting success. `--release-notes` is not a separate mechanism that
-# overrides the changelog — the flag is *read by the changelog pipe itself*
-# (`internal/pipe/changelog/changelog.go`), which loads the file into
-# ctx.ReleaseNotes and returns early. `disable: true` makes that pipe's Skip()
-# return true, so Run() never executes, so the file is never opened and the
-# body is empty. Nothing warns: the workflow's `cat release-body.md` prints
-# the full section, GoReleaser logs "release succeeded", and the release page
-# is blank.
-#
-# Leaving the pipe enabled is what makes --release-notes work, and it does not
-# reintroduce a second source of notes: the early return happens before any
-# commit scraping, so the generator only ever runs if the flag is absent.
-# Snapshot builds skip the pipe outright.
+# reporting success: `--release-notes` is read by the changelog pipe itself,
+# which loads the file and returns early, so disabling the pipe means the file
+# is never opened. Leaving it enabled does not reintroduce a second source of
+# notes — the early return happens before any commit scraping.
 changelog:
   disable: false
 
@@ -129,14 +86,10 @@ release:
   github:
     owner: Toshik1978
     name: beads
-  # A tag carrying a pre-release suffix (v0.2.0-rc.1) is marked as such rather
-  # than becoming the repository's "Latest release".
+  # v0.2.0-rc.1 is marked pre-release rather than becoming "Latest release".
   prerelease: auto
-  # Publishing a release with no binaries attached would be worse than failing.
   draft: false
 
 snapshot:
-  # Local `--snapshot` runs never carry a plausible version number, so a
-  # snapshot tarball can't be mistaken for a real one if it escapes onto a
-  # colleague's machine.
+  # So a snapshot tarball cannot be mistaken for a real one if it escapes.
   version_template: "{{ incpatch .Version }}-SNAPSHOT"

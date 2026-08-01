@@ -1,47 +1,28 @@
-# git-cliff configuration for beads.
+# git-cliff generates only the grouped commit list under each release heading;
+# the prose above it is hand-written. `TAG=v1.1.0 task changelog` prepends a new
+# section, which then becomes the GitHub release body verbatim via
+# .github/scripts/extract-changelog.sh.
 #
-# git-cliff generates only the grouped commit list under each release heading.
-# The prose above it — the framing paragraph and the Highlights list — is
-# hand-written. `TAG=v1.1.0 task changelog` prepends a new section; you then
-# write the prose into it before tagging.
+# BREAKING CHANGES ARE RENDERED TWICE, ON PURPOSE: a `feat(cli)!:` is both a
+# feature and a break, and the ⚠ block prints `breaking_description` (what stops
+# working) while the type group prints the subject (what changed).
 #
-# The generated section becomes the GitHub release body verbatim, via
-# .github/scripts/extract-changelog.sh. Nothing regenerates it at release time.
+# The filter chain on that bullet is load-bearing. With a `BREAKING CHANGE:`
+# footer, `breaking_description` holds everything to the end of the message, so
+# `split(pat="\\n\\n") | first` takes the first paragraph and the second
+# split/join flattens its wrapping. `replace(from="\\n", to=" ")` silently does
+# nothing instead — Tera unescapes `\\n` in `split`'s argument but not in
+# `replace`'s. With a bare `!` and no footer it falls back to the subject.
 #
-# BREAKING CHANGES ARE RENDERED TWICE, ON PURPOSE.
-#
-# A `feat(cli)!:` is both a feature and a break, and the two readings want
-# different text. The "⚠ Breaking Changes" block at the top of each section
-# prints `breaking_description` — what stops working and what to do instead —
-# while the commit's own type group prints its subject, i.e. what changed.
-# Neither is a substitute for the other, so the commit appears in both.
-#
-# Two behaviours of `breaking_description` this relies on, both verified
-# against the installed git-cliff rather than assumed:
-#
-# * With a `BREAKING CHANGE:` footer it holds EVERYTHING after the marker, to
-#   the end of the message — several paragraphs in this repo's commits. Only
-#   the first is wanted, hence the `split(pat="\\n\\n") | first`; the second
-#   `split`/`join` pair then flattens that paragraph's own wrapping onto one
-#   line. That is NOT the same as `replace(from="\\n", to=" ")`, which silently
-#   does nothing here: Tera unescapes `\\n` in `split`'s argument but not in
-#   `replace`'s, so the replace form leaves the bullet wrapped mid-sentence.
-# * With a bare `!` and no footer it falls back to the commit subject, so a
-#   breaking commit that never wrote a footer still renders something useful
-#   rather than an empty bullet.
-#
-# The block sits outside the `group_by` loop, so it needs no `<!-- N -->` sort
-# key and always lands first. Note that it draws on the same filtered commit
-# list as the groups: a breaking commit whose type is skipped above (`chore!`,
-# `test!`, `build(deps)!`) is skipped here too.
+# The block sits outside the `group_by` loop, so it needs no sort key. It draws
+# on the same filtered list as the groups: a breaking commit whose type is
+# skipped below is skipped here too.
 
 [changelog]
-# MUST stay byte-identical to the top of CHANGELOG.md (its title, the framing
-# paragraphs, the `---` and the blank line after it). `--prepend` strips this
+# MUST stay byte-identical to the top of CHANGELOG.md. `--prepend` strips this
 # string from the existing file and re-emits it above the new section; if it
-# does not match, the strip silently no-ops and the new release section lands
-# *above* the file title — which also makes
-# .github/scripts/extract-changelog.sh swallow the preamble into the release
+# does not match, the strip silently no-ops, the new section lands above the
+# file title, and extract-changelog.sh swallows the preamble into the release
 # body. Edit one, edit the other.
 header = """
 # Changelog
@@ -95,15 +76,10 @@ topo_order = false
 # example, `chore(beads):` never reaches the catch-all Others rule.
 commit_parsers = [
   { message = '^Merge ', skip = true },
-  # `chore(beads):` commits close issues in this project's own tracker. That is
-  # development bookkeeping and would otherwise be the bulk of the changelog.
-  #
-  # There is deliberately no `^plan` rule here any more. Earlier history used a
-  # `plan:` prefix for design notes, but `plan` is not a Conventional Commits
-  # type and .pre-commit-config.yaml now rejects it at commit-msg time, so the
-  # rule could never match again. Add the type to the hook first if you want
-  # the prefix back — a skip rule for commits that cannot exist is worse than
-  # no rule, because it reads as coverage.
+  # `chore(beads):` closes issues in this project's own tracker — bookkeeping
+  # that would otherwise be the bulk of the changelog. No `^plan` rule: the
+  # commit-msg hook rejects that prefix, so it could never match, and a skip
+  # rule for commits that cannot exist reads as coverage.
   { message = '^chore', skip = true },
   { message = '^test', skip = true },
   { message = '^style', skip = true },

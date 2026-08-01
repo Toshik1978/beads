@@ -1,40 +1,11 @@
 name: Continuous integration
 
-# MOST MARKDOWN IN THIS REPOSITORY IS A CI INPUT, NOT DOCUMENTATION.
-#
-# The obvious rule here would be `paths-ignore: ['**.md']`. It would be wrong,
-# because this project deliberately wires prose into the test suite, and six
-# separate mechanisms read a tracked `.md` file:
-#
-# * `src/cli/mod.rs` pulls `docs/CLI_REFERENCE.md`, `docs/AGENT_INTEGRATION.md`
-#   and `skills/using-br/SKILL.md` in with `include_str!` and asserts every
-#   top-level command appears in each. Editing one of those files can fail the
-#   suite — that is the entire point of the drift guard.
-# * `tests/licensing.rs` sweeps EVERY git-tracked file for the disallowed
-#   patterns, so no tracked file is inert to it, `.md` included.
-# * It also asserts `NOTICE.md` still names the lineage and the rider.
-# * The `release-config` job below reads `CHANGELOG.md` and fails when the
-#   version in `Cargo.toml` has no section.
-# * `tests/fixtures/workspace_failures/README.md` is fixture data.
-#
-# So the list below is an allow-list of files that genuinely cannot affect any
-# job, enumerated one by one rather than globbed. It is deliberately explicit:
-# a new `docs/WHATEVER.md` is not covered until someone adds it, which spends a
-# CI run rather than skipping one that should have happened. That is the safe
-# direction to fail in.
-#
-# The licensing sweep still applies to every file here, so docs.yml runs it on
-# exactly these paths. THE TWO LISTS ARE COMPLEMENTS AND MUST BE EDITED
-# TOGETHER — a path added here and not there is a path nothing checks.
-#
-# Note also that commit-lint.yml has no path filter and must not gain one: it
-# checks commit subjects, which a docs-only change still has, and `.cliff.toml`
-# builds the CHANGELOG from them.
-#
-# If `main` ever gains branch protection, revisit this. A required status check
-# that never runs leaves a docs-only PR stuck on "Expected — waiting for status"
-# forever; the fix is a skipped-but-required companion job, not removing the
-# filter. `main` is unprotected today, so this does not bite yet.
+# Most Markdown here is a CI input, not documentation: `src/cli/mod.rs` asserts
+# against docs with `include_str!`, and `tests/licensing.rs` sweeps every
+# tracked file. So `paths-ignore` is an explicit allow-list of prose that cannot
+# affect a job, never a `**.md` glob. It is the complement of docs.yml's `paths`
+# list and must be edited together with it — a path in one and not the other is
+# a path nothing checks. commit-lint.yml has no filter and must not gain one.
 on:
   push:
     branches: [main]
@@ -62,53 +33,20 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
-  # DISK, NOT TIME, IS THE BINDING CONSTRAINT ON THE LINUX RUNNERS.
-  #
-  # The first CI run that got as far as building died with
-  # `rustc-LLVM ERROR: IO failure on output stream: No space left on device`
-  # in `Build (ubuntu-latest)`, and with
-  # `collect2: fatal error: ld terminated with signal 7 [Bus error]` in
-  # `Test (ubuntu-latest)`. The bus error is the same fault wearing a
-  # disguise: `ld` mmaps its output file, the filesystem has no space left,
-  # and touching a mapped page raises SIGBUS rather than a clean ENOSPC.
-  # Every macOS job passed, as did the ubuntu smoke test — which builds one
-  # release binary rather than 111 debug ones.
-  #
-  # Both settings below are measured against this tree, not guessed:
-  #
-  # * Incremental compilation is the single largest consumer. `target/debug/
-  #   incremental` reached 12GB in one day of local runs here, against a
-  #   runner that has roughly 14GB free in total. It buys nothing on CI —
-  #   every job starts on a fresh machine and never recompiles anything a
-  #   second time — so this is pure waste, not a speed/space trade.
-  #
-  # * The dev profile sets only `opt-level`, so `debug` takes cargo's default
-  #   of full DWARF. On Linux that debuginfo is embedded in each ELF, and
-  #   there are 111 test binaries of it. `line-tables-only` keeps file and
-  #   line numbers in backtraces — which is all the suite uses; several tests
-  #   set RUST_BACKTRACE=1 but none assert on symbol detail — and is already
-  #   the setting this project chose for its `release-perf` profile.
-  #
-  # Neither is set in Cargo.toml on purpose: local development keeps full
-  # debuginfo and incremental builds, which is where both actually earn their
-  # disk.
+  # Disk, not time, is the binding constraint on the Linux runners: building
+  # 111 debug test binaries there once died with ENOSPC and a linker SIGBUS.
+  # Incremental artifacts buy nothing on a fresh runner, and line tables are all
+  # the suite's backtraces use. Neither is set in Cargo.toml — locally both earn
+  # their disk.
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
-  # Every job below runs on both platforms with fail-fast disabled: a failure
-  # on one OS must never hide a failure (or a pass) on the other, which is
-  # the entire point of running the matrix instead of a single runner.
-  #
-  # There is no rust-toolchain.toml in this repository (see CLAUDE.md) — the
-  # project's claim is that it builds on any current stable, so every job
-  # installs stable explicitly via dtolnay/rust-toolchain rather than relying
-  # on whatever happens to be preinstalled on the runner image.
+  # There is no rust-toolchain.toml (see CLAUDE.md), so every job installs
+  # stable explicitly rather than trusting the runner image. Matrix jobs run
+  # fail-fast: false so one OS never hides the other's result.
 
-  # Single OS on purpose. rustfmt's verdict is computed from the source and
-  # rustfmt.toml alone, so a second runner would re-derive an identical answer
-  # at the cost of another checkout and toolchain install. The OS matrix exists
-  # to surface platform divergence; there is none to surface here.
+  # Single OS: rustfmt's verdict comes from the source and rustfmt.toml alone.
   format:
     name: Format
     runs-on: ubuntu-latest
@@ -125,22 +63,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS bills at 10x Linux, and on a pull request it is nearly always
-        # re-proving what the previous push to main already proved — most PRs
-        # here are Dependabot bumps, which change dependencies rather than
-        # platform behaviour. So the second leg is added only for pushes to
-        # main. A PR still gets full Linux coverage, and macOS still gates
-        # every commit that actually lands.
+        # macOS bills at 10x Linux and most PRs here are Dependabot bumps, so
+        # the second leg is added only for pushes to main. Every commit that
+        # lands is still gated on both.
         os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
-      # The hosted Linux image ships toolchains this project never uses —
-      # Android SDK, .NET, GHC, CodeQL — worth on the order of 25GB. Reclaiming
-      # them is what turns "roughly 14GB free" into enough headroom for 111
-      # debug test binaries. `df` is printed either side so that a future
-      # out-of-disk failure is diagnosable from the log rather than by
-      # inference: the run that prompted this reported a linker bus error and
-      # nothing about space.
+      # ~25GB of unused toolchains, which is the difference between running out
+      # of disk and not. `df` either side so a future ENOSPC is diagnosable.
       - name: Reclaim runner disk
         if: runner.os == 'Linux'
         run: |
@@ -157,14 +87,12 @@ jobs:
           shared-key: lint
       - run: env -u RUSTUP_TOOLCHAIN task setup:ci
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
-      # `rusqlite`'s `bundled` feature compiles SQLite from C source, so
-      # clippy over every target needs a C compiler too. Both hosted images
-      # ship one; nothing extra is installed for it.
+      # Needs a C compiler for rusqlite's bundled SQLite; both images ship one.
       - run: env -u RUSTUP_TOOLCHAIN task lint
 
-  # Single OS on purpose, same reasoning as `format`: `cargo audit` reads
-  # Cargo.lock and the advisory database. Neither varies by runner, so a second
-  # leg can only ever agree.
+  # Single OS: `cargo audit` reads Cargo.lock and the advisory database, neither
+  # of which varies by runner. No continue-on-error and no ignore list — an
+  # audit that cannot fail is decoration.
   audit:
     name: Audit
     runs-on: ubuntu-latest
@@ -177,9 +105,6 @@ jobs:
           tool: cargo-audit
       - run: env -u RUSTUP_TOOLCHAIN task setup:ci
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
-      # No continue-on-error and no advisory ignore list here: an audit that
-      # cannot fail is decoration. A first-run advisory should be reported
-      # and dealt with, not suppressed.
       - run: env -u RUSTUP_TOOLCHAIN task audit
 
   test:
@@ -187,22 +112,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS bills at 10x Linux, and on a pull request it is nearly always
-        # re-proving what the previous push to main already proved — most PRs
-        # here are Dependabot bumps, which change dependencies rather than
-        # platform behaviour. So the second leg is added only for pushes to
-        # main. A PR still gets full Linux coverage, and macOS still gates
-        # every commit that actually lands.
+        # See the note on `lint`.
         os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
-      # The hosted Linux image ships toolchains this project never uses —
-      # Android SDK, .NET, GHC, CodeQL — worth on the order of 25GB. Reclaiming
-      # them is what turns "roughly 14GB free" into enough headroom for 111
-      # debug test binaries. `df` is printed either side so that a future
-      # out-of-disk failure is diagnosable from the log rather than by
-      # inference: the run that prompted this reported a linker bus error and
-      # nothing about space.
       - name: Reclaim runner disk
         if: runner.os == 'Linux'
         run: |
@@ -217,10 +130,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      # `task test` runs the suite under nextest, so the runner needs it.
-      # install-action fetches a prebuilt binary; `cargo install cargo-nextest`
-      # would compile it from source on every cache miss, which costs more
-      # than nextest saves.
+      # `task test` runs under nextest; a prebuilt binary beats compiling it
+      # from source on every cache miss.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -228,23 +139,18 @@ jobs:
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
       - run: env -u RUSTUP_TOOLCHAIN task test
 
-  # Coverage feeds the two shields.io badges in README.md, which read JSON from
-  # a public gist rather than from a third-party coverage service.
-  #
-  # Push to main only, deliberately. The badges describe main, a pull request
-  # from a fork cannot read the gist secrets anyway, and an instrumented build
-  # is roughly twice the cost of a plain one. Coverage is a number to watch,
-  # not a gate: nothing here fails the build on a percentage, because a
-  # coverage threshold that blocks a merge mostly teaches people to write tests
-  # that move the number.
+  # Feeds the two shields.io badges in README.md from a public gist. Push to
+  # main only: the badges describe main, fork PRs cannot read the secrets, and
+  # an instrumented build costs roughly double. Nothing here gates on a
+  # percentage.
   coverage:
     name: Coverage
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     env:
       # Read into env so the gist step can be skipped with a plain `if:` —
-      # `secrets.*` is not available in a job-level `if`, and the workflow must
-      # stay green for anyone who has not configured these.
+      # `secrets.*` is not available there, and the workflow must stay green for
+      # anyone who has not configured these.
       GIST_ID: ${{ secrets.GIST_ID }}
     steps:
       - name: Reclaim runner disk
@@ -269,18 +175,12 @@ jobs:
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
 
       # Doctests are not instrumented: nextest cannot run them and merging
-      # rustdoc's coverage needs nightly. All 13 of ours are `#[ignore]`d, so
-      # nothing measurable is lost.
+      # rustdoc's coverage needs nightly. All 13 of ours are `#[ignore]`d.
       #
-      # `2>&1` is load-bearing: nextest writes its progress and its `Summary`
-      # line to STDERR and leaves stdout empty, so piping stdout alone gives
-      # `tee` nothing to record and the next step finds no counts. This is
-      # exactly how the first run of this job failed.
-      #
-      # `shell: bash` is not decoration either: the default `run:` shell is
-      # `bash -e` WITHOUT pipefail, so the pipeline would report tee's exit
-      # status and a failing coverage run would sail through green. `shell:
-      # bash` selects `bash -eo pipefail`.
+      # Both of these are load-bearing: nextest writes its Summary line to
+      # STDERR, so without `2>&1` tee records nothing; and the default `run:`
+      # shell is `bash -e` without pipefail, so without `shell: bash` the
+      # pipeline reports tee's status and a failing run sails through green.
       - name: Measure coverage
         shell: bash
         run: |
@@ -292,7 +192,6 @@ jobs:
         run: |
           COVERAGE=$(python3 -c "import json;print(f\"{json.load(open('cov.json'))['data'][0]['totals']['lines']['percent']:.1f}\")")
           echo "COVERAGE=$COVERAGE" >> "$GITHUB_ENV"
-          # Same thresholds as the other repos using this gist pattern.
           COLOR=red
           awk "BEGIN{exit !($COVERAGE >= 50)}" && COLOR=orange
           awk "BEGIN{exit !($COVERAGE >= 60)}" && COLOR=yellow
@@ -300,27 +199,16 @@ jobs:
           awk "BEGIN{exit !($COVERAGE >= 80)}" && COLOR=green
           awk "BEGIN{exit !($COVERAGE >= 90)}" && COLOR=brightgreen
           echo "COVERAGE_COLOR=$COLOR" >> "$GITHUB_ENV"
-          # nextest prints one Summary line for the whole run; parse that
-          # rather than summing per-binary lines.
-          #
-          # The gsub strips ANSI colour first, and is not optional: this
-          # workflow sets CARGO_TERM_COLOR=always, so nextest colours its
-          # output even though it is piped, and the field is not `passed` but
-          # `\033[32;1mpassed\033[0m`. Stripping here rather than setting
-          # CARGO_TERM_COLOR=never keeps the tee'd log readable for a human
-          # and survives anyone changing that env later.
-          #
-          # `tests? run:` because a single-test run says "1 test run:",
-          # singular.
+          # nextest prints one Summary line for the whole run; parse that rather
+          # than summing per-binary lines. The gsub strips ANSI colour, which
+          # CARGO_TERM_COLOR=always emits even when piped. `tests? run:` because
+          # a single-test run says "1 test run:".
           strip_ansi='{gsub(/\033\[[0-9;]*[a-zA-Z]/,"")}'
           PASSED=$(awk "$strip_ansi"'/tests? run:/{for(i=1;i<=NF;i++)if($i ~ /^passed/)print $(i-1)}' nextest.log | tail -1)
           FAILED=$(awk "$strip_ansi"'/tests? run:/{for(i=1;i<=NF;i++)if($i ~ /^failed/)print $(i-1)}' nextest.log | tail -1)
-          # A green run prints no `failed` token at all — "3162 passed (1
-          # leaky), 4 skipped" — so FAILED is legitimately empty and defaults
-          # to 0. PASSED being empty means something else entirely: the run
-          # never produced a Summary line. Publishing "0 passed" in
-          # brightgreen for a build that never started is the same lie as an
-          # abort gate comparing 0 to 0, so refuse instead.
+          # A green run prints no `failed` token, so an empty FAILED is normal.
+          # An empty PASSED means there was no Summary line at all — publishing
+          # "0 passed" in brightgreen for a run that never started is a lie.
           if [ -z "$PASSED" ]; then
             echo "no nextest Summary line found; refusing to publish a badge" >&2
             exit 1
@@ -356,16 +244,10 @@ jobs:
               },
             });
 
-  # WHY THIS IS IN ci.yml AND NOT ONLY IN release.yml
-  #
-  # .goreleaser.yaml is otherwise executed for the first time by a tag push,
-  # which is the worst possible moment to discover a typo in it: the tag is
-  # already public, and correcting it means deleting a tag. This job makes a
-  # broken release config a failing pull request instead.
-  #
-  # It validates the config and the two release scripts; it does not build
-  # anything. The cross-compiled build is proven separately by `task build:cross`
-  # and by `task release:snapshot`, neither of which belongs in per-PR CI.
+  # Here rather than only in release.yml: otherwise .goreleaser.yaml is first
+  # executed by a tag push, when correcting a typo means deleting a public tag.
+  # Validates the config and the release scripts; the cross-compiled build is
+  # proven separately by `task build:cross` and `task release:snapshot`.
   release-config:
     name: Release config
     runs-on: ubuntu-latest
@@ -376,12 +258,9 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           args: check
-      # The CHANGELOG section for the version currently in Cargo.toml must
-      # already exist. Because a release bumps the manifest and writes the
-      # notes in the same commit (docs/RELEASING.md), this holds continuously
-      # between releases — and it turns "write the release notes" from a step
-      # someone remembers at tag time into something the repository enforces
-      # on every pull request.
+      # A release bumps the manifest and writes the notes in the same commit
+      # (docs/RELEASING.md), so this holds continuously between releases and
+      # turns "remember to write release notes" into a per-PR check.
       - name: Check the current version has release notes
         run: |
           tag="v$(.github/scripts/check-release-version.sh --manifest-version)"
@@ -393,12 +272,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS bills at 10x Linux, and on a pull request it is nearly always
-        # re-proving what the previous push to main already proved — most PRs
-        # here are Dependabot bumps, which change dependencies rather than
-        # platform behaviour. So the second leg is added only for pushes to
-        # main. A PR still gets full Linux coverage, and macOS still gates
-        # every commit that actually lands.
+        # See the note on `lint`.
         os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -407,9 +281,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: smoke
-      # `--locked` compiles the bundled C SQLite amalgamation from source, so
-      # this is slower than the plain `task build` above — but it is the
-      # closest thing to what someone cloning the repo actually runs, and
-      # it's the only job that proves the installed binary starts at all.
+      # Slower than `task build`, but it is what someone cloning the repo runs,
+      # and the only job that proves the installed binary starts at all.
       - run: cargo install --path . --locked
       - run: br --version
