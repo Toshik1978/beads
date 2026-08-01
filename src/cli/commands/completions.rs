@@ -28,7 +28,7 @@ use tracing::info;
 /// # Errors
 ///
 /// Returns an error if file I/O fails.
-pub fn execute(args: &CompletionsArgs, _ctx: &OutputContext) -> Result<()> {
+pub fn execute(args: &CompletionsArgs, ctx: &OutputContext) -> Result<()> {
     info!(shell = ?args.shell, output = ?args.output, "Generating shell completions");
 
     let cmd = Cli::command();
@@ -38,11 +38,18 @@ pub fn execute(args: &CompletionsArgs, _ctx: &OutputContext) -> Result<()> {
         let mut file = std::fs::File::create(output_path)?;
         write_dynamic_completions(args.shell, &cmd, &mut file)?;
         info!(path = %output_path.display(), "Wrote completion script");
-        eprintln!(
-            "Generated {} completions to {}",
-            shell_name(args.shell),
-            output_path.display()
-        );
+        // Both of these go to stderr, so a redirected script stays clean. The
+        // file the user just wrote does nothing until it is installed, hence
+        // the guidance here and not in the stdout branch — someone piping
+        // already knows where the script is going.
+        if !ctx.is_quiet() {
+            eprintln!(
+                "Generated {} completions to {}",
+                shell_name(args.shell),
+                output_path.display()
+            );
+            print_install_instructions(args.shell);
+        }
     } else {
         // Generate to stdout
         write_dynamic_completions(args.shell, &cmd, &mut io::stdout())?;

@@ -855,7 +855,7 @@ pub struct CompletionsArgs {
     #[arg(value_enum)]
     pub shell: ShellType,
 
-    /// Output directory (default: stdout)
+    /// Output file to write the script to (default: stdout)
     #[arg(long, short = 'o')]
     pub output: Option<std::path::PathBuf>,
 }

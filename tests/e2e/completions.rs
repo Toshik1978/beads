@@ -676,3 +676,116 @@ fn e2e_completions_all_shells_file_output() {
     }
     info!("e2e_completions_all_shells_file_output: done");
 }
+
+// =============================================================================
+// Install Instructions (bds-697)
+// =============================================================================
+
+#[test]
+fn e2e_completions_file_output_prints_install_instructions() {
+    common::init_test_logging();
+    info!("e2e_completions_file_output_prints_install_instructions: start");
+    // Writing to a file leaves a script the user still has to install, so the
+    // `-o` branch prints per-shell guidance on stderr.
+    let workspace = BrWorkspace::new();
+    let output_file = workspace.root.join("_br");
+
+    let completions = run_br(
+        &workspace,
+        ["completions", "zsh", "-o", output_file.to_str().unwrap()],
+        "completions_zsh_instructions",
+    );
+    assert!(
+        completions.status.success(),
+        "completions zsh -o failed: {}",
+        completions.stderr
+    );
+    assert!(
+        completions
+            .stderr
+            .contains("Installation instructions for zsh"),
+        "stderr should carry the zsh install guidance, got: {}",
+        completions.stderr
+    );
+    assert!(
+        completions.stderr.contains("fpath="),
+        "zsh guidance should mention the fpath line, got: {}",
+        completions.stderr
+    );
+    // The guidance must never contaminate the script itself.
+    let file_content = fs::read_to_string(&output_file).expect("read completion file");
+    assert!(
+        !file_content.contains("Installation instructions"),
+        "the written script must not contain the guidance"
+    );
+    info!("e2e_completions_file_output_prints_install_instructions: done");
+}
+
+#[test]
+fn e2e_completions_stdout_omits_install_instructions() {
+    common::init_test_logging();
+    info!("e2e_completions_stdout_omits_install_instructions: start");
+    // Piping to stdout means the user already knows where the script is going;
+    // guidance there would be noise, and stdout must stay byte-clean.
+    let workspace = BrWorkspace::new();
+
+    let completions = run_br(&workspace, ["completions", "zsh"], "completions_zsh_stdout");
+    assert!(
+        completions.status.success(),
+        "completions zsh failed: {}",
+        completions.stderr
+    );
+    assert!(
+        !completions.stderr.contains("Installation instructions"),
+        "stdout mode should not print install guidance, got: {}",
+        completions.stderr
+    );
+    assert!(
+        !completions.stdout.contains("Installation instructions"),
+        "install guidance must never reach stdout"
+    );
+    info!("e2e_completions_stdout_omits_install_instructions: done");
+}
+
+#[test]
+fn e2e_completions_file_output_quiet_suppresses_install_instructions() {
+    common::init_test_logging();
+    info!("e2e_completions_file_output_quiet_suppresses_install_instructions: start");
+    // `--quiet` means no output except errors, and that covers the guidance
+    // and the "Generated ..." line alike.
+    let workspace = BrWorkspace::new();
+    let output_file = workspace.root.join("_br");
+
+    let completions = run_br(
+        &workspace,
+        [
+            "completions",
+            "zsh",
+            "-o",
+            output_file.to_str().unwrap(),
+            "--quiet",
+        ],
+        "completions_zsh_quiet",
+    );
+    assert!(
+        completions.status.success(),
+        "completions zsh -o --quiet failed: {}",
+        completions.stderr
+    );
+    assert!(
+        !completions.stderr.contains("Installation instructions"),
+        "--quiet should suppress install guidance, got: {}",
+        completions.stderr
+    );
+    assert!(
+        !completions.stderr.contains("Generated zsh completions"),
+        "--quiet should suppress the generated-to line, got: {}",
+        completions.stderr
+    );
+    assert!(
+        output_file.exists(),
+        "--quiet must still write the file at {}",
+        output_file.display()
+    );
+    info!("e2e_completions_file_output_quiet_suppresses_install_instructions: done");
+}
