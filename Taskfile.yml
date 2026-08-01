@@ -115,7 +115,7 @@ tasks:
   #   the quoting; the task died with `reached EOF without closing quote` and
   #   stayed broken unnoticed. Do not "simplify" it back to -c.
   # - `git` and `sqlite3` are installed because the suite shells out to both.
-  #   `bv` deliberately is not — the robot_golden_bv_* tests skip loudly.
+  #   Nothing else is: no test shells out to any other binary (bds-2vi).
   # - `safe.directory` is required: the bind-mounted worktree is not owned by
   #   the container's root, and tests/licensing.rs is driven by `git ls-files`.
   # - CARGO_BUILD_JOBS is capped because OrbStack's VM gets ~15.7GB regardless

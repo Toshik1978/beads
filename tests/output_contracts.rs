@@ -700,8 +700,6 @@ mod history_diff_output;
 mod json_output;
 #[path = "output_contracts/jsonl_format.rs"]
 mod jsonl_format;
-#[path = "output_contracts/robot_output.rs"]
-mod robot_output;
 
 // ============================================================================
 // Tests for Golden Text Snapshot System

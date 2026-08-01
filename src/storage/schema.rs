@@ -1538,8 +1538,8 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
         // export: the reader's legacy `as_text().unwrap_or("")` path mapped
         // integer datetimes to UNIX_EPOCH (updated_at rows becoming
         // 1970-01-01) and dropped optional datetimes (closed_at → null),
-        // while downstream tools (bv, bd-style consumers) reject an unknown
-        // "done" status entirely. This migration rewrites the data in place
+        // while the `status` CHECK constraint rejects an unknown "done" value
+        // outright. This migration rewrites the data in place
         // so every row is fully-typed and uses canonical status strings.
         if user_version < 6 && table_exists(conn, "issues") {
             tracing::info!(

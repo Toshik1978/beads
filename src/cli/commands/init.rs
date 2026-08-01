@@ -59,9 +59,6 @@ pub const WORKSPACE_GITIGNORE: &str = r"# Every pattern here is anchored with a 
 
 # Worktree redirect file
 /redirect
-
-# bv lock file
-/.bv.lock
 ";
 
 /// Resolve the beads directory for init.
@@ -256,8 +253,10 @@ pub fn execute(
         write_init_file_if_missing(&gitignore_path, WORKSPACE_GITIGNORE.as_bytes())?;
     }
 
-    // Write empty issues.jsonl for compatibility with bv, an external consumer
-    // that expects this file to exist even if there are no issues yet
+    // Write an empty issues.jsonl so the export always exists, even before the
+    // first issue. `br`'s own reason, not a downstream one (bds-2vi): a file
+    // that is always present means sync, import and any reader handle one
+    // shape instead of two, with absence as a separate case to get wrong.
     let jsonl_path = beads_dir.join("issues.jsonl");
     let jsonl_existed = path_entry_exists(&jsonl_path)?;
     if !jsonl_existed {
@@ -364,7 +363,7 @@ fn build_init_steps(
     });
 
     steps.push(InitStep {
-        label: "issues.jsonl (for bv compatibility)".to_string(),
+        label: "issues.jsonl (empty export)".to_string(),
         status: if jsonl_existed {
             InitStepStatus::Existing
         } else {

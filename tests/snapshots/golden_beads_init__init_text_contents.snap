@@ -45,9 +45,6 @@ expression: contents
 
 # Worktree redirect file
 /redirect
-
-# bv lock file
-/.bv.lock
 --- config.yaml ---
 # Beads Project Configuration
 # issue_prefix: bd

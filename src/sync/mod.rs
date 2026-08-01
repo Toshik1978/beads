@@ -3926,8 +3926,8 @@ fn normalize_issue(issue: &mut Issue) {
     // JSONL import as `Status::Custom(_)`. Leaving them unmapped is
     // corruptive: our own `is_terminal()` returns false for Custom, so the
     // closed_at repair below skips them and the CHECK constraint later
-    // rejects the row. Downstream consumers (bv, bd-style readers) also
-    // reject unknown statuses outright.
+    // rejects the row. Those two reasons are `br`'s own and stand alone —
+    // this deliberately no longer leans on what any downstream reader does.
     if let crate::model::Status::Custom(raw) = &issue.status {
         let key = raw.trim().to_ascii_lowercase();
         if matches!(

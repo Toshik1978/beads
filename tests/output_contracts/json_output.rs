@@ -649,3 +649,79 @@ fn snapshot_show_multiple_ids_json() {
         assert_eq!(items.len(), 2, "show with 2 IDs should return 2 results");
     }
 }
+
+// Representative fixture for the exact `br ready --json` golden.
+//
+// Golden update workflow:
+// INSTA_UPDATE=always cargo test --test output_contracts ready_representative
+//
+// Distinct from `snapshot_ready_json` above, which creates one issue with
+// `br create`. This imports a richer dataset from JSONL and pins the exact
+// unmasked payload, so it asserts which issues `ready` *excludes* -- blocked,
+// in_progress and closed -- alongside the deferred one `--include-deferred`
+// lets through. The flags themselves are covered behaviourally in
+// tests/e2e/ready.rs; what is pinned here is the serialized shape.
+//
+// This lived in `robot_output.rs` until bds-2vi. That file also held a contract
+// test against a downstream viewer -- first goldens of its rendering
+// (bds-04l.11), then of the `br` commands it emitted. The viewer in use is now
+// a read-only consumer of `.beads/issues.jsonl` that emits no commands, and the
+// test had never run on CI anyway, which installs no viewer. With the viewer
+// half deleted the surviving golden is pure `br`, so it moved here rather than
+// keeping a module of its own. `br`'s only remaining coupling to any consumer
+// is the JSONL record shape, pinned for its own sake by `jsonl_format`.
+const READY_JSONL_FIXTURE: &str = r#"{"id":"bd-blocker","title":"00 Blocking Root","description":"Unblocks dependent work","status":"open","priority":0,"issue_type":"task","created_at":"2026-02-01T00:00:00Z","created_by":"fixture","updated_at":"2026-02-01T00:00:00Z","source_repo":".","labels":["core"],"compaction_level":0,"original_size":0}
+{"id":"bd-ready-p0","title":"01 Ready Critical Unassigned","status":"open","priority":0,"issue_type":"bug","created_at":"2026-02-02T00:00:00Z","created_by":"fixture","updated_at":"2026-02-02T00:00:00Z","source_repo":".","labels":["ops","agent"],"compaction_level":0,"original_size":0}
+{"id":"bd-ready-p1-assigned","title":"02 Ready Assigned Feature","status":"open","priority":1,"issue_type":"feature","assignee":"alice","owner":"owner@example.com","created_at":"2026-02-03T00:00:00Z","created_by":"fixture","updated_at":"2026-02-03T00:00:00Z","source_repo":".","labels":["frontend"],"compaction_level":0,"original_size":0}
+{"id":"bd-ready-p2-label","title":"03 Ready Backend Task","status":"open","priority":2,"issue_type":"task","created_at":"2026-02-04T00:00:00Z","created_by":"fixture","updated_at":"2026-02-04T00:00:00Z","source_repo":".","labels":["backend"],"compaction_level":0,"original_size":0}
+{"id":"bd-blocked","title":"04 Blocked By Root","status":"open","priority":1,"issue_type":"task","created_at":"2026-02-05T00:00:00Z","created_by":"fixture","updated_at":"2026-02-05T00:00:00Z","source_repo":".","labels":["blocked"],"dependencies":[{"issue_id":"bd-blocked","depends_on_id":"bd-blocker","type":"blocks","created_at":"2026-02-05T00:00:00Z","created_by":"fixture","metadata":"{}","thread_id":""}],"compaction_level":0,"original_size":0}
+{"id":"bd-deferred","title":"05 Deferred Ready Later","status":"deferred","priority":1,"issue_type":"task","defer_until":"2026-09-01T00:00:00Z","created_at":"2026-02-06T00:00:00Z","created_by":"fixture","updated_at":"2026-02-06T00:00:00Z","source_repo":".","labels":["waiting"],"compaction_level":0,"original_size":0}
+{"id":"bd-in-progress","title":"06 In Progress Assigned","status":"in_progress","priority":0,"issue_type":"task","assignee":"bob","created_at":"2026-02-07T00:00:00Z","created_by":"fixture","updated_at":"2026-02-07T00:00:00Z","source_repo":".","labels":["active"],"compaction_level":0,"original_size":0}
+{"id":"bd-closed","title":"07 Closed Done","status":"closed","priority":2,"issue_type":"task","created_at":"2026-02-08T00:00:00Z","created_by":"fixture","updated_at":"2026-02-08T00:00:00Z","closed_at":"2026-02-08T01:00:00Z","close_reason":"done","source_repo":".","labels":["done"],"compaction_level":0,"original_size":0}
+"#;
+
+fn init_ready_golden_workspace() -> crate::common::cli::BrWorkspace {
+    let workspace = init_workspace();
+    let jsonl_path = workspace.root.join(".beads/issues.jsonl");
+    fs::write(jsonl_path, READY_JSONL_FIXTURE).expect("write ready JSONL fixture");
+
+    let import = run_br(
+        &workspace,
+        ["sync", "--import-only", "--json"],
+        "ready_representative_import",
+    );
+    assert!(
+        import.status.success(),
+        "ready fixture import failed:\nstdout:\n{}\nstderr:\n{}",
+        import.stdout,
+        import.stderr
+    );
+
+    workspace
+}
+
+#[test]
+fn representative_json_golden_ready_output() {
+    let workspace = init_ready_golden_workspace();
+
+    let output = run_br(
+        &workspace,
+        [
+            "ready",
+            "--json",
+            "--include-deferred",
+            "--sort",
+            "priority",
+            "--limit",
+            "0",
+        ],
+        "ready_representative",
+    );
+    assert!(
+        output.status.success(),
+        "ready --json failed: {}",
+        output.stderr
+    );
+    serde_json::from_str::<Value>(&output.stdout).expect("ready --json emitted invalid JSON");
+    assert_snapshot!("ready_representative_json_output", output.stdout.trim_end());
+}

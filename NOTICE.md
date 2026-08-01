@@ -52,5 +52,6 @@ Substantial changes from upstream `beads_rust`:
   timezone, locale, terminal width, or a symlink-free temp directory.
 
 The `.beads/` on-disk layout and the `issues.jsonl` schema are deliberately
-unchanged, so that
-[beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) keeps working.
+unchanged, so that existing readers of those files keep working. The layout is
+kept stable for its own sake; this project carries no contract on any
+particular consumer's behalf.
