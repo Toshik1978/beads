@@ -27,11 +27,6 @@ pub struct CreateConfig {
     /// to `None` (storage default) when the beads directory has no usable
     /// parent name, e.g. `/.beads`.
     pub source_repo: Option<String>,
-    /// Absolute canonical path of the source repository, populated alongside
-    /// `source_repo` so fleet automation can disambiguate two clones of the
-    /// same repo at different paths on the same machine (beads#289).
-    /// `None` when `canonicalize` of the beads-dir parent failed.
-    pub source_repo_path: Option<String>,
 }
 
 /// Derive a stable `source_repo` value from the beads directory path: the
@@ -60,37 +55,6 @@ pub(crate) fn canonical_source_repo(beads_dir: &Path) -> Option<String> {
         None
     } else {
         Some(name)
-    }
-}
-
-/// Derive the absolute canonical path of the source repository (the
-/// parent of `.beads/`) for the `source_repo_path` field on `Issue`.
-/// Distinct from [`canonical_source_repo`], which returns just the
-/// basename. Used by fleet automation to disambiguate two clones of
-/// the same repo at different paths on the same machine (see
-/// beads#289). Falls back to `None` if `canonicalize` fails —
-/// the caller treats the field as optional and leaves it unset, which
-/// matches the schema contract (`source_repo_path TEXT` nullable).
-pub(crate) fn canonical_source_repo_path(beads_dir: &Path) -> Option<String> {
-    let parent = beads_dir.parent()?;
-    let parent = if parent.as_os_str().is_empty()
-        && beads_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| matches!(name, ".beads" | "_beads"))
-    {
-        Path::new(".")
-    } else if parent.as_os_str().is_empty() {
-        return None;
-    } else {
-        parent
-    };
-    let canonical = parent.canonicalize().ok()?;
-    let path_str = canonical.to_string_lossy().into_owned();
-    if path_str.is_empty() {
-        None
-    } else {
-        Some(path_str)
     }
 }
 
@@ -171,7 +135,6 @@ pub fn execute_with_storage(
         default_issue_type: config::default_issue_type_from_layer(&layer)?,
         actor: config::resolve_actor(&layer),
         source_repo: canonical_source_repo(&storage_ctx.paths.beads_dir),
-        source_repo_path: canonical_source_repo_path(&storage_ctx.paths.beads_dir),
     };
 
     // Resolve the description up front — before the retry closure — so the
@@ -507,7 +470,11 @@ pub fn create_issue_impl(
             closed_by_session: None,
             source_system: None,
             source_repo: config.source_repo.clone(),
-            source_repo_path: config.source_repo_path.clone(),
+            // Deliberately never derived from the workspace (bds-31i): the
+            // absolute path named the author's machine in a committed file and
+            // nothing consumed it. `br update --source-repo-path` still sets it
+            // for anyone who wants beads#289's cross-clone disambiguation.
+            source_repo_path: None,
             agent_context: None,
             deleted_at,
             deleted_by: if deleted_at.is_some() {
@@ -811,7 +778,6 @@ fn execute_import(
     let default_issue_type = config::default_issue_type_from_layer(&layer)?;
     let actor = config::resolve_actor(&layer);
     let import_source_repo = canonical_source_repo(&storage_ctx.paths.beads_dir);
-    let import_source_repo_path = canonical_source_repo_path(&storage_ctx.paths.beads_dir);
     let now = Utc::now();
     let _json_mode = cli.json.unwrap_or(false);
     let due_at = parse_optional_date(args.due.as_deref())?;
@@ -1002,7 +968,8 @@ fn execute_import(
                 closed_by_session: None,
                 source_system: None,
                 source_repo: import_source_repo.clone(),
-                source_repo_path: import_source_repo_path.clone(),
+                // Never derived — see the note in `create_issue_impl` (bds-31i).
+                source_repo_path: None,
                 agent_context: agent_context.clone(),
                 deleted_at: import_deleted_at,
                 deleted_by: if import_deleted_at.is_some() {
@@ -1511,7 +1478,6 @@ mod tests {
             default_issue_type: IssueType::Task,
             actor: "test_user".to_string(),
             source_repo: None,
-            source_repo_path: None,
         }
     }
 
