@@ -1484,7 +1484,11 @@ mod tests {
         info!("test_show_resolves_full_id: starting");
         let resolver = IdResolver::new(ResolverConfig::with_prefix("bd"));
         let resolved_id = resolver
-            .resolve("bd-abc123", |id| id == "bd-abc123", |_hash| Vec::new())
+            .resolve_fallible(
+                "bd-abc123",
+                |id| Ok(id == "bd-abc123"),
+                |_hash| Ok(Vec::new()),
+            )
             .unwrap();
         assert_eq!(resolved_id.id, "bd-abc123");
         info!("test_show_resolves_full_id: assertions passed");
@@ -1496,7 +1500,7 @@ mod tests {
         info!("test_show_resolves_prefixed_id: starting");
         let resolver = IdResolver::new(ResolverConfig::with_prefix("bd"));
         let resolved_id = resolver
-            .resolve("abc123", |id| id == "bd-abc123", |_hash| Vec::new())
+            .resolve_fallible("abc123", |id| Ok(id == "bd-abc123"), |_hash| Ok(Vec::new()))
             .unwrap();
         assert_eq!(resolved_id.id, "bd-abc123");
         info!("test_show_resolves_prefixed_id: assertions passed");
@@ -1508,14 +1512,14 @@ mod tests {
         info!("test_show_resolves_partial_id: starting");
         let resolver = IdResolver::new(ResolverConfig::with_prefix("bd"));
         let resolved_id = resolver
-            .resolve(
+            .resolve_fallible(
                 "abc",
-                |_id| false,
+                |_id| Ok(false),
                 |hash| {
                     if hash == "abc" {
-                        vec!["bd-abc123".to_string()]
+                        Ok(vec!["bd-abc123".to_string()])
                     } else {
-                        Vec::new()
+                        Ok(Vec::new())
                     }
                 },
             )
@@ -1529,7 +1533,7 @@ mod tests {
         init_logging();
         info!("test_show_not_found_error: starting");
         let resolver = IdResolver::new(ResolverConfig::with_prefix("bd"));
-        let result = resolver.resolve("missing", |_id| false, |_hash| Vec::new());
+        let result = resolver.resolve_fallible("missing", |_id| Ok(false), |_hash| Ok(Vec::new()));
         assert!(result.is_err());
         info!("test_show_not_found_error: assertions passed");
     }

@@ -30,7 +30,7 @@ fn generate_without_registry(
     creator: Option<&str>,
     created_at: chrono::DateTime<Utc>,
 ) -> String {
-    IdGenerator::with_defaults()
+    IdGenerator::new(IdConfig::default())
         .generate(title, description, creator, created_at, 0, |_| Ok(false))
         .expect("infallible empty registry")
 }
@@ -215,7 +215,7 @@ proptest! {
 
         let parsed = parsed.unwrap();
         prop_assert_eq!(
-            parsed.depth(), child_segments.len(),
+            parsed.child_path.len(), child_segments.len(),
             "Depth should match segment count"
         );
         prop_assert_eq!(
@@ -254,7 +254,7 @@ proptest! {
         title in "\\PC{1,100}",
         issue_count in 0usize..=1_000_000usize,
     ) {
-        let generator = IdGenerator::with_defaults();
+        let generator = IdGenerator::new(IdConfig::default());
         let expected_length = generator.optimal_length(issue_count);
         let id = generator
             .generate(&title, None, None, Utc::now(), issue_count, |_| Ok(false))
@@ -271,7 +271,7 @@ fn id_no_collisions_batch() {
     init_test_logging();
     info!("proptest_batch_collision: starting batch test");
 
-    let generator = IdGenerator::with_defaults();
+    let generator = IdGenerator::new(IdConfig::default());
     let now = Utc::now();
     let mut generated = HashSet::new();
 
@@ -312,7 +312,7 @@ fn optimal_length_monotonic() {
     init_test_logging();
     info!("proptest_optimal_length: testing monotonicity");
 
-    let generator = IdGenerator::with_defaults();
+    let generator = IdGenerator::new(IdConfig::default());
 
     let mut prev_len = generator.optimal_length(0);
     for count in [1, 10, 100, 1000, 10_000, 100_000] {

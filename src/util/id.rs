@@ -64,18 +64,6 @@ impl IdGenerator {
         Self { config }
     }
 
-    /// Create a new ID generator with default config.
-    #[must_use]
-    pub fn with_defaults() -> Self {
-        Self::new(IdConfig::default())
-    }
-
-    /// Get the configured prefix.
-    #[must_use]
-    pub fn prefix(&self) -> &str {
-        &self.config.prefix
-    }
-
     /// Compute the optimal hash length for a given issue count.
     ///
     /// Uses birthday problem approximation to estimate collision probability.
@@ -282,28 +270,6 @@ pub(crate) fn split_prefix_remainder(id: &str) -> Option<(&str, &str)> {
     Some((prefix, remainder))
 }
 
-/// Check if an ID is a child ID (contains a dot after the hash).
-#[must_use]
-pub fn is_child_id(id: &str) -> bool {
-    // Only check after the prefix-hash part
-    split_prefix_remainder(id).map_or_else(
-        || id.contains('.'),
-        |(_, remainder)| remainder.contains('.'),
-    )
-}
-
-/// Get the depth of a hierarchical ID.
-///
-/// Top-level IDs have depth 0, first-level children have depth 1, etc.
-#[must_use]
-pub fn id_depth(id: &str) -> usize {
-    // Count dots after the prefix-hash part
-    split_prefix_remainder(id).map_or_else(
-        || id.matches('.').count(),
-        |(_, remainder)| remainder.matches('.').count(),
-    )
-}
-
 // ============================================================================
 // ID Parsing and Validation
 // ============================================================================
@@ -330,10 +296,20 @@ impl ParsedId {
         self.child_path.is_empty()
     }
 
-    /// Returns the depth in the hierarchy (0 for root).
+    /// Reconstruct the full ID string.
+    ///
+    /// No production caller: `parse_id` is the live direction. This is the
+    /// inverse, and it exists so `tests/proptest/id.rs` can state the
+    /// round-trip invariant — every ID `parse_id` accepts must format back to
+    /// the bytes it was given.
     #[must_use]
-    pub fn depth(&self) -> usize {
-        self.child_path.len()
+    pub fn to_id_string(&self) -> String {
+        if self.child_path.is_empty() {
+            format!("{}-{}", self.prefix, self.hash)
+        } else {
+            let path_str = format_child_path(&self.child_path);
+            format!("{}-{}{}", self.prefix, self.hash, path_str)
+        }
     }
 
     /// Get the parent ID if this is a child.
@@ -354,26 +330,6 @@ impl ParsedId {
             let path_str = format_child_path(&parent_path);
             Some(format!("{}-{}{}", self.prefix, self.hash, path_str))
         }
-    }
-
-    /// Reconstruct the full ID string.
-    #[must_use]
-    pub fn to_id_string(&self) -> String {
-        if self.child_path.is_empty() {
-            format!("{}-{}", self.prefix, self.hash)
-        } else {
-            let path_str = format_child_path(&self.child_path);
-            format!("{}-{}{}", self.prefix, self.hash, path_str)
-        }
-    }
-
-    /// Check if this ID is a child (direct or indirect) of another.
-    #[must_use]
-    pub fn is_child_of(&self, potential_parent: &str) -> bool {
-        let full_id = self.to_id_string();
-        full_id.starts_with(potential_parent)
-            && full_id.len() > potential_parent.len()
-            && full_id[potential_parent.len()..].starts_with('.')
     }
 }
 
@@ -445,34 +401,6 @@ pub fn parse_id(id: &str) -> Result<ParsedId> {
         prefix: prefix.to_string(),
         hash,
         child_path,
-    })
-}
-
-/// Validate that an ID has the expected prefix.
-///
-/// # Arguments
-///
-/// * `id` - The ID to validate
-/// * `expected_prefix` - The primary expected prefix
-/// * `allowed_prefixes` - Additional allowed prefixes
-///
-/// # Errors
-///
-/// Returns `PrefixMismatch` if the prefix doesn't match expected or allowed.
-pub fn validate_prefix(id: &str, expected_prefix: &str, allowed_prefixes: &[String]) -> Result<()> {
-    let parsed = parse_id(id)?;
-
-    if parsed.prefix == expected_prefix {
-        return Ok(());
-    }
-
-    if allowed_prefixes.contains(&parsed.prefix) {
-        return Ok(());
-    }
-
-    Err(BeadsError::PrefixMismatch {
-        expected: expected_prefix.to_string(),
-        found: parsed.prefix,
     })
 }
 
@@ -591,8 +519,6 @@ pub fn is_valid_id_format(id: &str) -> bool {
 pub struct ResolverConfig {
     /// Default prefix to use when input lacks one.
     pub default_prefix: String,
-    /// Additional allowed prefixes for matching.
-    pub allowed_prefixes: Vec<String>,
     /// Whether to allow substring matching on hash portion.
     pub allow_substring_match: bool,
 }
@@ -601,7 +527,6 @@ impl Default for ResolverConfig {
     fn default() -> Self {
         Self {
             default_prefix: "br".to_string(),
-            allowed_prefixes: Vec::new(),
             allow_substring_match: true,
         }
     }
@@ -623,21 +548,6 @@ impl ResolverConfig {
 pub struct ResolvedId {
     /// The full resolved ID.
     pub id: String,
-    /// How the ID was matched.
-    pub match_type: MatchType,
-    /// The original input that was resolved.
-    pub original_input: String,
-}
-
-/// How an ID was matched during resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatchType {
-    /// Exact match on full ID.
-    Exact,
-    /// Matched after prepending the default prefix.
-    PrefixNormalized,
-    /// Matched via substring on hash portion.
-    Substring,
 }
 
 /// ID resolver that resolves partial IDs to full IDs.
@@ -659,121 +569,10 @@ impl IdResolver {
         Self { config }
     }
 
-    /// Create a new ID resolver with default config.
-    #[must_use]
-    pub fn with_defaults() -> Self {
-        Self::new(ResolverConfig::default())
-    }
-
-    /// Create a new ID resolver with the given default prefix.
-    #[must_use]
-    pub fn with_prefix(prefix: impl Into<String>) -> Self {
-        Self::new(ResolverConfig::with_prefix(prefix))
-    }
-
     /// Get the default prefix.
     #[must_use]
     pub fn default_prefix(&self) -> &str {
         &self.config.default_prefix
-    }
-
-    /// Resolve a partial ID to a full ID.
-    ///
-    /// The `lookup_fn` should return all IDs that match the given pattern.
-    /// - For exact match, pass the ID and expect 0 or 1 results.
-    /// - For substring match, pass the pattern and expect 0-N results.
-    ///
-    /// The `exists_fn` should check if an exact ID exists.
-    ///
-    /// # Errors
-    ///
-    /// - `IssueNotFound` if no match is found.
-    /// - `AmbiguousId` if multiple matches are found.
-    ///
-    /// # Panics
-    ///
-    /// This function will not panic under normal operation. The internal
-    /// `.expect()` call is guarded by a length check ensuring exactly one match exists.
-    pub fn resolve<F, G>(
-        &self,
-        input: &str,
-        exists_fn: F,
-        substring_match_fn: G,
-    ) -> Result<ResolvedId>
-    where
-        F: Fn(&str) -> bool,
-        G: Fn(&str) -> Vec<String>,
-    {
-        let input = input.trim();
-
-        if input.is_empty() {
-            return Err(BeadsError::InvalidId { id: String::new() });
-        }
-
-        // Normalize input to lowercase
-        let normalized = normalize_id(input);
-
-        // Step 1: Try exact match
-        if exists_fn(&normalized) {
-            return Ok(ResolvedId {
-                id: normalized,
-                match_type: MatchType::Exact,
-                original_input: input.to_string(),
-            });
-        }
-
-        // Step 2: If no dash (missing prefix), prepend default prefix and retry
-        if !normalized.contains('-') {
-            let with_prefix = format!("{}-{}", self.config.default_prefix, normalized);
-            if exists_fn(&with_prefix) {
-                return Ok(ResolvedId {
-                    id: with_prefix,
-                    match_type: MatchType::PrefixNormalized,
-                    original_input: input.to_string(),
-                });
-            }
-        }
-
-        // Step 3: Substring match on hash portion
-        if self.config.allow_substring_match {
-            // Extract the potential hash portion (after dash, or entire input if no dash)
-            let (prefix, hash_pattern) = split_prefix_remainder(&normalized)
-                .map_or((None, normalized.as_str()), |(p, r)| (Some(p), r));
-
-            if !hash_pattern.is_empty() {
-                let mut matches = substring_match_fn(hash_pattern);
-
-                if let Some(p) = prefix {
-                    let expected_prefix = format!("{p}-");
-                    matches.retain(|id| id.starts_with(&expected_prefix));
-                }
-
-                match matches.len() {
-                    0 => {
-                        // No matches found
-                    }
-                    1 => {
-                        return Ok(ResolvedId {
-                            id: matches.into_iter().next().unwrap_or_default(),
-                            match_type: MatchType::Substring,
-                            original_input: input.to_string(),
-                        });
-                    }
-                    _ => {
-                        // Multiple matches - ambiguous
-                        return Err(BeadsError::AmbiguousId {
-                            partial: input.to_string(),
-                            matches,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Step 4: No match found
-        Err(BeadsError::IssueNotFound {
-            id: input.to_string(),
-        })
     }
 
     /// Resolve a partial ID while allowing the lookup callbacks to fail.
@@ -806,21 +605,13 @@ impl IdResolver {
         let normalized = normalize_id(input);
 
         if exists_fn(&normalized)? {
-            return Ok(ResolvedId {
-                id: normalized,
-                match_type: MatchType::Exact,
-                original_input: input.to_string(),
-            });
+            return Ok(ResolvedId { id: normalized });
         }
 
         if !normalized.contains('-') {
             let with_prefix = format!("{}-{}", self.config.default_prefix, normalized);
             if exists_fn(&with_prefix)? {
-                return Ok(ResolvedId {
-                    id: with_prefix,
-                    match_type: MatchType::PrefixNormalized,
-                    original_input: input.to_string(),
-                });
+                return Ok(ResolvedId { id: with_prefix });
             }
         }
 
@@ -841,8 +632,6 @@ impl IdResolver {
                     1 => {
                         return Ok(ResolvedId {
                             id: matches.into_iter().next().unwrap_or_default(),
-                            match_type: MatchType::Substring,
-                            original_input: input.to_string(),
                         });
                     }
                     _ => {
@@ -858,30 +647,6 @@ impl IdResolver {
         Err(BeadsError::IssueNotFound {
             id: input.to_string(),
         })
-    }
-
-    /// Resolve multiple IDs, returning results for each.
-    ///
-    /// If any ID fails to resolve, returns the first error.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first error encountered if any ID fails to resolve.
-    /// See [`IdResolver::resolve`] for the specific error conditions.
-    pub fn resolve_all<F, G>(
-        &self,
-        inputs: &[String],
-        exists_fn: F,
-        substring_match_fn: G,
-    ) -> Result<Vec<ResolvedId>>
-    where
-        F: Fn(&str) -> bool,
-        G: Fn(&str) -> Vec<String>,
-    {
-        inputs
-            .iter()
-            .map(|input| self.resolve(input, &exists_fn, &substring_match_fn))
-            .collect()
     }
 
     /// Resolve multiple IDs while preserving lookup callback errors.
@@ -940,42 +705,6 @@ pub fn find_matching_ids(all_ids: &[String], hash_substring: &str) -> Vec<String
         .collect()
 }
 
-/// Quick helper to resolve a single ID with default settings.
-///
-/// This is useful for simple cases where you just need to resolve one ID.
-///
-/// # Errors
-///
-/// - `IssueNotFound` if no match is found.
-/// - `AmbiguousId` if multiple matches are found.
-/// - `InvalidId` if the input is empty.
-pub fn resolve_id<F, G>(input: &str, exists_fn: F, substring_match_fn: G) -> Result<String>
-where
-    F: Fn(&str) -> bool,
-    G: Fn(&str) -> Vec<String>,
-{
-    let resolver = IdResolver::with_defaults();
-    resolver
-        .resolve(input, exists_fn, substring_match_fn)
-        .map(|r| r.id)
-}
-
-/// Quick helper to resolve a single ID with fallible lookup callbacks.
-///
-/// # Errors
-///
-/// Propagates any lookup error in addition to the usual resolution errors.
-pub fn resolve_id_fallible<F, G>(input: &str, exists_fn: F, substring_match_fn: G) -> Result<String>
-where
-    F: Fn(&str) -> Result<bool>,
-    G: Fn(&str) -> Result<Vec<String>>,
-{
-    let resolver = IdResolver::with_defaults();
-    resolver
-        .resolve_fallible(input, exists_fn, substring_match_fn)
-        .map(|r| r.id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -994,50 +723,51 @@ mod tests {
         ]
     }
 
-    fn exists_in_mock(id: &str) -> bool {
-        mock_db().contains(&id.to_string())
+    // The live resolver takes fallible callbacks so storage errors survive;
+    // these mocks cannot fail, hence the allow.
+    #[allow(clippy::unnecessary_wraps)]
+    fn exists_in_mock(id: &str) -> Result<bool> {
+        Ok(mock_db().contains(&id.to_string()))
     }
 
-    fn substring_in_mock(pattern: &str) -> Vec<String> {
-        find_matching_ids(&mock_db(), pattern)
+    #[allow(clippy::unnecessary_wraps)]
+    fn substring_in_mock(pattern: &str) -> Result<Vec<String>> {
+        Ok(find_matching_ids(&mock_db(), pattern))
     }
 
     #[test]
     fn test_resolve_exact_match() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve("br-abc123", exists_in_mock, substring_in_mock)
+            .resolve_fallible("br-abc123", exists_in_mock, substring_in_mock)
             .unwrap();
         assert_eq!(result.id, "br-abc123");
-        assert_eq!(result.match_type, MatchType::Exact);
     }
 
     #[test]
     fn test_resolve_prefix_normalized() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve("abc123", exists_in_mock, substring_in_mock)
+            .resolve_fallible("abc123", exists_in_mock, substring_in_mock)
             .unwrap();
         assert_eq!(result.id, "br-abc123");
-        assert_eq!(result.match_type, MatchType::PrefixNormalized);
     }
 
     #[test]
     fn test_resolve_substring_match() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         // "xyz" should uniquely match "br-xyz789"
         let result = resolver
-            .resolve("xyz", exists_in_mock, substring_in_mock)
+            .resolve_fallible("xyz", exists_in_mock, substring_in_mock)
             .unwrap();
         assert_eq!(result.id, "br-xyz789");
-        assert_eq!(result.match_type, MatchType::Substring);
     }
 
     #[test]
     fn test_resolve_ambiguous() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         // "ab" matches both "br-abc123" and "br-abd456"
-        let result = resolver.resolve("ab", exists_in_mock, substring_in_mock);
+        let result = resolver.resolve_fallible("ab", exists_in_mock, substring_in_mock);
         assert!(result.is_err());
         if let Err(BeadsError::AmbiguousId { partial, matches }) = result {
             assert_eq!(partial, "ab");
@@ -1050,8 +780,8 @@ mod tests {
 
     #[test]
     fn test_resolve_not_found() {
-        let resolver = IdResolver::with_defaults();
-        let result = resolver.resolve("nonexistent", exists_in_mock, substring_in_mock);
+        let resolver = IdResolver::new(ResolverConfig::default());
+        let result = resolver.resolve_fallible("nonexistent", exists_in_mock, substring_in_mock);
         assert!(result.is_err());
         if let Err(BeadsError::IssueNotFound { id }) = result {
             assert_eq!(id, "nonexistent");
@@ -1062,19 +792,18 @@ mod tests {
 
     #[test]
     fn test_resolve_child_id() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve("br-abc123.1", exists_in_mock, substring_in_mock)
+            .resolve_fallible("br-abc123.1", exists_in_mock, substring_in_mock)
             .unwrap();
         assert_eq!(result.id, "br-abc123.1");
-        assert_eq!(result.match_type, MatchType::Exact);
     }
 
     #[test]
     fn test_resolve_case_insensitive() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve("BR-ABC123", exists_in_mock, substring_in_mock)
+            .resolve_fallible("BR-ABC123", exists_in_mock, substring_in_mock)
             .unwrap();
         assert_eq!(result.id, "br-abc123");
     }
@@ -1082,34 +811,35 @@ mod tests {
     #[test]
     fn test_resolve_with_custom_prefix() {
         let custom_db = vec!["proj-aaa111".to_string()];
-        let exists = |id: &str| custom_db.contains(&id.to_string());
-        let substring = |pattern: &str| find_matching_ids(&custom_db, pattern);
+        let exists = |id: &str| Ok(custom_db.contains(&id.to_string()));
+        let substring = |pattern: &str| Ok(find_matching_ids(&custom_db, pattern));
 
-        let resolver = IdResolver::with_prefix("proj");
-        let result = resolver.resolve("aaa111", exists, substring).unwrap();
+        let resolver = IdResolver::new(ResolverConfig::with_prefix("proj"));
+        let result = resolver
+            .resolve_fallible("aaa111", exists, substring)
+            .unwrap();
         assert_eq!(result.id, "proj-aaa111");
-        assert_eq!(result.match_type, MatchType::PrefixNormalized);
     }
 
     #[test]
     fn test_resolve_empty_input() {
-        let resolver = IdResolver::with_defaults();
-        let result = resolver.resolve("", exists_in_mock, substring_in_mock);
+        let resolver = IdResolver::new(ResolverConfig::default());
+        let result = resolver.resolve_fallible("", exists_in_mock, substring_in_mock);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_resolve_whitespace_trimmed() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve("  br-abc123  ", exists_in_mock, substring_in_mock)
+            .resolve_fallible("  br-abc123  ", exists_in_mock, substring_in_mock)
             .unwrap();
         assert_eq!(result.id, "br-abc123");
     }
 
     #[test]
     fn test_resolve_fallible_propagates_lookup_error() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver.resolve_fallible(
             "br-abc123",
             |_id| Err(BeadsError::Config("lookup failed".to_string())),
@@ -1120,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_resolve_all_fallible_propagates_lookup_error() {
-        let resolver = IdResolver::with_defaults();
+        let resolver = IdResolver::new(ResolverConfig::default());
         let inputs = vec!["br-abc123".to_string(), "br-xyz789".to_string()];
         let result = resolver.resolve_all_fallible(
             &inputs,
@@ -1187,7 +917,7 @@ mod tests {
         assert_eq!(parsed.hash, "abc123");
         assert!(parsed.child_path.is_empty());
         assert!(parsed.is_root());
-        assert_eq!(parsed.depth(), 0);
+        assert_eq!(parsed.child_path.len(), 0);
     }
 
     #[test]
@@ -1219,14 +949,14 @@ mod tests {
         assert_eq!(parsed.hash, "abc123");
         assert_eq!(parsed.child_path, vec![1]);
         assert!(!parsed.is_root());
-        assert_eq!(parsed.depth(), 1);
+        assert_eq!(parsed.child_path.len(), 1);
     }
 
     #[test]
     fn test_parse_id_grandchild() {
         let parsed = parse_id("bd-abc123.1.2").unwrap();
         assert_eq!(parsed.child_path, vec![1, 2]);
-        assert_eq!(parsed.depth(), 2);
+        assert_eq!(parsed.child_path.len(), 2);
     }
 
     #[test]
@@ -1286,24 +1016,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parsed_id_is_child_of() {
-        let child = parse_id("bd-abc123.1").unwrap();
-        assert!(child.is_child_of("bd-abc123"));
-        assert!(!child.is_child_of("bd-xyz"));
-
-        let grandchild = parse_id("bd-abc123.1.2").unwrap();
-        assert!(grandchild.is_child_of("bd-abc123"));
-        assert!(grandchild.is_child_of("bd-abc123.1"));
-    }
-
-    #[test]
-    fn test_validate_prefix() {
-        assert!(validate_prefix("bd-abc123", "bd", &[]).is_ok());
-        assert!(validate_prefix("bd-abc123", "other", &["bd".to_string()]).is_ok());
-        assert!(validate_prefix("bd-abc123", "other", &[]).is_err());
-    }
-
-    #[test]
     fn test_normalize_prefix_sanitizes_and_lowercases() {
         assert_eq!(normalize_prefix("  Project-Name_2!  "), "project-name_2");
         assert_eq!(normalize_prefix("!!!"), "br");
@@ -1340,7 +1052,7 @@ mod tests {
 
     #[test]
     fn test_id_generator_optimal_length() {
-        let id_gen = IdGenerator::with_defaults();
+        let id_gen = IdGenerator::new(IdConfig::default());
 
         // Small DB should use minimum length
         assert_eq!(id_gen.optimal_length(0), 3);
@@ -1354,7 +1066,7 @@ mod tests {
 
     #[test]
     fn test_id_generator_generate() {
-        let id_gen = IdGenerator::with_defaults();
+        let id_gen = IdGenerator::new(IdConfig::default());
         let now = Utc::now();
 
         let id = id_gen
@@ -1374,7 +1086,7 @@ mod tests {
 
     #[test]
     fn test_id_generator_collision_handling() {
-        let id_gen = IdGenerator::with_defaults();
+        let id_gen = IdGenerator::new(IdConfig::default());
         let now = Utc::now();
 
         let mut generated = std::collections::HashSet::new();
@@ -1395,7 +1107,7 @@ mod tests {
 
     #[test]
     fn test_id_generator_propagates_collision_lookup_failure() {
-        let id_gen = IdGenerator::with_defaults();
+        let id_gen = IdGenerator::new(IdConfig::default());
         let expected = "collision lookup unavailable";
 
         let err = id_gen

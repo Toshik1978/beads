@@ -3368,17 +3368,6 @@ pub fn read_issues_from_jsonl(path: &Path) -> Result<Vec<Issue>> {
 
 // ===== 4-Phase Collision Detection =====
 
-/// Match type from collision detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatchType {
-    /// Matched by external reference (e.g., JIRA-123).
-    ExternalRef,
-    /// Matched by content hash (deduplication).
-    ContentHash,
-    /// Matched by ID.
-    Id,
-}
-
 /// Result of collision detection.
 #[derive(Debug, Clone)]
 pub enum CollisionResult {

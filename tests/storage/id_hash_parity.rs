@@ -114,7 +114,7 @@ fn hash_computation_base36_fixture() {
 /// Test optimal length calculation follows birthday problem math.
 #[test]
 fn optimal_length_birthday_problem() {
-    let generator = IdGenerator::with_defaults();
+    let generator = IdGenerator::new(IdConfig::default());
 
     // For small DBs, minimum length (3) should suffice
     assert_eq!(generator.optimal_length(0), 3, "Empty DB uses min length");
@@ -150,7 +150,7 @@ fn prefix_configuration_fixture() {
     // Default prefix (the Rust port uses `br-`; the old Go prototype was
     // `bd-`).  Assert against the actual configured default so the test
     // stays honest if the default ever changes again.
-    let default_gen = IdGenerator::with_defaults();
+    let default_gen = IdGenerator::new(IdConfig::default());
     let id_default = default_gen
         .generate("Test", None, None, created_at, 0, |_| Ok(false))
         .expect("collision lookup succeeds");
@@ -189,7 +189,7 @@ fn prefix_configuration_fixture() {
 /// Test collision handling increases nonce and length.
 #[test]
 fn collision_handling_fixture() {
-    let generator = IdGenerator::with_defaults();
+    let generator = IdGenerator::new(IdConfig::default());
     let created_at = Utc.with_ymd_and_hms(2026, 1, 15, 10, 30, 0).unwrap();
 
     let mut generated: Vec<String> = Vec::new();
@@ -233,12 +233,10 @@ fn id_parsing_fixtures() {
     assert_eq!(child.hash, "abc123");
     assert_eq!(child.child_path, vec![1]);
     assert!(!child.is_root());
-    assert_eq!(child.depth(), 1);
 
     // Grandchild ID
     let grandchild = parse_id("bd-abc123.1.2.3").unwrap();
     assert_eq!(grandchild.child_path, vec![1, 2, 3]);
-    assert_eq!(grandchild.depth(), 3);
 
     // Hyphenated prefix
     let hyphen = parse_id("my-project-abc123").unwrap();
@@ -825,23 +823,4 @@ fn prefix_change_id_generation() {
         bd_hash, proj_hash,
         "Same inputs should produce same hash regardless of prefix"
     );
-}
-
-/// Test prefix validation in parsing.
-#[test]
-fn prefix_validation_parsing() {
-    use beads::util::id::validate_prefix;
-
-    // Matching prefix
-    assert!(validate_prefix("bd-abc123", "bd", &[]).is_ok());
-
-    // Prefix in allowed list
-    assert!(validate_prefix("other-abc123", "bd", &["other".to_string()]).is_ok());
-
-    // Prefix mismatch
-    let err = validate_prefix("wrong-abc123", "bd", &[]).unwrap_err();
-    assert!(matches!(
-        err,
-        beads::error::BeadsError::PrefixMismatch { .. }
-    ));
 }
