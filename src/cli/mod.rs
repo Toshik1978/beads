@@ -1,6 +1,5 @@
 //! CLI definitions and entry point.
 
-use crate::storage::conn::{Connection, SqliteValue};
 use clap::builder::StyledStr;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
@@ -82,7 +81,6 @@ struct CompletionIndex {
 #[derive(Default, Debug)]
 struct CompletionConfigIndex {
     config_keys: Vec<String>,
-    saved_queries: Vec<String>,
 }
 
 static COMPLETION_INDEX: OnceLock<CompletionIndex> = OnceLock::new();
@@ -194,8 +192,6 @@ const ORPHAN_MODE_CANDIDATES: &[(&str, &str)] = &[
     ("allow", "Allow orphans (no parent validation)"),
 ];
 
-const SAVED_QUERY_PREFIX: &str = "saved_query:";
-
 fn completion_index() -> &'static CompletionIndex {
     COMPLETION_INDEX.get_or_init(build_completion_index)
 }
@@ -216,37 +212,6 @@ fn resolve_completion_paths_for_beads_dir(beads_dir: &Path) -> Option<config::Co
 fn completion_paths() -> Option<config::ConfigPaths> {
     let beads_dir = config::discover_beads_dir(None).ok()?;
     resolve_completion_paths_for_beads_dir(&beads_dir)
-}
-
-fn saved_queries_from_db(db_path: &Path) -> BTreeSet<String> {
-    if !db_path.is_file() {
-        return BTreeSet::new();
-    }
-
-    let Ok(queries) = config::with_database_family_snapshot(db_path, |snapshot_db_path| {
-        let conn = Connection::open(snapshot_db_path.to_string_lossy().into_owned())?;
-        let _ = conn.execute("PRAGMA busy_timeout=0");
-        let rows = conn.query("SELECT key FROM config")?;
-        let mut queries = BTreeSet::new();
-
-        for row in &rows {
-            let Some(key) = row.get(0).and_then(SqliteValue::as_text) else {
-                continue;
-            };
-            if let Some(name) = key.strip_prefix(SAVED_QUERY_PREFIX)
-                && !name.trim().is_empty()
-            {
-                queries.insert(name.to_string());
-            }
-        }
-
-        conn.close()?;
-        Ok(queries)
-    }) else {
-        return BTreeSet::new();
-    };
-
-    queries
 }
 
 fn build_completion_index() -> CompletionIndex {
@@ -316,7 +281,6 @@ fn build_completion_index() -> CompletionIndex {
 
 fn build_config_index() -> CompletionConfigIndex {
     let mut keys = BTreeSet::new();
-    let mut saved_queries = BTreeSet::new();
 
     add_layer_keys(&mut keys, &config::default_config_layer());
     if let Ok(legacy_user) = config::load_legacy_user_config() {
@@ -327,16 +291,19 @@ fn build_config_index() -> CompletionConfigIndex {
     }
     add_layer_keys(&mut keys, &config::ConfigLayer::from_env());
 
-    if let Some(paths) = completion_paths() {
-        if let Ok(project) = config::load_project_config(&paths.beads_dir) {
-            add_layer_keys(&mut keys, &project);
-        }
-        saved_queries.extend(saved_queries_from_db(&paths.db_path));
+    // Config keys come from the layered config files only. Nothing here opens
+    // the database: `br config get <TAB>` used to snapshot the whole `.db`
+    // family to scan `config` for `saved_query:` rows, and the only consumer of
+    // that scan was a completer for `br query`, a command this fork does not
+    // have (bds-xtg).
+    if let Some(paths) = completion_paths()
+        && let Ok(project) = config::load_project_config(&paths.beads_dir)
+    {
+        add_layer_keys(&mut keys, &project);
     }
 
     CompletionConfigIndex {
         config_keys: keys.into_iter().collect(),
-        saved_queries: saved_queries.into_iter().collect(),
     }
 }
 
@@ -586,13 +553,6 @@ fn dep_tree_format_completer(current: &OsStr) -> Vec<CompletionCandidate> {
         return Vec::new();
     };
     static_candidates(prefix, DEP_TREE_FORMAT_CANDIDATES)
-}
-
-fn saved_query_completer(current: &OsStr) -> Vec<CompletionCandidate> {
-    let Some(prefix) = current.to_str() else {
-        return Vec::new();
-    };
-    dynamic_candidates(prefix, &config_index().saved_queries)
 }
 
 fn config_key_completer(current: &OsStr) -> Vec<CompletionCandidate> {
@@ -1660,15 +1620,6 @@ pub struct CommentListArgs {
     pub wrap: bool,
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum CountBy {
-    Status,
-    Priority,
-    Type,
-    Assignee,
-    Label,
-}
-
 #[derive(Args, Debug, Clone)]
 pub struct StaleArgs {
     /// Minimum days since last update
@@ -2104,41 +2055,6 @@ pub struct VersionArgs {
     pub short: bool,
 }
 
-/// Arguments for the query save command.
-#[derive(Args, Debug, Clone)]
-pub struct QuerySaveArgs {
-    /// Name for the saved query
-    pub name: String,
-
-    /// Optional description
-    #[arg(long, short = 'd')]
-    pub description: Option<String>,
-
-    /// Filters to save (same as list command filters)
-    #[command(flatten)]
-    pub filters: ListArgs,
-}
-
-/// Arguments for the query run command.
-#[derive(Args, Debug, Clone)]
-pub struct QueryRunArgs {
-    /// Name of the saved query to run
-    #[arg(add = ArgValueCompleter::new(saved_query_completer))]
-    pub name: String,
-
-    /// Additional filters to merge with saved query (CLI overrides saved)
-    #[command(flatten)]
-    pub filters: ListArgs,
-}
-
-/// Arguments for the query delete command.
-#[derive(Args, Debug, Clone)]
-pub struct QueryDeleteArgs {
-    /// Name of the saved query to delete
-    #[arg(add = ArgValueCompleter::new(saved_query_completer))]
-    pub name: String,
-}
-
 /// Explains a failed parse caused by a value that begins with `-`.
 ///
 /// bds-04l.12. Acceptance criteria are markdown checklists by construction --
@@ -2220,10 +2136,8 @@ mod tests {
         Cli, Commands, InheritedOutputMode, OutputFormat, OutputFormatBasic, hyphen_value_hint,
         resolve_output_format_basic_with_outer_mode, resolve_output_format_with_outer_mode,
     };
-    use crate::storage::sqlite::SqliteStorage;
     use clap::{CommandFactory, Parser};
     use std::collections::BTreeSet;
-    use tempfile::TempDir;
 
     /// bds-04l.12. The hint has to name the flag, because clap's own message
     /// does not: it reports `unexpected argument '- ' found` and leaves the
@@ -2385,28 +2299,6 @@ mod tests {
             Cli::try_parse_from(["br", "create", "positional title", "--title", "flag title"])
                 .expect_err("create should reject ambiguous title sources");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
-    }
-
-    #[test]
-    fn test_saved_queries_from_db_reads_saved_query_names_without_config_scan() {
-        let temp = TempDir::new().expect("tempdir");
-        let db_path = temp.path().join("beads.db");
-        let mut storage = SqliteStorage::open(&db_path).expect("open db");
-        storage
-            .set_config("saved_query:mine", r#"{"name":"mine"}"#)
-            .expect("save query");
-        storage
-            .set_config("saved_query:stale", r#"{"name":"stale"}"#)
-            .expect("save query");
-        storage
-            .set_config("ui.theme", "amber")
-            .expect("save regular config");
-
-        let saved_queries = super::saved_queries_from_db(&db_path);
-        assert_eq!(
-            saved_queries.into_iter().collect::<Vec<_>>(),
-            vec!["mine".to_string(), "stale".to_string()]
-        );
     }
 
     #[test]

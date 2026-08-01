@@ -18,6 +18,8 @@ mod auto_flush_inefficiency;
 mod cache_crash;
 #[path = "repro/collision_labels.rs"]
 mod collision_labels;
+#[path = "repro/config_completion_no_db.rs"]
+mod config_completion_no_db;
 #[path = "repro/create_output.rs"]
 mod create_output;
 #[path = "repro/create_path_traversal_check.rs"]
