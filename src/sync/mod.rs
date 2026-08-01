@@ -4729,6 +4729,11 @@ pub enum ConflictType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeResult {
     /// No action needed (e.g., issue doesn't exist in any source).
+    ///
+    /// Exists for totality rather than for use. The only arm of `merge_issue`
+    /// that yields it needs an ID present in none of base, left or right, and
+    /// `three_way_merge` — the sole production caller — draws its IDs from
+    /// `MergeContext::all_issue_ids`, which unions exactly those three maps.
     NoAction,
     /// Keep the specified issue.
     Keep(Issue),
@@ -4849,7 +4854,7 @@ pub fn merge_issue(
     strategy: ConflictResolution,
 ) -> MergeResult {
     match (base, left, right) {
-        // Case 1: Only in base (deleted in both local and external) -> no action
+        // Case 1: Only in base (deleted in both local and external) -> delete
         (Some(_), None, None) => MergeResult::Delete,
 
         // Case 2: Only in left (new local) -> keep
@@ -4925,7 +4930,10 @@ pub fn merge_issue(
             let right_changed = !r.sync_equals(b);
 
             match (left_changed, right_changed) {
-                // Neither changed OR only left changed - keep left
+                // Neither changed OR only left changed - keep left. The
+                // "neither changed" half cannot fire: if both sides equal the
+                // base they equal each other, and the `sync_equals` check above
+                // has already returned.
                 (false | true, false) => MergeResult::Keep(l.clone()),
                 // Only right changed - keep right
                 (false, true) => MergeResult::Keep(r.clone()),
