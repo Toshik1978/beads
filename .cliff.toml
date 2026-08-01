@@ -7,6 +7,33 @@
 #
 # The generated section becomes the GitHub release body verbatim, via
 # .github/scripts/extract-changelog.sh. Nothing regenerates it at release time.
+#
+# BREAKING CHANGES ARE RENDERED TWICE, ON PURPOSE.
+#
+# A `feat(cli)!:` is both a feature and a break, and the two readings want
+# different text. The "⚠ Breaking Changes" block at the top of each section
+# prints `breaking_description` — what stops working and what to do instead —
+# while the commit's own type group prints its subject, i.e. what changed.
+# Neither is a substitute for the other, so the commit appears in both.
+#
+# Two behaviours of `breaking_description` this relies on, both verified
+# against the installed git-cliff rather than assumed:
+#
+# * With a `BREAKING CHANGE:` footer it holds EVERYTHING after the marker, to
+#   the end of the message — several paragraphs in this repo's commits. Only
+#   the first is wanted, hence the `split(pat="\\n\\n") | first`; the second
+#   `split`/`join` pair then flattens that paragraph's own wrapping onto one
+#   line. That is NOT the same as `replace(from="\\n", to=" ")`, which silently
+#   does nothing here: Tera unescapes `\\n` in `split`'s argument but not in
+#   `replace`'s, so the replace form leaves the bullet wrapped mid-sentence.
+# * With a bare `!` and no footer it falls back to the commit subject, so a
+#   breaking commit that never wrote a footer still renders something useful
+#   rather than an empty bullet.
+#
+# The block sits outside the `group_by` loop, so it needs no `<!-- N -->` sort
+# key and always lands first. Note that it draws on the same filtered commit
+# list as the groups: a breaking commit whose type is skipped above (`chore!`,
+# `test!`, `build(deps)!`) is skipped here too.
 
 [changelog]
 # MUST stay byte-identical to the top of CHANGELOG.md (its title, the framing
@@ -35,6 +62,13 @@ body = """
 {% else %}\
 ## Unreleased
 {% endif %}
+{% set breaking = commits | filter(attribute="breaking", value=true) %}\
+{% if breaking | length > 0 %}
+### ⚠ Breaking Changes
+{% for commit in breaking %}
+- [{{ commit.id | truncate(length=7, end="") }}](https://github.com/Toshik1978/beads/commit/{{ commit.id }}) {{ commit.breaking_description | split(pat="\\n\\n") | first | split(pat="\\n") | join(sep=" ") | trim }}
+{%- endfor %}
+{% endif %}\
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim }}
 {% for commit in commits %}
