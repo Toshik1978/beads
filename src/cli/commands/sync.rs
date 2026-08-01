@@ -1085,7 +1085,7 @@ fn execute_status(
 
 /// Render sync status with rich formatting.
 fn render_status_rich(status: &SyncStatus, ctx: &OutputContext) {
-    let _console = Console::default();
+    let _console = crate::output::console();
     let theme = ctx.theme();
 
     // Determine sync state and color
@@ -1752,7 +1752,7 @@ fn write_manifest_atomically(manifest_path: &Path, manifest: &serde_json::Value)
 
 /// Render flush (export) result with rich formatting.
 fn render_flush_result_rich(result: &FlushResult, errors: &[ExportError], ctx: &OutputContext) {
-    let _console = Console::default();
+    let _console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");
@@ -1829,7 +1829,7 @@ fn render_flush_result_rich(result: &FlushResult, errors: &[ExportError], ctx: &
 
 /// Render export errors with rich formatting.
 fn render_errors_rich(errors: &[ExportError], ctx: &OutputContext) {
-    let _console = Console::default();
+    let _console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");
@@ -2614,7 +2614,7 @@ fn execute_import(
 
 /// Render import result with rich formatting.
 fn render_import_result_rich(result: &ImportResultOutput, ctx: &OutputContext) {
-    let _console = Console::default();
+    let _console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");
@@ -2901,7 +2901,7 @@ fn render_merge_conflicts_rich(
     conflicts: &[(String, crate::sync::ConflictType)],
     ctx: &OutputContext,
 ) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");
@@ -2937,7 +2937,7 @@ fn render_merge_conflicts_rich(
 
 /// Render merge result with rich formatting.
 fn render_merge_result_rich(report: &crate::sync::MergeReport, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");

@@ -710,7 +710,7 @@ fn render_label_action_results_rich(
     action: &str,
     ctx: &OutputContext,
 ) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     for result in results {
@@ -740,7 +740,7 @@ fn render_label_action_results_rich(
 
 /// Render labels for a specific issue in rich mode.
 fn render_labels_for_issue_rich(issue_id: &str, labels: &[String], ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     if labels.is_empty() {
@@ -773,7 +773,7 @@ fn render_labels_for_issue_rich(issue_id: &str, labels: &[String], ctx: &OutputC
 
 /// Render unique labels list in rich mode.
 fn render_unique_labels_rich(labels: &[String], ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     if labels.is_empty() {
@@ -803,7 +803,7 @@ fn render_unique_labels_rich(labels: &[String], ctx: &OutputContext) {
 
 /// Render label counts (list-all) in rich mode with Panel.
 fn render_label_counts_rich(label_counts: &[LabelCount], ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     if label_counts.is_empty() {
@@ -856,7 +856,7 @@ fn render_label_counts_rich(label_counts: &[LabelCount], ctx: &OutputContext) {
 
 /// Render rename not found message in rich mode.
 fn render_rename_not_found_rich(old_name: &str, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");
@@ -873,7 +873,7 @@ fn render_rename_not_found_rich(old_name: &str, ctx: &OutputContext) {
 
 /// Render rename no-op message in rich mode.
 fn render_rename_noop_rich(label: &str, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");
@@ -893,7 +893,7 @@ fn render_rename_noop_rich(label: &str, ctx: &OutputContext) {
 
 /// Render rename result in rich mode.
 fn render_rename_result_rich(old_name: &str, new_name: &str, count: usize, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");

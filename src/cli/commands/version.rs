@@ -57,7 +57,7 @@ pub fn execute(args: &VersionArgs, ctx: &OutputContext) -> Result<()> {
 
 /// Render version information with rich formatting.
 fn render_version_rich(version: &str, build: &str, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 

@@ -296,7 +296,7 @@ impl OutputContext {
     /// Lazily create console based on mode.
     fn console(&self) -> &Console {
         self.console.get_or_init(|| match self.mode {
-            OutputMode::Rich => Console::new(),
+            OutputMode::Rich => crate::output::console(),
             OutputMode::Plain | OutputMode::Quiet | OutputMode::Json => {
                 Console::builder().no_color().force_terminal(false).build()
             }

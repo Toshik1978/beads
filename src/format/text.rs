@@ -222,7 +222,7 @@ pub fn format_type_badge_colored(issue_type: &IssueType, use_color: bool) -> Str
 ///
 /// Checks in order:
 /// 1. `COLUMNS` environment variable
-/// 2. Terminal size via crossterm
+/// 2. The winsize of stdout, stderr, or stdin — whichever is a terminal
 /// 3. Falls back to 80
 #[must_use]
 pub fn terminal_width() -> usize {
@@ -234,14 +234,60 @@ pub fn terminal_width() -> usize {
         return value;
     }
 
-    // Try crossterm for actual terminal size
-    if let Ok((cols, _)) = crossterm::terminal::size()
-        && cols > 0
-    {
-        return cols as usize;
-    }
+    terminal_dimensions().map_or(80, |(columns, _)| columns)
+}
 
-    80
+/// Terminal height in rows, falling back to 24.
+///
+/// Exists so callers can pin a `rich_rust` `Console`'s dimensions; see
+/// [`terminal_dimensions`] for why they must.
+#[must_use]
+pub fn terminal_height() -> usize {
+    terminal_dimensions().map_or(24, |(_, rows)| rows)
+}
+
+/// Columns and rows of the first standard descriptor that is a terminal.
+///
+/// **Never open `/dev/tty` here.** That is what `crossterm::terminal::size()`
+/// does before falling back to `STDOUT_FILENO`, and opening a controlling
+/// terminal that has already hung up never returns. Because
+/// [`crate::shutdown::install`] handles SIGHUP so `SqliteStorage::Drop` can
+/// flush the WAL (#270), `br` survives the hangup that would kill an ordinary
+/// process and reaches that open instead of dying — then hangs forever holding
+/// `.beads/.write.lock`, which blocks every later `br` in the repository
+/// (bds-h2z). crossterm's own fallback cannot save it: that fires when the
+/// open *fails*, and a blocking open never fails.
+///
+/// Reading the winsize from a descriptor this process already holds opens
+/// nothing, so it cannot block. `tests/repro/tty_hangup_width.rs` fails if
+/// anyone reaches for the opening variants again.
+///
+/// Trying all three descriptors keeps redirection working: `br list > out.txt`
+/// from a terminal has a non-terminal stdout but a terminal stderr and stdin.
+/// When none of them is a terminal there is no terminal to measure, and the
+/// caller's 80-column default is the right answer anyway.
+#[cfg(unix)]
+fn terminal_dimensions() -> Option<(usize, usize)> {
+    dimensions_of(&std::io::stdout())
+        .or_else(|| dimensions_of(&std::io::stderr()))
+        .or_else(|| dimensions_of(&std::io::stdin()))
+}
+
+#[cfg(unix)]
+fn dimensions_of<F: std::os::fd::AsFd>(fd: F) -> Option<(usize, usize)> {
+    let size = rustix::termios::tcgetwinsize(fd).ok()?;
+    (size.ws_col > 0).then_some((size.ws_col as usize, (size.ws_row.max(1)) as usize))
+}
+
+/// Windows has no `/dev/tty`, so the blocking-open hazard above does not
+/// exist there and crossterm's console-API path is fine.
+#[cfg(not(unix))]
+fn terminal_dimensions() -> Option<(usize, usize)> {
+    // tty-hangup-exempt: no /dev/tty on Windows, so this cannot block.
+    crossterm::terminal::size()
+        .ok()
+        .map(|(columns, rows)| (columns as usize, rows as usize))
+        .filter(|(columns, _)| *columns > 0)
 }
 
 /// Truncate a title to fit within `max_len` visible columns.
@@ -429,6 +475,17 @@ pub fn format_issue_pretty_with(
 
 #[cfg(test)]
 mod tests {
+
+    /// bds-h2z: the width query must read a descriptor it already holds, so
+    /// a non-terminal descriptor yields `None` rather than sending it looking
+    /// for `/dev/tty`.
+    #[cfg(unix)]
+    #[test]
+    fn dimensions_of_returns_none_for_a_non_terminal() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        assert_eq!(super::dimensions_of(file.as_file()), None);
+    }
+
     use super::*;
     use chrono::Utc;
 

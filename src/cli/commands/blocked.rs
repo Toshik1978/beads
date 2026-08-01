@@ -443,7 +443,7 @@ fn render_blocked_rich(
         Color::parse(name).unwrap_or_default()
     }
 
-    let console = Console::default();
+    let console = crate::output::console();
 
     if blocked_issues.is_empty() {
         let mut text = Text::new("");

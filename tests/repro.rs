@@ -56,3 +56,5 @@ mod three_way_merge_bug;
 mod time_panic;
 #[path = "repro/truncate_width.rs"]
 mod truncate_width;
+#[path = "repro/tty_hangup_width.rs"]
+mod tty_hangup_width;

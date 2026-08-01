@@ -430,7 +430,7 @@ fn render_reopen_rich(
     reason: Option<&str>,
     ctx: &OutputContext,
 ) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 

@@ -555,7 +555,7 @@ fn print_message(ctx: &OutputContext, message: &str, key: &str) -> Result<()> {
     } else if matches!(ctx.mode(), OutputMode::Quiet) {
         return Ok(());
     } else if ctx.is_rich() {
-        let console = Console::default();
+        let console = crate::output::console();
         let theme = ctx.theme();
         let text = Text::styled(message, theme.muted.clone());
         console.print_renderable(&text);
@@ -567,7 +567,7 @@ fn print_message(ctx: &OutputContext, message: &str, key: &str) -> Result<()> {
 
 /// Render project info as a rich panel.
 fn render_info_rich(info: &InfoOutput, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 

@@ -289,7 +289,7 @@ fn render_comments_list_rich(
     ctx: &OutputContext,
     wrap: bool,
 ) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 
@@ -371,7 +371,7 @@ fn wrap_rich_text(text: &Text, panel_width: usize) -> Text {
 
 /// Render confirmation for a newly added comment.
 fn render_comment_added_rich(issue_id: &str, comment: &Comment, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
 
     let mut text = Text::new("");

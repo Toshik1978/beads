@@ -898,7 +898,7 @@ fn render_dependents_warning_rich(
     storage: &SqliteStorage,
     ctx: &OutputContext,
 ) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 
@@ -995,7 +995,7 @@ fn render_dry_run_rich(
     storage: &SqliteStorage,
     ctx: &OutputContext,
 ) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 
@@ -1078,7 +1078,7 @@ fn render_dry_run_rich(
 
 /// Render the delete result in rich format.
 fn render_delete_result_rich(result: &DeleteResult, storage: &SqliteStorage, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 

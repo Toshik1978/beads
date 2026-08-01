@@ -1286,7 +1286,7 @@ fn print_text_output(output: &Statistics) {
 /// Render stats with rich formatting.
 #[allow(clippy::cast_precision_loss)]
 fn render_stats_rich(output: &Statistics, ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 

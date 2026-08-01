@@ -122,6 +122,20 @@ semver = "1.0.27"
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.4.4"
 
+# Terminal winsize, read from a descriptor this process already holds.
+#
+# NOT a convenience over `crossterm::terminal::size()` — a correctness fix.
+# That call opens `/dev/tty` first, and opening a controlling terminal that has
+# already hung up never returns; because `shutdown::install` handles SIGHUP,
+# `br` survives the hangup and reaches that open instead of dying, then holds
+# `.beads/.write.lock` forever (bds-h2z). `tcgetwinsize` opens nothing, so it
+# cannot block.
+#
+# `unsafe_code = "forbid"` rules out a hand-rolled `TIOCGWINSZ` ioctl, and
+# rustix wraps it safely. Already in Cargo.lock — crossterm's own non-libc
+# path depends on it — so this adds no new crate to the graph.
+rustix = { version = "1.1.4", features = ["termios"] }
+
 [target.'cfg(not(windows))'.dependencies]
 mimalloc = "0.1.52"
 

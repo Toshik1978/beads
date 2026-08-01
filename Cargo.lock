@@ -155,6 +155,7 @@ dependencies = [
  "regex",
  "rich_rust",
  "rusqlite",
+ "rustix",
  "semver",
  "serde",
  "serde_json",

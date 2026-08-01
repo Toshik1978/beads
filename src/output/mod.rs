@@ -58,3 +58,29 @@ pub use context::{
     take_pending_exit_code,
 };
 pub use theme::Theme;
+
+/// Build a `rich_rust` `Console` with its dimensions already pinned.
+///
+/// **Always construct consoles through this.** `Console` resolves its own size
+/// lazily — `Console::width()` falls back to `rich_rust`'s
+/// `get_terminal_width()`, which calls `crossterm::terminal::size()`, which
+/// opens `/dev/tty`. Opening a controlling terminal that has already hung up
+/// never returns, and because [`crate::shutdown::install`] handles SIGHUP (so
+/// `SqliteStorage::Drop` can flush the WAL, #270) `br` survives the hangup and
+/// walks straight into that open — then hangs forever holding
+/// `.beads/.write.lock`, blocking every later `br` in the repository
+/// (bds-h2z).
+///
+/// `ConsoleBuilder::build` starts from `Console::new()` and overrides only the
+/// fields that were set, so this differs from a bare `Console::new()` in
+/// exactly one way: the size is known up front, measured by
+/// [`crate::format::terminal_width`] from a descriptor this process
+/// already holds. `tests/repro/tty_hangup_width.rs` fails if a raw
+/// `Console::new()`/`Console::default()` reappears.
+#[must_use]
+pub fn console() -> rich_rust::console::Console {
+    rich_rust::console::Console::builder()
+        .width(crate::format::terminal_width())
+        .height(crate::format::terminal_height())
+        .build()
+}

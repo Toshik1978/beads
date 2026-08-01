@@ -330,7 +330,7 @@ fn format_epic_title(title: &str, use_color: bool) -> String {
 
 /// Render the epic status list with rich formatting.
 fn render_epic_status_list_rich(epics: &[EpicStatus], ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 
@@ -434,7 +434,7 @@ fn completion_bar_filled_width(closed: usize, total: usize, bar_width: usize) ->
 
 /// Render empty epics message with rich formatting.
 fn render_empty_epics_rich(ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 
@@ -451,7 +451,7 @@ fn render_empty_epics_rich(ctx: &OutputContext) {
 
 /// Render no eligible epics message with rich formatting.
 fn render_no_eligible_rich(ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 
@@ -468,7 +468,7 @@ fn render_no_eligible_rich(ctx: &OutputContext) {
 
 /// Render dry-run results with rich formatting.
 fn render_dry_run_rich(epics: &[EpicStatus], ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 
@@ -506,7 +506,7 @@ fn render_dry_run_rich(epics: &[EpicStatus], ctx: &OutputContext) {
 
 /// Render close results with rich formatting.
 fn render_close_result_rich(closed_ids: &[String], ctx: &OutputContext) {
-    let console = Console::default();
+    let console = crate::output::console();
     let theme = ctx.theme();
     let width = ctx.width();
 
