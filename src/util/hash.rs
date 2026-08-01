@@ -37,18 +37,6 @@ fn hex_digit(nibble: u8) -> char {
     }
 }
 
-/// Trait for types that can produce a deterministic content hash.
-pub trait ContentHashable {
-    /// Compute the content hash for this value.
-    fn content_hash(&self) -> String;
-}
-
-impl ContentHashable for Issue {
-    fn content_hash(&self) -> String {
-        content_hash(self)
-    }
-}
-
 /// Compute SHA256 content hash for an issue.
 ///
 /// Fields included (stable order, each length-prefixed):

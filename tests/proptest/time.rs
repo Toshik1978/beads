@@ -10,7 +10,7 @@ use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use proptest::prelude::*;
 use tracing::info;
 
-use beads::util::time::{parse_flexible_timestamp, parse_relative_time};
+use beads::util::time::parse_flexible_timestamp;
 
 /// Initialize test logging for proptest
 fn init_test_logging() {
@@ -18,6 +18,14 @@ fn init_test_logging() {
         .with_env_filter("info")
         .with_test_writer()
         .try_init();
+}
+
+/// The relative-duration forms below reach the parser the way `br` does: through
+/// `parse_flexible_timestamp`, which is what every command calls. There used to
+/// be a `parse_relative_time` returning `Option` that these drove instead; it
+/// also accepted `today`/`tomorrow`/`next-week`, which no command ever offered.
+fn parse_relative(input: &str) -> Option<chrono::DateTime<Utc>> {
+    parse_flexible_timestamp(input, "test-field").ok()
 }
 
 proptest! {
@@ -92,7 +100,7 @@ proptest! {
         info!("proptest_relative_future: input={input}");
 
         let now = Utc::now();
-        let result = parse_relative_time(&input);
+        let result = parse_relative(&input);
 
         prop_assert!(result.is_some(), "Should parse: {input}");
 
@@ -118,7 +126,7 @@ proptest! {
         info!("proptest_relative_past: input={input}");
 
         let now = Utc::now();
-        let result = parse_relative_time(&input);
+        let result = parse_relative(&input);
 
         prop_assert!(result.is_some(), "Should parse: {input}");
 
@@ -135,7 +143,7 @@ proptest! {
         info!("proptest_relative_hours: input={input}");
 
         let now = Utc::now();
-        let result = parse_relative_time(&input);
+        let result = parse_relative(&input);
 
         prop_assert!(result.is_some(), "Should parse: {input}");
 
@@ -159,7 +167,7 @@ proptest! {
         info!("proptest_relative_minutes: input={input}");
 
         let now = Utc::now();
-        let result = parse_relative_time(&input);
+        let result = parse_relative(&input);
 
         prop_assert!(result.is_some(), "Should parse: {input}");
 
@@ -183,7 +191,7 @@ proptest! {
         info!("proptest_relative_weeks: input={input}");
 
         let now = Utc::now();
-        let result = parse_relative_time(&input);
+        let result = parse_relative(&input);
 
         prop_assert!(result.is_some(), "Should parse: {input}");
 
@@ -232,7 +240,7 @@ proptest! {
         let input = format!("+{amount}{unit}");
         info!("proptest_invalid_unit: input={input}");
 
-        let result = parse_relative_time(&input);
+        let result = parse_relative(&input);
 
         prop_assert!(result.is_none(), "Invalid unit should not parse: {input}");
     }

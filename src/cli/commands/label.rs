@@ -44,9 +44,7 @@ pub fn execute(
         }
         LabelCommands::Rename(args) => {
             let mut storage_ctx = config::open_storage_with_cli(&beads_dir, cli)?;
-            let config_layer = storage_ctx.load_config(cli)?;
-            let actor = config::resolve_actor(&config_layer);
-            label_rename(args, &mut storage_ctx, &actor, json, ctx)
+            label_rename(args, &mut storage_ctx, json, ctx)
         }
     }
 }
@@ -92,7 +90,6 @@ struct PreparedLabelRoute {
     issue_inputs: Vec<String>,
     resolved_ids: Vec<String>,
     storage_ctx: config::OpenStorageResult,
-    actor: String,
     auto_flush_external: bool,
     _routed_write_lock: RoutedWorkspaceWriteLock,
 }
@@ -249,7 +246,7 @@ fn label_add(
             !route_has_mutated,
             "label add",
             Some(issue_id.as_str()),
-            |storage| storage.add_label(issue_id, label, &prepared_route.actor),
+            |storage| storage.add_label(issue_id, label),
         )?;
 
         debug!(already_exists = !added, "Label status check");
@@ -326,7 +323,7 @@ fn label_remove(
             !route_has_mutated,
             "label remove",
             Some(issue_id.as_str()),
-            |storage| storage.remove_label(issue_id, label, &prepared_route.actor),
+            |storage| storage.remove_label(issue_id, label),
         )?;
         if removed {
             route_has_mutated = true;
@@ -416,7 +413,6 @@ fn prepare_label_routes(
             issue_inputs: batch.issue_inputs,
             resolved_ids,
             storage_ctx,
-            actor: config::resolve_actor(&config_layer),
             auto_flush_external: batch.is_external,
             _routed_write_lock: routed_write_lock,
         });
@@ -541,7 +537,6 @@ fn label_list_all(storage: &SqliteStorage, _json: bool, ctx: &OutputContext) -> 
 fn label_rename(
     args: &LabelRenameArgs,
     storage_ctx: &mut config::OpenStorageResult,
-    actor: &str,
     _json: bool,
     ctx: &OutputContext,
 ) -> Result<()> {
@@ -573,7 +568,7 @@ fn label_rename(
         "Renaming label"
     );
 
-    let count = storage.rename_label(&args.old_name, &args.new_name, actor)?;
+    let count = storage.rename_label(&args.old_name, &args.new_name)?;
 
     if count == 0 {
         if ctx.is_json() {

@@ -86,25 +86,21 @@ fn label_crud_roundtrip() {
     let issue = fixtures::issue("label-crud");
 
     storage.create_issue(&issue, "tester").unwrap();
-    assert!(storage.add_label(&issue.id, "bug", "tester").unwrap());
-    assert!(!storage.add_label(&issue.id, "bug", "tester").unwrap());
+    assert!(storage.add_label(&issue.id, "bug").unwrap());
+    assert!(!storage.add_label(&issue.id, "bug").unwrap());
 
     let mut labels = storage.get_labels(&issue.id).unwrap();
     labels.sort();
     assert_eq!(labels, vec!["bug".to_string()]);
 
     storage
-        .set_labels(
-            &issue.id,
-            &["alpha".to_string(), "beta".to_string()],
-            "tester",
-        )
+        .set_labels(&issue.id, &["alpha".to_string(), "beta".to_string()])
         .unwrap();
     let mut labels = storage.get_labels(&issue.id).unwrap();
     labels.sort();
     assert_eq!(labels, vec!["alpha".to_string(), "beta".to_string()]);
 
-    assert!(storage.remove_label(&issue.id, "alpha", "tester").unwrap());
+    assert!(storage.remove_label(&issue.id, "alpha").unwrap());
     let labels = storage.get_labels(&issue.id).unwrap();
     assert_eq!(labels, vec!["beta".to_string()]);
 }
@@ -145,7 +141,7 @@ fn dependency_crud_updates_blocked_cache() {
     );
 
     let removed = storage
-        .remove_dependency(&blocked_issue.id, &blocking_issue.id, "tester")
+        .remove_dependency(&blocked_issue.id, &blocking_issue.id)
         .unwrap();
     assert!(removed);
     storage.rebuild_blocked_cache(true).unwrap();
@@ -183,7 +179,7 @@ fn ready_filters_exclude_blocked_and_deferred() {
         .unwrap();
 
     for issue_id in [&ready.id, &blocked_issue.id, &deferred.id] {
-        storage.add_label(issue_id, "alpha", "tester").unwrap();
+        storage.add_label(issue_id, "alpha").unwrap();
     }
 
     let filters = ReadyFilters {
@@ -1189,21 +1185,6 @@ fn list_issues_with_counts_accurate_dependencies() {
 
     assert_eq!(storage.count_dependents(&grandchild.id).unwrap(), 0); // nothing depends on grandchild
     assert_eq!(storage.count_dependencies(&grandchild.id).unwrap(), 1); // grandchild depends on child1
-}
-
-#[test]
-fn find_by_content_hash_roundtrip() {
-    let storage = test_db();
-    let mut issue = fixtures::issue("hash-lookup");
-    issue.content_hash = Some("hash-abc123".to_string());
-
-    storage.upsert_issue_for_import(&issue).unwrap();
-
-    let found = storage
-        .find_by_content_hash("hash-abc123")
-        .unwrap()
-        .expect("content hash");
-    assert_eq!(found.id, issue.id);
 }
 
 /// bds-04l.16. `is_template` is `INTEGER NOT NULL DEFAULT 0` and

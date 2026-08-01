@@ -436,7 +436,6 @@ pub struct SqliteStorage {
 
 /// Context for a mutation operation, tracking side effects.
 pub struct MutationContext {
-    pub actor: String,
     pub dirty_ids: HashSet<String>,
     pub invalidate_blocked_cache: bool,
     /// When set, only these issue IDs (and their transitive parent-child
@@ -657,9 +656,8 @@ impl BlockedIssueProjection {
 
 impl MutationContext {
     #[must_use]
-    pub fn new(actor: &str) -> Self {
+    pub fn new() -> Self {
         Self {
-            actor: actor.to_string(),
             dirty_ids: HashSet::new(),
             invalidate_blocked_cache: false,
             cache_affected_ids: None,
@@ -2532,7 +2530,7 @@ impl SqliteStorage {
     /// Returns an error if any step fails (e.g. database error, logic error).
     /// The transaction is rolled back on error.
     #[allow(clippy::too_many_lines)]
-    pub fn mutate<F, R>(&mut self, op: &str, actor: &str, mut f: F) -> Result<R>
+    pub fn mutate<F, R>(&mut self, op: &str, mut f: F) -> Result<R>
     where
         F: FnMut(&Connection, &mut MutationContext) -> Result<R>,
     {
@@ -2552,7 +2550,7 @@ impl SqliteStorage {
         self.conn.execute("PRAGMA foreign_keys = OFF")?;
 
         let tx_result: Result<_> = self.with_write_transaction(|storage| {
-            let mut ctx = MutationContext::new(actor);
+            let mut ctx = MutationContext::new();
             let result = f(&storage.conn, &mut ctx)?;
 
             // Mark dirty
@@ -2643,7 +2641,7 @@ impl SqliteStorage {
         validate_issue_comments_for_create(issue)?;
         let capacity_policy = self.workflow_capacity_policy.clone();
 
-        self.mutate("create_issue", actor, |conn, ctx| {
+        self.mutate("create_issue", |conn, ctx| {
             // Explicit duplicate check since the previous engine did not enforce
             // UNIQUE constraints on non-rowid columns.
             match conn.query_row_with_params(
@@ -3094,7 +3092,7 @@ impl SqliteStorage {
         } else {
             let capacity_policy = self.workflow_capacity_policy.clone();
             let workflow_policy = self.workflow_transition_policy.clone();
-            self.mutate("update_issues_atomically", actor, |conn, ctx| {
+            self.mutate("update_issues_atomically", |conn, ctx| {
                 let mut transitions = Vec::new();
                 for (id, update) in updates {
                     let issue = Self::get_issue_from_conn(conn, id)?
@@ -3572,7 +3570,7 @@ impl SqliteStorage {
         let tombstone_hash = crate::util::content_hash(&tombstone_issue);
 
         let capacity_policy = self.workflow_capacity_policy.clone();
-        self.mutate("delete_issue", actor, |conn, ctx| {
+        self.mutate("delete_issue", |conn, ctx| {
             let capacity_warnings = Self::enforce_workflow_capacity_in_tx(
                 conn,
                 &capacity_policy,
@@ -3625,12 +3623,12 @@ impl SqliteStorage {
     /// # Errors
     ///
     /// Returns an error if the issue doesn't exist or a database operation fails.
-    pub fn purge_issue(&mut self, id: &str, actor: &str) -> Result<()> {
+    pub fn purge_issue(&mut self, id: &str) -> Result<()> {
         if self.get_issue(id)?.is_none() {
             return Err(BeadsError::IssueNotFound { id: id.to_string() });
         }
 
-        self.mutate("purge_issue", actor, |conn, ctx| {
+        self.mutate("purge_issue", |conn, ctx| {
             conn.execute_with_params(
                 "DELETE FROM comments WHERE issue_id = ?",
                 &[SqliteValue::from(id)],
@@ -4413,131 +4411,6 @@ impl SqliteStorage {
         let mut issues = Vec::with_capacity(rows.len());
         for row in &rows {
             issues.push(Self::stale_command_issue_from_row(row)?);
-        }
-        Ok(issues)
-    }
-
-    /// List orphan-scan candidate issues without hydrating unused full issue fields.
-    ///
-    /// This is intentionally narrow and falls back to `list_issues` if the
-    /// filter shape expands beyond what `br orphans` currently uses.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn list_orphan_candidate_issues_for_command_output(
-        &self,
-        filters: &ListFilters,
-    ) -> Result<Vec<Issue>> {
-        let expected_statuses = matches!(
-            filters.statuses.as_deref(),
-            Some([Status::Open, Status::InProgress])
-        );
-        let unsupported_filter = !expected_statuses
-            || filters
-                .labels
-                .as_ref()
-                .is_some_and(|labels| !labels.is_empty())
-            || filters
-                .labels_or
-                .as_ref()
-                .is_some_and(|labels| !labels.is_empty())
-            || filters
-                .types
-                .as_ref()
-                .is_some_and(|types| !types.is_empty())
-            || filters
-                .priorities
-                .as_ref()
-                .is_some_and(|priorities| !priorities.is_empty())
-            || filters.assignee.is_some()
-            || filters.unassigned
-            || filters.include_closed
-            || filters.include_deferred
-            || filters.include_templates
-            || filters.title_contains.is_some()
-            || filters.updated_before.is_some()
-            || filters.updated_after.is_some()
-            || filters.limit.is_some()
-            || filters.offset.is_some()
-            || filters.sort.is_some()
-            || filters.reverse;
-        if unsupported_filter {
-            return self.list_issues(filters);
-        }
-
-        let rows = self.conn.query(
-            "SELECT id, title, status, priority, issue_type, created_at, updated_at
-             FROM issues
-             WHERE status IN ('open', 'in_progress')
-               AND is_template = 0
-             ORDER BY COALESCE(priority, 2) ASC, created_at DESC, id ASC",
-        )?;
-        let mut issues = Vec::with_capacity(rows.len());
-        for row in &rows {
-            issues.push(Self::command_summary_issue_from_row(row)?);
-        }
-        Ok(issues)
-    }
-
-    /// List graph command issues without hydrating fields graph rendering never inspects.
-    ///
-    /// This is intentionally narrow and falls back to `list_issues` if the
-    /// filter shape expands beyond what `br graph --all` currently uses.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn list_graph_issues_for_command_output(
-        &self,
-        filters: &ListFilters,
-    ) -> Result<Vec<Issue>> {
-        let unsupported_filter = filters
-            .statuses
-            .as_ref()
-            .is_some_and(|statuses| !statuses.is_empty())
-            || filters
-                .labels
-                .as_ref()
-                .is_some_and(|labels| !labels.is_empty())
-            || filters
-                .labels_or
-                .as_ref()
-                .is_some_and(|labels| !labels.is_empty())
-            || filters
-                .types
-                .as_ref()
-                .is_some_and(|types| !types.is_empty())
-            || filters
-                .priorities
-                .as_ref()
-                .is_some_and(|priorities| !priorities.is_empty())
-            || filters.assignee.is_some()
-            || filters.unassigned
-            || filters.include_closed
-            || !filters.include_deferred
-            || filters.include_templates
-            || filters.title_contains.is_some()
-            || filters.updated_before.is_some()
-            || filters.updated_after.is_some()
-            || filters.limit.is_some()
-            || filters.offset.is_some()
-            || filters.sort.is_some()
-            || filters.reverse;
-        if unsupported_filter {
-            return self.list_issues(filters);
-        }
-
-        let rows = self.conn.query(
-            "SELECT id, title, status, priority, issue_type, created_at, updated_at
-             FROM issues
-             WHERE status NOT IN ('closed', 'tombstone')
-               AND is_template = 0
-             ORDER BY COALESCE(priority, 2) ASC, created_at DESC, id ASC",
-        )?;
-        let mut issues = Vec::with_capacity(rows.len());
-        for row in &rows {
-            issues.push(Self::command_summary_issue_from_row(row)?);
         }
         Ok(issues)
     }
@@ -7341,7 +7214,7 @@ impl SqliteStorage {
 
         Self::validate_parent_child_endpoints(issue_id, depends_on_id, dep_type)?;
 
-        self.mutate("add_dependency", actor, |conn, ctx| {
+        self.mutate("add_dependency", |conn, ctx| {
             match Self::issue_status_in_tx(conn, issue_id)? {
                 Some(Status::Tombstone) => {
                     return Err(BeadsError::Validation {
@@ -7452,7 +7325,7 @@ impl SqliteStorage {
             return Ok(0);
         }
 
-        self.mutate("add_dependencies_bulk_for_import", actor, |conn, ctx| {
+        self.mutate("add_dependencies_bulk_for_import", |conn, ctx| {
             let mut unique_dependencies: Vec<(&BulkDependencyInsert, String)> = Vec::new();
             let mut seen_edges = HashSet::new();
             let mut proposed_parents: HashMap<&str, &str> = HashMap::new();
@@ -7617,13 +7490,8 @@ impl SqliteStorage {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn remove_dependency(
-        &mut self,
-        issue_id: &str,
-        depends_on_id: &str,
-        actor: &str,
-    ) -> Result<bool> {
-        self.mutate("remove_dependency", actor, |conn, ctx| {
+    pub fn remove_dependency(&mut self, issue_id: &str, depends_on_id: &str) -> Result<bool> {
+        self.mutate("remove_dependency", |conn, ctx| {
             Self::ensure_issue_mutable_in_tx(conn, issue_id, "remove dependency from")?;
 
             let rows = conn.execute_with_params(
@@ -7657,8 +7525,8 @@ impl SqliteStorage {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn remove_all_dependencies(&mut self, issue_id: &str, actor: &str) -> Result<usize> {
-        self.mutate("remove_all_dependencies", actor, |conn, ctx| {
+    pub fn remove_all_dependencies(&mut self, issue_id: &str) -> Result<usize> {
+        self.mutate("remove_all_dependencies", |conn, ctx| {
             let affected_rows = conn.query_with_params(
                 "SELECT DISTINCT issue_id FROM dependencies WHERE depends_on_id = ?",
                 &[SqliteValue::from(issue_id)],
@@ -7712,53 +7580,6 @@ impl SqliteStorage {
         })
     }
 
-    /// Remove parent-child dependency for an issue.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database update fails.
-    pub fn remove_parent(&mut self, issue_id: &str, actor: &str) -> Result<bool> {
-        self.mutate("remove_parent", actor, |conn, ctx| {
-            Self::ensure_issue_mutable_in_tx(conn, issue_id, "clear parent from")?;
-
-            let previous_parent_rows = conn.query_with_params(
-                "SELECT depends_on_id FROM dependencies WHERE issue_id = ? AND type = 'parent-child' ORDER BY rowid ASC",
-                &[SqliteValue::from(issue_id)],
-            )?;
-            let previous_parents = previous_parent_rows
-                .iter()
-                .filter_map(|row| row.get(0).and_then(SqliteValue::as_text).map(str::to_string))
-                .collect::<Vec<_>>();
-
-            let rows = conn.execute_with_params(
-                "DELETE FROM dependencies WHERE issue_id = ? AND type = 'parent-child'",
-                &[SqliteValue::from(issue_id)],
-            )?;
-
-            if rows > 0 {
-                conn.execute_with_params(
-                    "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    &[
-                        SqliteValue::from(Utc::now().to_rfc3339()),
-                        SqliteValue::from(issue_id),
-                    ],
-                )?;
-
-                ctx.mark_dirty(issue_id);
-                let mut cache_ids = vec![issue_id];
-                for previous_parent in &previous_parents {
-                    let previous_parent = previous_parent.as_str();
-                    if !cache_ids.contains(&previous_parent) {
-                        cache_ids.push(previous_parent);
-                    }
-                }
-                ctx.invalidate_cache_for(&cache_ids);
-            }
-
-            Ok(rows > 0)
-        })
-    }
-
     /// Set parent for an issue (replace existing).
     ///
     /// # Errors
@@ -7785,7 +7606,7 @@ impl SqliteStorage {
         actor: &str,
         skip_cache_rebuild: bool,
     ) -> Result<()> {
-        self.mutate("set_parent", actor, |conn, ctx| {
+        self.mutate("set_parent", |conn, ctx| {
             let action = if parent_id.is_some() {
                 "set parent on"
             } else {
@@ -7877,10 +7698,10 @@ impl SqliteStorage {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn add_label(&mut self, issue_id: &str, label: &str, actor: &str) -> Result<bool> {
+    pub fn add_label(&mut self, issue_id: &str, label: &str) -> Result<bool> {
         validate_storage_label(label)?;
 
-        self.mutate("add_label", actor, |conn, ctx| {
+        self.mutate("add_label", |conn, ctx| {
             match Self::issue_status_in_tx(conn, issue_id)? {
                 Some(Status::Tombstone) => {
                     return Err(BeadsError::Validation {
@@ -7952,7 +7773,6 @@ impl SqliteStorage {
         &mut self,
         issue_ids: &[String],
         label: &str,
-        actor: &str,
     ) -> Result<HashSet<String>> {
         validate_storage_label(label)?;
         if issue_ids.is_empty() {
@@ -7961,7 +7781,7 @@ impl SqliteStorage {
 
         let unique_issue_ids = dedupe_preserving_order(issue_ids);
 
-        self.mutate("add_label_to_issues_bulk", actor, |conn, ctx| {
+        self.mutate("add_label_to_issues_bulk", |conn, ctx| {
             let mut changed_ids = HashSet::new();
             let now_str = Utc::now().to_rfc3339();
 
@@ -8131,10 +7951,10 @@ impl SqliteStorage {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn remove_label(&mut self, issue_id: &str, label: &str, actor: &str) -> Result<bool> {
+    pub fn remove_label(&mut self, issue_id: &str, label: &str) -> Result<bool> {
         validate_storage_label(label)?;
 
-        self.mutate("remove_label", actor, |conn, ctx| {
+        self.mutate("remove_label", |conn, ctx| {
             match Self::issue_status_in_tx(conn, issue_id)? {
                 Some(Status::Tombstone) => {
                     return Err(BeadsError::Validation {
@@ -8184,7 +8004,6 @@ impl SqliteStorage {
         &mut self,
         issue_ids: &[String],
         label: &str,
-        actor: &str,
     ) -> Result<HashSet<String>> {
         validate_storage_label(label)?;
         if issue_ids.is_empty() {
@@ -8193,7 +8012,7 @@ impl SqliteStorage {
 
         let unique_issue_ids = dedupe_preserving_order(issue_ids);
 
-        self.mutate("remove_label_from_issues_bulk", actor, |conn, ctx| {
+        self.mutate("remove_label_from_issues_bulk", |conn, ctx| {
             let mut changed_ids = HashSet::new();
             let now_str = Utc::now().to_rfc3339();
 
@@ -8321,43 +8140,13 @@ impl SqliteStorage {
         })
     }
 
-    /// Remove all labels from an issue.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database update fails.
-    pub fn remove_all_labels(&mut self, issue_id: &str, actor: &str) -> Result<usize> {
-        self.mutate("remove_all_labels", actor, |conn, ctx| {
-            Self::ensure_issue_mutable_in_tx(conn, issue_id, "remove labels from")?;
-
-            let rows = conn.execute_with_params(
-                "DELETE FROM labels WHERE issue_id = ?",
-                &[SqliteValue::from(issue_id)],
-            )?;
-
-            if rows > 0 {
-                conn.execute_with_params(
-                    "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    &[
-                        SqliteValue::from(Utc::now().to_rfc3339()),
-                        SqliteValue::from(issue_id),
-                    ],
-                )?;
-
-                ctx.mark_dirty(issue_id);
-            }
-
-            Ok(rows)
-        })
-    }
-
     /// Set all labels for an issue (replace existing).
     ///
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn set_labels(&mut self, issue_id: &str, labels: &[String], actor: &str) -> Result<()> {
-        self.mutate("set_labels", actor, |conn, ctx| {
+    pub fn set_labels(&mut self, issue_id: &str, labels: &[String]) -> Result<()> {
+        self.mutate("set_labels", |conn, ctx| {
             Self::ensure_issue_mutable_in_tx(conn, issue_id, "set labels on")?;
 
             let old_rows = conn.query_with_params(
@@ -8689,7 +8478,7 @@ impl SqliteStorage {
     /// # Errors
     ///
     /// Returns an error if the database update fails.
-    pub fn rename_label(&mut self, old_name: &str, new_name: &str, actor: &str) -> Result<usize> {
+    pub fn rename_label(&mut self, old_name: &str, new_name: &str) -> Result<usize> {
         validate_storage_label(old_name)?;
         validate_storage_label(new_name)?;
 
@@ -8697,7 +8486,7 @@ impl SqliteStorage {
             return Ok(0);
         }
 
-        self.mutate("rename_label", actor, |conn, ctx| {
+        self.mutate("rename_label", |conn, ctx| {
             let id_rows = conn.query_with_params(
                 "SELECT l.issue_id
                  FROM labels l
@@ -8822,66 +8611,6 @@ impl SqliteStorage {
         Ok(map)
     }
 
-    /// Get the latest comments for multiple issues in batch.
-    ///
-    /// Rows are returned in ascending timestamp order within each issue so
-    /// callers can reuse the same presentation logic as [`Self::get_comments`]
-    /// without materializing older comments they will discard.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn get_latest_comments_for_issues(
-        &self,
-        issue_ids: &[String],
-        limit: usize,
-    ) -> Result<std::collections::HashMap<String, Vec<Comment>>> {
-        const SQLITE_VAR_LIMIT: usize = 899;
-        let mut map: std::collections::HashMap<String, Vec<Comment>> =
-            std::collections::HashMap::new();
-
-        if issue_ids.is_empty() || limit == 0 {
-            return Ok(map);
-        }
-
-        let row_limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        for chunk in issue_ids.chunks(SQLITE_VAR_LIMIT) {
-            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-            let sql = format!(
-                "SELECT id, issue_id, author, text, created_at
-                 FROM (
-                     SELECT id, issue_id, author, text, created_at,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY issue_id
-                                ORDER BY created_at DESC, id DESC
-                            ) AS row_number
-                     FROM comments
-                     WHERE issue_id IN ({})
-                 )
-                 WHERE row_number <= ?
-                 ORDER BY issue_id ASC, created_at ASC, id ASC",
-                placeholders.join(",")
-            );
-
-            let mut params: Vec<SqliteValue> = chunk
-                .iter()
-                .map(|id| SqliteValue::from(id.as_str()))
-                .collect();
-            params.push(SqliteValue::from(row_limit));
-
-            let rows = self.conn.query_with_params(&sql, &params)?;
-
-            for row in &rows {
-                let comment = comment_from_row(row)?;
-                map.entry(comment.issue_id.clone())
-                    .or_default()
-                    .push(comment);
-            }
-        }
-
-        Ok(map)
-    }
-
     /// Add a comment to an issue.
     ///
     /// # Errors
@@ -8890,7 +8619,7 @@ impl SqliteStorage {
     pub fn add_comment(&mut self, issue_id: &str, author: &str, text: &str) -> Result<Comment> {
         validate_new_comment(issue_id, author, text)?;
 
-        self.mutate("add_comment", author, |conn, ctx| {
+        self.mutate("add_comment", |conn, ctx| {
             Self::ensure_issue_mutable_in_tx(conn, issue_id, "add comment to")?;
 
             let comment_id = insert_comment_row(conn, issue_id, author, text)?;
@@ -8980,29 +8709,6 @@ impl SqliteStorage {
         let rows = self.conn.query_with_params(
             "SELECT issue_id FROM dependencies WHERE depends_on_id = ?",
             &[SqliteValue::from(issue_id)],
-        )?;
-        Ok(rows
-            .iter()
-            .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from))
-            .collect())
-    }
-
-    /// Get IDs of issues that block this one (respects parent-child direction).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn get_blocker_ids(&self, issue_id: &str) -> Result<Vec<String>> {
-        let rows = self.conn.query_with_params(
-            r"
-            SELECT depends_on_id
-            FROM dependencies
-            WHERE issue_id = ?
-              AND type IN ('blocks', 'conditional-blocks', 'waits-for')
-            UNION
-            SELECT issue_id FROM dependencies WHERE depends_on_id = ? AND type = 'parent-child'
-            ",
-            &[SqliteValue::from(issue_id), SqliteValue::from(issue_id)],
         )?;
         Ok(rows
             .iter()
@@ -9237,53 +8943,6 @@ impl SqliteStorage {
                     *dependent_counts.entry(issue_id).or_insert(0) +=
                         usize::try_from(count).unwrap_or(0);
                 }
-            }
-        }
-
-        Ok((dependency_counts, dependent_counts))
-    }
-
-    /// Count dependencies and dependents for every issue in the dependency table.
-    ///
-    /// This is faster than chunked `IN (...)` probes when the caller has already
-    /// selected a large result set and only needs to project counts onto those
-    /// issue IDs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn count_all_relation_counts(
-        &self,
-    ) -> Result<(HashMap<String, usize>, HashMap<String, usize>)> {
-        let dependency_rows = self
-            .conn
-            .query("SELECT issue_id, COUNT(*) FROM dependencies GROUP BY issue_id")?;
-        let mut dependency_counts: HashMap<String, usize> = HashMap::new();
-        for row in &dependency_rows {
-            let issue_id = row
-                .get(0)
-                .and_then(SqliteValue::as_text)
-                .unwrap_or("")
-                .to_string();
-            let count = row.get(1).and_then(SqliteValue::as_integer).unwrap_or(0);
-            if count > 0 {
-                dependency_counts.insert(issue_id, usize::try_from(count).unwrap_or(0));
-            }
-        }
-
-        let dependent_rows = self
-            .conn
-            .query("SELECT depends_on_id, COUNT(*) FROM dependencies GROUP BY depends_on_id")?;
-        let mut dependent_counts: HashMap<String, usize> = HashMap::new();
-        for row in &dependent_rows {
-            let issue_id = row
-                .get(0)
-                .and_then(SqliteValue::as_text)
-                .unwrap_or("")
-                .to_string();
-            let count = row.get(1).and_then(SqliteValue::as_integer).unwrap_or(0);
-            if count > 0 {
-                dependent_counts.insert(issue_id, usize::try_from(count).unwrap_or(0));
             }
         }
 
@@ -9633,34 +9292,6 @@ impl SqliteStorage {
         Ok(total_deleted)
     }
 
-    /// Clear dirty flags for the given issue IDs WITHOUT timestamp validation (Legacy).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database update fails.
-    pub fn clear_dirty_issues_legacy(&mut self, issue_ids: &[String]) -> Result<usize> {
-        const SQLITE_VAR_LIMIT: usize = 900;
-        if issue_ids.is_empty() {
-            return Ok(0);
-        }
-
-        let mut total_deleted = 0;
-        for chunk in issue_ids.chunks(SQLITE_VAR_LIMIT) {
-            // Delete existing entries row-by-row to avoid the previous engine's IN-clause bugs
-            let mut chunk_deleted = 0;
-            for id in chunk {
-                let deleted = self.conn.execute_with_params(
-                    "DELETE FROM dirty_issues WHERE issue_id = ?",
-                    &[SqliteValue::from(id.as_str())],
-                )?;
-                chunk_deleted += deleted;
-            }
-            total_deleted += chunk_deleted;
-        }
-
-        Ok(total_deleted)
-    }
-
     /// Clear all dirty flags.
     ///
     /// # Errors
@@ -9720,18 +9351,6 @@ impl SqliteStorage {
         self.with_write_transaction(|storage| storage.set_export_hashes_in_tx(exports))
     }
 
-    /// Clear all export hashes.
-    ///
-    /// Call this before import to ensure fresh state.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database update fails.
-    pub fn clear_all_export_hashes(&mut self) -> Result<usize> {
-        let count = self.conn.execute("DELETE FROM export_hashes")?;
-        Ok(count)
-    }
-
     /// Get a metadata value by key.
     ///
     /// # Errors
@@ -9789,21 +9408,6 @@ impl SqliteStorage {
             .and_then(SqliteValue::as_integer)
             .unwrap_or(0);
         Ok(usize::try_from(count).unwrap_or(0))
-    }
-
-    /// Count active project issues using default user-facing visibility.
-    ///
-    /// Active issues are non-closed issues, including deferred issues, while
-    /// excluding template issues like the default command/query surfaces.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn count_active_issues(&self) -> Result<usize> {
-        self.count_issues_with_filters(&ListFilters {
-            include_deferred: true,
-            ..ListFilters::default()
-        })
     }
 
     /// Check whether the project has any active issues using default
@@ -11798,41 +11402,6 @@ impl SqliteStorage {
         }
     }
 
-    /// Find an issue by content hash.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn find_by_content_hash(&self, content_hash: &str) -> Result<Option<Issue>> {
-        match self.conn.query_row_with_params(
-            r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                     status, priority, issue_type, assignee, owner, estimated_minutes,
-                     created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                     due_at, defer_until, external_ref, source_system, source_repo,
-                     deleted_at, deleted_by, delete_reason, original_type, compaction_level,
-                     compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                     pinned, is_template, source_repo_path, agent_context
-               FROM issues WHERE content_hash = ?",
-            &[SqliteValue::from(content_hash)],
-        ) {
-            Ok(row) => Ok(Some(Self::issue_from_row(&row)?)),
-            Err(DbError::QueryReturnedNoRows) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    /// Check if an issue is a tombstone (deleted).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn is_tombstone(&self, id: &str) -> Result<bool> {
-        Ok(matches!(
-            Self::get_issue_from_conn(&self.conn, id)?.map(|issue| issue.status),
-            Some(Status::Tombstone)
-        ))
-    }
-
     fn import_issue_field_values(
         issue: &Issue,
         timestamps: &ImportIssueTimestampStrings,
@@ -13757,7 +13326,7 @@ mod tests {
         storage.create_issue(&issue, "tester").unwrap();
 
         // Attempt a mutation that fails
-        let result: Result<()> = storage.mutate("fail_op", "tester", |_tx, _ctx| {
+        let result: Result<()> = storage.mutate("fail_op", |_tx, _ctx| {
             // Return error to trigger rollback
             Err(BeadsError::Config("Planned failure".to_string()))
         });
@@ -13780,7 +13349,7 @@ mod tests {
         storage.create_issue(&issue, "tester").unwrap();
 
         // Verify that a closure error causes a rollback.
-        let result: Result<()> = storage.mutate("fail_in_closure", "tester", |_tx, _ctx| {
+        let result: Result<()> = storage.mutate("fail_in_closure", |_tx, _ctx| {
             Err(BeadsError::validation(
                 "test",
                 "intentional failure for rollback test",
@@ -13826,7 +13395,7 @@ mod tests {
         );
         storage.create_issue(&issue, "tester").unwrap();
 
-        let result: Result<()> = storage.mutate("fk_tolerance", "tester", |_tx, _ctx| Ok(()));
+        let result: Result<()> = storage.mutate("fk_tolerance", |_tx, _ctx| Ok(()));
 
         assert!(
             result.is_ok(),
@@ -14501,9 +14070,6 @@ mod tests {
             .unwrap();
         assert_eq!(deleted.status, Status::Tombstone);
         assert_eq!(deleted.delete_reason.as_deref(), Some("cleanup"));
-
-        let is_tombstone = storage.is_tombstone("bd-d1").unwrap();
-        assert!(is_tombstone);
     }
 
     #[test]
@@ -14639,7 +14205,7 @@ mod tests {
         let issue = make_issue("bd-p1", "Purge me", Status::Open, 2, None, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
-        storage.purge_issue("bd-p1", "tester").unwrap();
+        storage.purge_issue("bd-p1").unwrap();
 
         assert!(storage.get_issue("bd-p1").unwrap().is_none());
 
@@ -14674,33 +14240,6 @@ mod tests {
     }
 
     #[test]
-    fn test_count_all_relation_counts_matches_chunked_counts() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let t1 = Utc.with_ymd_and_hms(2025, 4, 1, 0, 0, 0).unwrap();
-
-        for id in ["bd-a", "bd-b", "bd-c"] {
-            let issue = make_issue(id, id, Status::Open, 1, None, t1, None);
-            storage.create_issue(&issue, "tester").unwrap();
-        }
-
-        storage
-            .add_dependency("bd-b", "bd-a", "blocks", "tester")
-            .unwrap();
-        storage
-            .add_dependency("bd-c", "bd-a", "blocks", "tester")
-            .unwrap();
-        storage
-            .add_dependency("bd-c", "bd-b", "blocks", "tester")
-            .unwrap();
-
-        let ids = vec!["bd-a".to_string(), "bd-b".to_string(), "bd-c".to_string()];
-        let chunked_counts = storage.count_relation_counts_for_issues(&ids).unwrap();
-        let all_counts = storage.count_all_relation_counts().unwrap();
-
-        assert_eq!(all_counts, chunked_counts);
-    }
-
-    #[test]
     fn test_scheduler_evidence_helpers_handle_default_candidate_window() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 4, 1, 0, 0, 0).unwrap();
@@ -14711,7 +14250,7 @@ mod tests {
         for id in &ids {
             let issue = make_issue(id, id, Status::Open, 1, None, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
-            storage.add_label(id, "scheduler", "tester").unwrap();
+            storage.add_label(id, "scheduler").unwrap();
         }
         for issue_id in ids.iter().skip(1) {
             storage
@@ -14740,9 +14279,9 @@ mod tests {
             let issue = make_issue(id, id, Status::Open, 1, None, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
-        storage.add_label("bd-a", "backend", "tester").unwrap();
-        storage.add_label("bd-a", "urgent", "tester").unwrap();
-        storage.add_label("bd-b", "backend", "tester").unwrap();
+        storage.add_label("bd-a", "backend").unwrap();
+        storage.add_label("bd-a", "urgent").unwrap();
+        storage.add_label("bd-b", "backend").unwrap();
         storage
             .add_dependency("bd-b", "bd-a", "blocks", "tester")
             .unwrap();
@@ -14754,7 +14293,13 @@ mod tests {
             .unwrap();
 
         let labels = storage.get_all_labels().unwrap();
-        let (dependency_counts, dependent_counts) = storage.count_all_relation_counts().unwrap();
+        let (dependency_counts, dependent_counts) = storage
+            .count_relation_counts_for_issues(&[
+                "bd-a".to_string(),
+                "bd-b".to_string(),
+                "bd-c".to_string(),
+            ])
+            .unwrap();
         let metadata = storage.get_all_list_relation_metadata().unwrap();
 
         for id in ["bd-a", "bd-b", "bd-c"] {
@@ -14830,15 +14375,15 @@ mod tests {
         let issue = make_issue("bd-l1", "Label me", Status::Open, 2, None, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
-        let added = storage.add_label("bd-l1", "backend", "tester").unwrap();
+        let added = storage.add_label("bd-l1", "backend").unwrap();
         assert!(added);
-        let added = storage.add_label("bd-l1", "api", "tester").unwrap();
+        let added = storage.add_label("bd-l1", "api").unwrap();
         assert!(added);
 
         let labels = storage.get_labels("bd-l1").unwrap();
         assert_eq!(labels, vec!["api".to_string(), "backend".to_string()]);
 
-        let removed = storage.remove_label("bd-l1", "api", "tester").unwrap();
+        let removed = storage.remove_label("bd-l1", "api").unwrap();
         assert!(removed);
         let labels = storage.get_labels("bd-l1").unwrap();
         assert_eq!(labels, vec!["backend".to_string()]);
@@ -14861,7 +14406,7 @@ mod tests {
         storage.create_issue(&issue, "tester").unwrap();
 
         let err = storage
-            .add_label("bd-l-invalid", "bad label", "tester")
+            .add_label("bd-l-invalid", "bad label")
             .expect_err("invalid labels must be rejected at storage boundary");
         assert!(err.to_string().contains("invalid characters"));
         assert!(storage.get_labels("bd-l-invalid").unwrap().is_empty());
@@ -14882,12 +14427,10 @@ mod tests {
             None,
         );
         storage.create_issue(&issue, "tester").unwrap();
-        storage
-            .add_label("bd-l-remove-invalid", "backend", "tester")
-            .unwrap();
+        storage.add_label("bd-l-remove-invalid", "backend").unwrap();
 
         let err = storage
-            .remove_label("bd-l-remove-invalid", "bad label", "tester")
+            .remove_label("bd-l-remove-invalid", "bad label")
             .expect_err("invalid removal label must be rejected at storage boundary");
         assert!(err.to_string().contains("invalid characters"));
         assert_eq!(
@@ -14906,15 +14449,15 @@ mod tests {
 
         for index in 0..ISSUE_LABEL_MAX_COUNT {
             let label = format!("label-{index:02}");
-            assert!(storage.add_label("bd-l-cap", &label, "tester").unwrap());
+            assert!(storage.add_label("bd-l-cap", &label).unwrap());
         }
 
         assert!(
-            !storage.add_label("bd-l-cap", "label-00", "tester").unwrap(),
+            !storage.add_label("bd-l-cap", "label-00").unwrap(),
             "duplicate labels should remain an idempotent no-op at the cap"
         );
         let err = storage
-            .add_label("bd-l-cap", "label-extra", "tester")
+            .add_label("bd-l-cap", "label-extra")
             .expect_err("new label beyond cap must fail");
         assert!(err.to_string().contains("exceeds 64 labels"));
         assert_eq!(
@@ -14932,9 +14475,7 @@ mod tests {
             let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
-        storage
-            .add_label("bd-bulk-b", "bulk-added", "tester")
-            .unwrap();
+        storage.add_label("bd-bulk-b", "bulk-added").unwrap();
         storage.clear_all_dirty_issues().unwrap();
 
         let ids = vec![
@@ -14944,7 +14485,7 @@ mod tests {
             "bd-bulk-a".to_string(),
         ];
         let changed = storage
-            .add_label_to_issues_bulk(&ids, "bulk-added", "tester")
+            .add_label_to_issues_bulk(&ids, "bulk-added")
             .unwrap();
         let expected = ["bd-bulk-a", "bd-bulk-c"]
             .into_iter()
@@ -14985,7 +14526,7 @@ mod tests {
         storage.clear_all_dirty_issues().unwrap();
 
         let changed = storage
-            .add_label_to_issues_bulk(&ids, "bulk-boundary", "tester")
+            .add_label_to_issues_bulk(&ids, "bulk-boundary")
             .unwrap();
         let expected = ids.iter().cloned().collect::<HashSet<_>>();
         assert_eq!(changed, expected);
@@ -15006,15 +14547,13 @@ mod tests {
         }
         for index in 0..ISSUE_LABEL_MAX_COUNT {
             let label = format!("label-{index:02}");
-            storage
-                .add_label("bd-bulk-cap-full", &label, "tester")
-                .unwrap();
+            storage.add_label("bd-bulk-cap-full", &label).unwrap();
         }
         storage.clear_all_dirty_issues().unwrap();
 
         let ids = vec!["bd-bulk-cap-ok".to_string(), "bd-bulk-cap-full".to_string()];
         let err = storage
-            .add_label_to_issues_bulk(&ids, "label-extra", "tester")
+            .add_label_to_issues_bulk(&ids, "label-extra")
             .expect_err("bulk label add must reject a target at the label cap");
         assert!(err.to_string().contains("exceeds 64 labels"));
         assert!(
@@ -15043,7 +14582,7 @@ mod tests {
 
         let ids = vec!["bd-bulk-active".to_string(), "bd-bulk-tomb".to_string()];
         let err = storage
-            .add_label_to_issues_bulk(&ids, "bulk-added", "tester")
+            .add_label_to_issues_bulk(&ids, "bulk-added")
             .expect_err("bulk label add must reject tombstones");
         assert!(
             err.to_string()
@@ -15063,10 +14602,10 @@ mod tests {
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage
-            .add_label("bd-bulk-remove-a", "bulk-removed", "tester")
+            .add_label("bd-bulk-remove-a", "bulk-removed")
             .unwrap();
         storage
-            .add_label("bd-bulk-remove-c", "bulk-removed", "tester")
+            .add_label("bd-bulk-remove-c", "bulk-removed")
             .unwrap();
         storage.clear_all_dirty_issues().unwrap();
 
@@ -15077,7 +14616,7 @@ mod tests {
             "bd-bulk-remove-a".to_string(),
         ];
         let changed = storage
-            .remove_label_from_issues_bulk(&ids, "bulk-removed", "tester")
+            .remove_label_from_issues_bulk(&ids, "bulk-removed")
             .unwrap();
         let expected = ["bd-bulk-remove-a", "bd-bulk-remove-c"]
             .into_iter()
@@ -15119,13 +14658,13 @@ mod tests {
             storage.create_issue(&issue, "tester").unwrap();
         }
         let added = storage
-            .add_label_to_issues_bulk(&ids, "bulk-remove-boundary", "tester")
+            .add_label_to_issues_bulk(&ids, "bulk-remove-boundary")
             .unwrap();
         assert_eq!(added, ids.iter().cloned().collect::<HashSet<_>>());
         storage.clear_all_dirty_issues().unwrap();
 
         let changed = storage
-            .remove_label_from_issues_bulk(&ids, "bulk-remove-boundary", "tester")
+            .remove_label_from_issues_bulk(&ids, "bulk-remove-boundary")
             .unwrap();
         let expected = ids.iter().cloned().collect::<HashSet<_>>();
         assert_eq!(changed, expected);
@@ -15145,7 +14684,7 @@ mod tests {
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage
-            .add_label("bd-bulk-remove-active", "bulk-removed", "tester")
+            .add_label("bd-bulk-remove-active", "bulk-removed")
             .unwrap();
         storage
             .delete_issue("bd-bulk-remove-tomb", "tester", "delete target", None)
@@ -15157,7 +14696,7 @@ mod tests {
             "bd-bulk-remove-tomb".to_string(),
         ];
         let err = storage
-            .remove_label_from_issues_bulk(&ids, "bulk-removed", "tester")
+            .remove_label_from_issues_bulk(&ids, "bulk-removed")
             .expect_err("bulk label remove must reject tombstones");
         assert!(
             err.to_string()
@@ -15186,7 +14725,6 @@ mod tests {
                     "backend".to_string(),
                     "api".to_string(),
                 ],
-                "tester",
             )
             .unwrap();
 
@@ -15210,11 +14748,11 @@ mod tests {
         );
         storage.create_issue(&issue, "tester").unwrap();
         storage
-            .set_labels("bd-l-set-invalid", &["stable".to_string()], "tester")
+            .set_labels("bd-l-set-invalid", &["stable".to_string()])
             .unwrap();
 
         let err = storage
-            .set_labels("bd-l-set-invalid", &["bad label".to_string()], "tester")
+            .set_labels("bd-l-set-invalid", &["bad label".to_string()])
             .expect_err("invalid replacement label must fail before deleting old labels");
         assert!(err.to_string().contains("invalid characters"));
         assert_eq!(
@@ -15226,7 +14764,7 @@ mod tests {
             .map(|index| format!("label-{index:02}"))
             .collect::<Vec<_>>();
         let err = storage
-            .set_labels("bd-l-set-invalid", &too_many, "tester")
+            .set_labels("bd-l-set-invalid", &too_many)
             .expect_err("too many replacement labels must fail");
         assert!(err.to_string().contains("exceeds 64 labels"));
         assert_eq!(
@@ -15250,9 +14788,7 @@ mod tests {
             None,
         );
         storage.create_issue(&issue, "tester").unwrap();
-        storage
-            .add_label("bd-l-import-invalid", "stable", "tester")
-            .unwrap();
+        storage.add_label("bd-l-import-invalid", "stable").unwrap();
 
         let err = storage
             .sync_labels_for_import("bd-l-import-invalid", &["bad label".to_string()])
@@ -15434,15 +14970,13 @@ mod tests {
             None,
         );
         storage.create_issue(&issue, "tester").unwrap();
-        storage
-            .add_label("bd-l-tomb", "existing", "tester")
-            .unwrap();
+        storage.add_label("bd-l-tomb", "existing").unwrap();
         storage
             .delete_issue("bd-l-tomb", "tester", "delete label target", None)
             .unwrap();
 
         let set_error = storage
-            .set_labels("bd-l-tomb", &["new".to_string()], "tester")
+            .set_labels("bd-l-tomb", &["new".to_string()])
             .unwrap_err();
         assert!(
             matches!(
@@ -15452,19 +14986,6 @@ mod tests {
                         && reason.contains("cannot set labels on tombstone issue: bd-l-tomb")
             ),
             "unexpected set_labels error: {set_error:?}"
-        );
-
-        let remove_error = storage
-            .remove_all_labels("bd-l-tomb", "tester")
-            .unwrap_err();
-        assert!(
-            matches!(
-                &remove_error,
-                BeadsError::Validation { field, reason }
-                    if field == "issue_id"
-                        && reason.contains("cannot remove labels from tombstone issue: bd-l-tomb")
-            ),
-            "unexpected remove_all_labels error: {remove_error:?}"
         );
 
         let labels = storage.get_labels("bd-l-tomb").unwrap();
@@ -15496,18 +15017,10 @@ mod tests {
         );
         storage.create_issue(&active, "tester").unwrap();
         storage.create_issue(&tombstone, "tester").unwrap();
-        storage
-            .add_label("bd-l-active", "shared", "tester")
-            .unwrap();
-        storage
-            .add_label("bd-l-active", "active-only", "tester")
-            .unwrap();
-        storage
-            .add_label("bd-l-deleted", "shared", "tester")
-            .unwrap();
-        storage
-            .add_label("bd-l-deleted", "deleted-only", "tester")
-            .unwrap();
+        storage.add_label("bd-l-active", "shared").unwrap();
+        storage.add_label("bd-l-active", "active-only").unwrap();
+        storage.add_label("bd-l-deleted", "shared").unwrap();
+        storage.add_label("bd-l-deleted", "deleted-only").unwrap();
         storage
             .delete_issue("bd-l-deleted", "tester", "delete label count target", None)
             .unwrap();
@@ -15525,11 +15038,9 @@ mod tests {
 
         let issue = make_issue("bd-l3", "Rename label", Status::Open, 2, None, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
-        storage.add_label("bd-l3", "backend", "tester").unwrap();
+        storage.add_label("bd-l3", "backend").unwrap();
 
-        let affected = storage
-            .rename_label("backend", "backend", "tester")
-            .unwrap();
+        let affected = storage.rename_label("backend", "backend").unwrap();
 
         assert_eq!(affected, 0);
         assert_eq!(
@@ -15553,12 +15064,10 @@ mod tests {
             None,
         );
         storage.create_issue(&issue, "tester").unwrap();
-        storage
-            .add_label("bd-l-rename-invalid", "backend", "tester")
-            .unwrap();
+        storage.add_label("bd-l-rename-invalid", "backend").unwrap();
 
         let new_name_error = storage
-            .rename_label("backend", "bad label", "tester")
+            .rename_label("backend", "bad label")
             .expect_err("invalid replacement label must fail before mutation");
         assert!(new_name_error.to_string().contains("invalid characters"));
         assert_eq!(
@@ -15567,7 +15076,7 @@ mod tests {
         );
 
         let old_name_error = storage
-            .rename_label("bad label", "frontend", "tester")
+            .rename_label("bad label", "frontend")
             .expect_err("invalid source label must fail before mutation");
         assert!(old_name_error.to_string().contains("invalid characters"));
         assert_eq!(
@@ -15576,7 +15085,7 @@ mod tests {
         );
 
         let same_name_error = storage
-            .rename_label("bad label", "bad label", "tester")
+            .rename_label("bad label", "bad label")
             .expect_err("invalid same-name rename must not be treated as a no-op");
         assert!(same_name_error.to_string().contains("invalid characters"));
     }
@@ -15606,17 +15115,13 @@ mod tests {
         );
         storage.create_issue(&active, "tester").unwrap();
         storage.create_issue(&tombstone, "tester").unwrap();
-        storage
-            .add_label("bd-l-active", "legacy", "tester")
-            .unwrap();
-        storage
-            .add_label("bd-l-deleted", "legacy", "tester")
-            .unwrap();
+        storage.add_label("bd-l-active", "legacy").unwrap();
+        storage.add_label("bd-l-deleted", "legacy").unwrap();
         storage
             .delete_issue("bd-l-deleted", "tester", "delete label target", None)
             .unwrap();
 
-        let affected = storage.rename_label("legacy", "renamed", "tester").unwrap();
+        let affected = storage.rename_label("legacy", "renamed").unwrap();
 
         assert_eq!(affected, 1);
         assert_eq!(
@@ -15652,9 +15157,7 @@ mod tests {
         let deps = storage.get_dependencies("bd-a1").unwrap();
         assert_eq!(deps, vec!["bd-b1".to_string()]);
 
-        let removed = storage
-            .remove_dependency("bd-a1", "bd-b1", "tester")
-            .unwrap();
+        let removed = storage.remove_dependency("bd-a1", "bd-b1").unwrap();
         assert!(removed);
         let deps = storage.get_dependencies("bd-a1").unwrap();
         assert!(deps.is_empty());
@@ -16089,7 +15592,7 @@ mod tests {
             .unwrap();
 
         let remove_error = storage
-            .remove_dependency("bd-dep-child", "bd-dep-old-parent", "tester")
+            .remove_dependency("bd-dep-child", "bd-dep-old-parent")
             .unwrap_err();
         assert!(
             matches!(
@@ -16116,19 +15619,6 @@ mod tests {
                         )
             ),
             "unexpected clear parent error: {clear_parent_error:?}"
-        );
-
-        let remove_parent_error = storage.remove_parent("bd-dep-child", "tester").unwrap_err();
-        assert!(
-            matches!(
-                &remove_parent_error,
-                BeadsError::Validation { field, reason }
-                    if field == "issue_id"
-                        && reason.contains(
-                            "cannot clear parent from tombstone issue: bd-dep-child"
-                        )
-            ),
-            "unexpected remove_parent error: {remove_parent_error:?}"
         );
 
         let set_parent_error = storage
@@ -16361,15 +15851,13 @@ mod tests {
         assert!(storage.is_blocked("bd-remove-parent-a").unwrap());
         assert!(storage.is_blocked("bd-remove-parent-b").unwrap());
 
-        assert!(
-            storage
-                .remove_parent("bd-remove-parent-child", "tester")
-                .unwrap()
-        );
+        storage
+            .set_parent("bd-remove-parent-child", None, "tester")
+            .unwrap();
 
         assert!(
             !storage.blocked_cache_marked_stale().unwrap(),
-            "remove_parent should eagerly refresh the affected cache entries"
+            "clearing a parent should eagerly refresh the affected cache entries"
         );
         assert!(
             !storage.is_blocked("bd-remove-parent-a").unwrap(),
@@ -16976,61 +16464,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_latest_comments_for_issues_bounds_each_issue() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let t1 = Utc.with_ymd_and_hms(2025, 7, 4, 0, 0, 0).unwrap();
-        let issue_a = make_issue("bd-c-latest-a", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-c-latest-b", "B", Status::Open, 2, None, t1, None);
-        storage.create_issue(&issue_a, "tester").unwrap();
-        storage.create_issue(&issue_b, "tester").unwrap();
-
-        for (issue_id, body, created_at) in [
-            ("bd-c-latest-a", "a-old", "2025-07-01T00:00:00Z"),
-            ("bd-c-latest-a", "a-middle", "2025-07-02T00:00:00Z"),
-            ("bd-c-latest-a", "a-new", "2025-07-03T00:00:00Z"),
-            ("bd-c-latest-b", "b-old", "2025-07-01T00:00:00Z"),
-            ("bd-c-latest-b", "b-new", "2025-07-02T00:00:00Z"),
-        ] {
-            storage
-                .conn
-                .execute_with_params(
-                    "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
-                    &[
-                        SqliteValue::from(issue_id),
-                        SqliteValue::from("tester"),
-                        SqliteValue::from(body),
-                        SqliteValue::from(created_at),
-                    ],
-                )
-                .unwrap();
-        }
-
-        let by_issue = storage
-            .get_latest_comments_for_issues(
-                &["bd-c-latest-a".to_string(), "bd-c-latest-b".to_string()],
-                2,
-            )
-            .unwrap();
-
-        let issue_a_bodies = by_issue["bd-c-latest-a"]
-            .iter()
-            .map(|comment| comment.body.as_str())
-            .collect::<Vec<_>>();
-        let issue_b_bodies = by_issue["bd-c-latest-b"]
-            .iter()
-            .map(|comment| comment.body.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(issue_a_bodies, ["a-middle", "a-new"]);
-        assert_eq!(issue_b_bodies, ["b-old", "b-new"]);
-
-        let empty = storage
-            .get_latest_comments_for_issues(&["bd-c-latest-a".to_string()], 0)
-            .unwrap();
-        assert!(empty.is_empty());
-    }
-
-    #[test]
     fn test_add_comment_round_trip() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 4, 0, 0, 0).unwrap();
@@ -17553,17 +16986,16 @@ mod tests {
                 .unwrap()
         );
 
-        // Two statements, so `execute_batch` rather than `execute`: the compat
-        // layer rejects multi-statement SQL passed to `execute` instead of
-        // silently running only the first, which is what the engine this
-        // replaced did. This is the only such call site in the tree.
-        storage
-            .conn
-            .execute_batch(
-                "PRAGMA foreign_keys = OFF;
-                 INSERT INTO labels (issue_id, label) VALUES ('bd-stale', 'old-label');",
-            )
-            .unwrap();
+        // Two statements, so `schema::execute_batch` rather than `execute`:
+        // the compat layer rejects multi-statement SQL passed to `execute`
+        // instead of silently running only the first, which is what the engine
+        // this replaced did. This is the only such call site in the tree.
+        crate::storage::schema::execute_batch(
+            &storage.conn,
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO labels (issue_id, label) VALUES ('bd-stale', 'old-label');",
+        )
+        .unwrap();
 
         assert!(
             storage
@@ -17604,7 +17036,7 @@ mod tests {
         storage.create_issue(&closed_issue, "tester").unwrap();
         storage.create_issue(&tombstone_issue, "tester").unwrap();
         storage
-            .add_label("bd-cap-closed", "provides:closed-cap", "tester")
+            .add_label("bd-cap-closed", "provides:closed-cap")
             .unwrap();
         storage
             .conn
@@ -18833,160 +18265,6 @@ mod tests {
     }
 
     #[test]
-    fn test_list_orphan_candidate_issues_for_command_output_matches_full_candidate_fields() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 4, 11, 12, 0, 0).unwrap();
-
-        let mut open_issue = make_issue(
-            "bd-orphan-open",
-            "Open orphan candidate",
-            Status::Open,
-            1,
-            None,
-            now,
-            None,
-        );
-        open_issue.description = Some("Should not be loaded".to_string());
-        open_issue.design = Some("unused design".repeat(512));
-        open_issue.acceptance_criteria = Some("unused ac".repeat(512));
-        open_issue.notes = Some("unused notes".repeat(512));
-        open_issue.owner = Some("owner".to_string());
-        open_issue.sender = Some("cli".to_string());
-
-        let in_progress_issue = make_issue(
-            "bd-orphan-progress",
-            "In-progress orphan candidate",
-            Status::InProgress,
-            2,
-            None,
-            now - chrono::Duration::minutes(1),
-            None,
-        );
-        let mut closed_issue = make_issue(
-            "bd-orphan-closed",
-            "Closed non-candidate",
-            Status::Closed,
-            3,
-            None,
-            now - chrono::Duration::minutes(2),
-            None,
-        );
-        closed_issue.closed_at = Some(now);
-
-        storage.create_issue(&open_issue, "tester").unwrap();
-        storage.create_issue(&in_progress_issue, "tester").unwrap();
-        storage.create_issue(&closed_issue, "tester").unwrap();
-
-        let filters = ListFilters {
-            statuses: Some(vec![Status::Open, Status::InProgress]),
-            ..ListFilters::default()
-        };
-        let full = storage
-            .list_issues(&filters)
-            .unwrap()
-            .into_iter()
-            .map(|issue| (issue.id, issue.title, issue.status, issue.priority))
-            .collect::<Vec<_>>();
-        let projected_raw = storage
-            .list_orphan_candidate_issues_for_command_output(&filters)
-            .unwrap();
-        let projected_issue = projected_raw
-            .iter()
-            .find(|issue| issue.id == "bd-orphan-open")
-            .unwrap();
-        assert!(projected_issue.description.is_none());
-        assert!(projected_issue.design.is_none());
-        assert!(projected_issue.acceptance_criteria.is_none());
-        assert!(projected_issue.notes.is_none());
-        assert!(projected_issue.owner.is_none());
-        assert!(projected_issue.sender.is_none());
-
-        let projected = projected_raw
-            .into_iter()
-            .map(|issue| (issue.id, issue.title, issue.status, issue.priority))
-            .collect::<Vec<_>>();
-
-        assert_eq!(projected, full);
-    }
-
-    #[test]
-    fn test_list_graph_issues_for_command_output_matches_full_graph_fields() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 4, 12, 12, 0, 0).unwrap();
-
-        let mut open_issue = make_issue(
-            "bd-graph-open",
-            "Open graph node",
-            Status::Open,
-            1,
-            None,
-            now,
-            None,
-        );
-        open_issue.description = Some("Should not be loaded".to_string());
-        open_issue.design = Some("unused design".repeat(512));
-        open_issue.acceptance_criteria = Some("unused ac".repeat(512));
-        open_issue.notes = Some("unused notes".repeat(512));
-        open_issue.owner = Some("owner".to_string());
-        open_issue.sender = Some("cli".to_string());
-
-        let deferred_issue = make_issue(
-            "bd-graph-deferred",
-            "Deferred graph node",
-            Status::Deferred,
-            2,
-            None,
-            now - chrono::Duration::minutes(1),
-            None,
-        );
-        let mut closed_issue = make_issue(
-            "bd-graph-closed",
-            "Closed non-node",
-            Status::Closed,
-            3,
-            None,
-            now - chrono::Duration::minutes(2),
-            None,
-        );
-        closed_issue.closed_at = Some(now);
-
-        storage.create_issue(&open_issue, "tester").unwrap();
-        storage.create_issue(&deferred_issue, "tester").unwrap();
-        storage.create_issue(&closed_issue, "tester").unwrap();
-
-        let filters = ListFilters {
-            include_deferred: true,
-            ..ListFilters::default()
-        };
-        let full = storage
-            .list_issues(&filters)
-            .unwrap()
-            .into_iter()
-            .map(|issue| (issue.id, issue.title, issue.status, issue.priority))
-            .collect::<Vec<_>>();
-        let projected_raw = storage
-            .list_graph_issues_for_command_output(&filters)
-            .unwrap();
-        let projected_issue = projected_raw
-            .iter()
-            .find(|issue| issue.id == "bd-graph-open")
-            .unwrap();
-        assert!(projected_issue.description.is_none());
-        assert!(projected_issue.design.is_none());
-        assert!(projected_issue.acceptance_criteria.is_none());
-        assert!(projected_issue.notes.is_none());
-        assert!(projected_issue.owner.is_none());
-        assert!(projected_issue.sender.is_none());
-
-        let projected = projected_raw
-            .into_iter()
-            .map(|issue| (issue.id, issue.title, issue.status, issue.priority))
-            .collect::<Vec<_>>();
-
-        assert_eq!(projected, full);
-    }
-
-    #[test]
     fn test_list_issues_default_visible_limited_page_matches_sql_order() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let day_1 = Utc.with_ymd_and_hms(2026, 4, 13, 12, 0, 0).unwrap();
@@ -19497,13 +18775,14 @@ mod tests {
             .add_dependency("bd-r1", "bd-b1", "related", "tester")
             .unwrap();
 
-        let blocker_ids = storage.get_blocker_ids("bd-c1").unwrap();
+        // The parent-child edge below is deliberately not asserted here.
+        // `get_blocker_ids` used to report an open child as a blocker of its
+        // parent by ID; `get_blockers` resolves rollup markers instead, so the
+        // two disagree on that case. Nothing called `get_blocker_ids`.
+        let blocker_ids = storage.get_blockers("bd-c1").unwrap();
         assert_eq!(blocker_ids, vec!["bd-b1"]);
 
-        let parent_blockers = storage.get_blocker_ids("bd-p1").unwrap();
-        assert_eq!(parent_blockers, vec!["bd-p1.1"]);
-
-        let related_blockers = storage.get_blocker_ids("bd-r1").unwrap();
+        let related_blockers = storage.get_blockers("bd-r1").unwrap();
         assert!(
             related_blockers.is_empty(),
             "non-blocking related edges should not be reported as blockers"
@@ -20579,8 +19858,10 @@ mod tests {
     }
 
     #[test]
-    fn test_diag_data_visibility() {
-        // Simplest possible reproduction
+    fn count_star_with_a_bound_where_parameter_sees_the_row() {
+        // A bound parameter in a WHERE clause once failed to match under the
+        // previous engine, so `count(*)` reported 0 over a table that held the
+        // row. This is the reduced case that reproduced it.
         let conn = Connection::open(":memory:".to_string()).unwrap();
         conn.execute("CREATE TABLE t (k TEXT, v TEXT)").unwrap();
         conn.execute_with_params(
@@ -20589,454 +19870,19 @@ mod tests {
         )
         .unwrap();
 
-        // 1: count without WHERE
-        let r1 = conn
-            .query_with_params("SELECT count(*) FROM t", &[])
-            .unwrap();
-        eprintln!(
-            "[DIAG] 1. count(*) no WHERE: {:?}",
-            r1.first().map(Row::values)
-        );
-
-        // 2: count with literal WHERE
-        let r2 = conn
-            .query_with_params("SELECT count(*) FROM t WHERE k = 'a'", &[])
-            .unwrap();
-        eprintln!(
-            "[DIAG] 2. count(*) literal WHERE: {:?}",
-            r2.first().map(Row::values)
-        );
-
-        // 3: count with bind WHERE
-        let explain3 = conn
-            .prepare("SELECT count(*) FROM t WHERE k = ?")
-            .map_or_else(|e| format!("PREPARE ERROR: {e}"), |s| s.explain());
-        for line in explain3.lines() {
-            eprintln!("[DIAG] 3.E| {line}");
-        }
-        if explain3.is_empty() {
-            eprintln!("[DIAG] 3.E| (empty)");
-        }
-        let r3 = conn
+        let rows = conn
             .query_with_params(
                 "SELECT count(*) FROM t WHERE k = ?",
                 &[SqliteValue::from("a")],
             )
             .unwrap();
-        eprintln!(
-            "[DIAG] 3. count(*) bind WHERE: {:?}",
-            r3.first().map(Row::values)
-        );
 
-        // Also get EXPLAIN for the working non-aggregate version
-        let explain4 = conn
-            .prepare("SELECT k FROM t WHERE k = ?")
-            .map_or_else(|e| format!("PREPARE ERROR: {e}"), |s| s.explain());
-        for line in explain4.lines() {
-            eprintln!("[DIAG] 4.E| {line}");
-        }
-        if explain4.is_empty() {
-            eprintln!("[DIAG] 4.E| (empty)");
-        }
-
-        // 4: select with bind WHERE (no aggregate)
-        let r4 = conn
-            .query_with_params("SELECT k FROM t WHERE k = ?", &[SqliteValue::from("a")])
-            .unwrap();
-        eprintln!(
-            "[DIAG] 4. select k bind WHERE: {:?}",
-            r4.first().map(Row::values)
-        );
-
-        // 5: count(k) with bind WHERE
-        let r5 = conn
-            .query_with_params(
-                "SELECT count(k) FROM t WHERE k = ?",
-                &[SqliteValue::from("a")],
-            )
-            .unwrap();
-        eprintln!(
-            "[DIAG] 5. count(k) bind WHERE: {:?}",
-            r5.first().map(Row::values)
-        );
-
-        // 6: count with bind WHERE but no match
-        let r6 = conn
-            .query_with_params(
-                "SELECT count(*) FROM t WHERE k = ?",
-                &[SqliteValue::from("nonexistent")],
-            )
-            .unwrap();
-        eprintln!(
-            "[DIAG] 6. count(*) bind WHERE no match: {:?}",
-            r6.first().map(Row::values)
-        );
-
-        let c = r3
+        let count = rows
             .first()
             .and_then(|r| r.values().first())
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(-99);
-        assert_eq!(c, 1, "count(*) with bind param WHERE should return 1");
+            .and_then(SqliteValue::as_integer);
+        assert_eq!(count, Some(1), "count(*) with bind param WHERE");
     }
-
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn test_diag_root_page_visibility() {
-        // Create full beads schema and check which root pages are accessible
-        let conn = Connection::open(":memory:".to_string()).unwrap();
-
-        // Apply schema step by step, checking after each table
-        let tables = vec![(
-            "issues",
-            r"CREATE TABLE IF NOT EXISTS issues (
-                id TEXT PRIMARY KEY,
-                content_hash TEXT,
-                title TEXT NOT NULL CHECK(length(title) <= 500),
-                description TEXT NOT NULL DEFAULT '',
-                design TEXT NOT NULL DEFAULT '',
-                acceptance_criteria TEXT NOT NULL DEFAULT '',
-                notes TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'open',
-                priority INTEGER NOT NULL DEFAULT 2 CHECK(priority >= 0 AND priority <= 4),
-                issue_type TEXT NOT NULL DEFAULT 'task',
-                assignee TEXT,
-                owner TEXT DEFAULT '',
-                estimated_minutes INTEGER,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                created_by TEXT DEFAULT '',
-                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                closed_at DATETIME,
-                close_reason TEXT DEFAULT '',
-                closed_by_session TEXT DEFAULT '',
-                due_at DATETIME,
-                defer_until DATETIME,
-                external_ref TEXT,
-                source_system TEXT DEFAULT '',
-                source_repo TEXT NOT NULL DEFAULT '.',
-                deleted_at DATETIME,
-                deleted_by TEXT DEFAULT '',
-                delete_reason TEXT DEFAULT '',
-                original_type TEXT DEFAULT '',
-                compaction_level INTEGER DEFAULT 0,
-                compacted_at DATETIME,
-                compacted_at_commit TEXT,
-                original_size INTEGER,
-                sender TEXT DEFAULT '',
-                ephemeral INTEGER DEFAULT 0,
-                pinned INTEGER DEFAULT 0,
-                is_template INTEGER DEFAULT 0,
-                CHECK (
-                    (status = 'closed' AND closed_at IS NOT NULL) OR
-                    (status = 'tombstone') OR
-                    (status NOT IN ('closed', 'tombstone') AND closed_at IS NULL)
-                )
-            )",
-        )];
-        for (name, sql) in &tables {
-            match conn.execute(sql) {
-                Ok(_) => eprintln!("[ROOT-DIAG] Created table {name} OK"),
-                Err(e) => eprintln!("[ROOT-DIAG] Failed to create table {name}: {e}"),
-            }
-        }
-
-        // Create first few indexes
-        let indexes = vec![
-            "CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status)",
-            "CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority)",
-            "CREATE INDEX IF NOT EXISTS idx_issues_issue_type ON issues(issue_type)",
-            "CREATE INDEX IF NOT EXISTS idx_issues_assignee ON issues(assignee) WHERE assignee IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_issues_updated_at ON issues(updated_at)",
-            "CREATE INDEX IF NOT EXISTS idx_issues_content_hash ON issues(content_hash)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref_unique ON issues(external_ref) WHERE external_ref IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_issues_ephemeral ON issues(ephemeral) WHERE ephemeral = 1",
-            "CREATE INDEX IF NOT EXISTS idx_issues_pinned ON issues(pinned) WHERE pinned = 1",
-            "CREATE INDEX IF NOT EXISTS idx_issues_tombstone ON issues(status) WHERE status = 'tombstone'",
-            "CREATE INDEX IF NOT EXISTS idx_issues_due_at ON issues(due_at) WHERE due_at IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_issues_defer_until ON issues(defer_until) WHERE defer_until IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_issues_ready ON issues(status, priority, created_at) WHERE status = 'open' AND ephemeral = 0 AND pinned = 0 AND is_template = 0",
-            // Issue #354: `br ready` can be configured (workflow.status_groups.ready)
-            // to surface statuses beyond `open` (e.g. `rework`). The partial
-            // `idx_issues_ready` above only covers `status = 'open'`, so a widened
-            // ready group would fall back to a scan on the status leg. The partial
-            // predicate is a static migration string and cannot be widened to a
-            // per-repo dynamic group, so we add a non-partial `(status, priority,
-            // created_at)` index to keep the widened `status IN (...) ORDER BY
-            // priority, created_at` ready query index-covered. The tighter partial
-            // index still wins for the common default `[open]` group.
-            "CREATE INDEX IF NOT EXISTS idx_issues_status_priority_created ON issues(status, priority, created_at)",
-        ];
-        for (i, sql) in indexes.iter().enumerate() {
-            match conn.execute(sql) {
-                Ok(_) => eprintln!("[ROOT-DIAG] Created index {} OK", i + 1),
-                Err(e) => eprintln!("[ROOT-DIAG] Failed to create index {}: {e}", i + 1),
-            }
-        }
-
-        // Try count(*) first (simplest possible query)
-        match conn.query_with_params("SELECT count(*) FROM sqlite_master", &[]) {
-            Ok(rows) => {
-                let count = rows
-                    .first()
-                    .and_then(|r| r.values().first())
-                    .and_then(SqliteValue::as_integer)
-                    .unwrap_or(-99);
-                eprintln!("[ROOT-DIAG] count(*) from sqlite_master: {count}");
-            }
-            Err(e) => eprintln!("[ROOT-DIAG] count(*) FAILED: {e}"),
-        }
-
-        // Try SELECT without ORDER BY
-        match conn.query_with_params("SELECT type, name, rootpage FROM sqlite_master", &[]) {
-            Ok(rows) => {
-                eprintln!("[ROOT-DIAG] sqlite_master entries (no ORDER BY):");
-                for row in &rows {
-                    let vals = row.values();
-                    let typ = vals.first().map(|v| format!("{v:?}")).unwrap_or_default();
-                    let name = vals.get(1).map(|v| format!("{v:?}")).unwrap_or_default();
-                    let rootpage = vals.get(2).and_then(SqliteValue::as_integer).unwrap_or(0);
-                    eprintln!("[ROOT-DIAG]   type={typ} name={name} rootpage={rootpage}");
-                }
-            }
-            Err(e) => eprintln!("[ROOT-DIAG] SELECT (no ORDER BY) FAILED: {e}"),
-        }
-
-        // Try SELECT with ORDER BY
-        match conn.query_with_params(
-            "SELECT type, name, rootpage FROM sqlite_master ORDER BY rootpage",
-            &[],
-        ) {
-            Ok(rows) => {
-                eprintln!("[ROOT-DIAG] sqlite_master entries (ORDER BY):");
-                for row in &rows {
-                    let vals = row.values();
-                    let rootpage = vals.get(2).and_then(SqliteValue::as_integer).unwrap_or(0);
-                    eprintln!("[ROOT-DIAG]   rootpage={rootpage}");
-                }
-            }
-            Err(e) => eprintln!("[ROOT-DIAG] SELECT (ORDER BY) FAILED: {e}"),
-        }
-
-        // Try simple SELECT from issues table
-        match conn.query_with_params("SELECT count(*) FROM issues", &[]) {
-            Ok(rows) => {
-                let count = rows
-                    .first()
-                    .and_then(|r| r.values().first())
-                    .and_then(SqliteValue::as_integer)
-                    .unwrap_or(-99);
-                eprintln!("[ROOT-DIAG] count(*) from issues: {count}");
-            }
-            Err(e) => eprintln!("[ROOT-DIAG] count(*) from issues FAILED: {e}"),
-        }
-
-        let max_rootpage = 0i64;
-
-        // Also try: incrementally create indexes and check count(*) after each
-        eprintln!("[ROOT-DIAG] --- Incremental index creation with count check ---");
-        let conn2 = Connection::open(":memory:".to_string()).unwrap();
-        conn2
-            .execute("CREATE TABLE t (a TEXT, b TEXT, c TEXT, d TEXT, e TEXT)")
-            .unwrap();
-        for i in 1..=20 {
-            let col = ['a', 'b', 'c', 'd', 'e'][i % 5];
-            let sql = format!("CREATE INDEX IF NOT EXISTS idx_{i} ON t({col})");
-            match conn2.execute(&sql) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("[ROOT-DIAG] Index {i} creation FAILED: {e}");
-                    break;
-                }
-            }
-            match conn2.query_with_params("SELECT count(*) FROM sqlite_master", &[]) {
-                Ok(rows) => {
-                    let count = rows
-                        .first()
-                        .and_then(|r| r.values().first())
-                        .and_then(SqliteValue::as_integer)
-                        .unwrap_or(-99);
-                    eprintln!("[ROOT-DIAG] After {i} indexes: count(*)={count}");
-                }
-                Err(e) => {
-                    eprintln!("[ROOT-DIAG] After {i} indexes: count(*) FAILED: {e}");
-                    break;
-                }
-            }
-        }
-
-        // Test multi-insert with explicit transactions
-        eprintln!("[ROOT-DIAG] --- Multi-insert test ---");
-        let conn3 = Connection::open(":memory:".to_string()).unwrap();
-        conn3
-            .execute("CREATE TABLE ev (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT)")
-            .unwrap();
-        for i in 0..5 {
-            conn3.execute("BEGIN IMMEDIATE").unwrap();
-            conn3
-                .execute_with_params(
-                    "INSERT INTO ev (msg) VALUES (?)",
-                    &[SqliteValue::from(format!("msg{i}"))],
-                )
-                .unwrap();
-            conn3.execute("COMMIT").unwrap();
-        }
-        let rows3 = conn3
-            .query_with_params("SELECT count(*) FROM ev", &[])
-            .unwrap();
-        let count3 = rows3
-            .first()
-            .and_then(|r| r.values().first())
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(-99);
-        eprintln!("[ROOT-DIAG] Multi-insert count: {count3} (expected 5)");
-
-        let all3 = conn3
-            .query_with_params("SELECT id, msg FROM ev", &[])
-            .unwrap();
-        for row in &all3 {
-            let id = row
-                .values()
-                .first()
-                .and_then(SqliteValue::as_integer)
-                .unwrap_or(-1);
-            let msg = row
-                .values()
-                .get(1)
-                .map(|v| format!("{v:?}"))
-                .unwrap_or_default();
-            eprintln!("[ROOT-DIAG]   id={id} msg={msg}");
-        }
-
-        // Also test without explicit transactions (autocommit)
-        let conn4 = Connection::open(":memory:".to_string()).unwrap();
-        conn4
-            .execute("CREATE TABLE ev2 (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT)")
-            .unwrap();
-        for i in 0..5 {
-            conn4
-                .execute_with_params(
-                    "INSERT INTO ev2 (msg) VALUES (?)",
-                    &[SqliteValue::from(format!("msg{i}"))],
-                )
-                .unwrap();
-        }
-        let rows4 = conn4
-            .query_with_params("SELECT count(*) FROM ev2", &[])
-            .unwrap();
-        let count4 = rows4
-            .first()
-            .and_then(|r| r.values().first())
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(-99);
-        eprintln!("[ROOT-DIAG] Multi-insert (autocommit) count: {count4} (expected 5)");
-
-        let all4 = conn4
-            .query_with_params("SELECT id, msg FROM ev2", &[])
-            .unwrap();
-        for row in &all4 {
-            let id = row
-                .values()
-                .first()
-                .and_then(SqliteValue::as_integer)
-                .unwrap_or(-1);
-            let msg = row
-                .values()
-                .get(1)
-                .map(|v| format!("{v:?}"))
-                .unwrap_or_default();
-            eprintln!("[ROOT-DIAG]   id={id} msg={msg}");
-        }
-
-        // Test events-like table with indexes and WHERE+ORDER BY
-        eprintln!("[ROOT-DIAG] --- Events-like test ---");
-        let conn5 = Connection::open(":memory:".to_string()).unwrap();
-        conn5
-            .execute("CREATE TABLE issues2 (id TEXT PRIMARY KEY, title TEXT)")
-            .unwrap();
-        conn5.execute("CREATE TABLE ev3 (id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT NOT NULL, msg TEXT, created_at TEXT, FOREIGN KEY (issue_id) REFERENCES issues2(id))").unwrap();
-        conn5
-            .execute("CREATE INDEX idx_ev3_issue ON ev3(issue_id)")
-            .unwrap();
-        conn5
-            .execute("CREATE INDEX idx_ev3_created ON ev3(created_at)")
-            .unwrap();
-        conn5
-            .execute("INSERT INTO issues2 (id, title) VALUES ('test-001', 'Test')")
-            .unwrap();
-
-        for i in 0..5 {
-            conn5.execute("BEGIN IMMEDIATE").unwrap();
-            conn5
-                .execute_with_params(
-                    "INSERT INTO ev3 (issue_id, msg, created_at) VALUES (?1, ?2, ?3)",
-                    &[
-                        SqliteValue::from("test-001"),
-                        SqliteValue::from(format!("msg{i}")),
-                        SqliteValue::from(format!("2024-01-0{} 00:00:00", i + 1)),
-                    ],
-                )
-                .unwrap();
-            conn5.execute("COMMIT").unwrap();
-        }
-
-        // Test count
-        let ev_count = conn5
-            .query_with_params("SELECT count(*) FROM ev3", &[])
-            .unwrap();
-        let c = ev_count
-            .first()
-            .and_then(|r| r.values().first())
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(-99);
-        eprintln!("[ROOT-DIAG] ev3 count: {c}");
-
-        // Test WHERE with bind (no order) - uses index_eq path
-        let ev_where = conn5
-            .query_with_params(
-                "SELECT id, msg FROM ev3 WHERE issue_id = ?1",
-                &[SqliteValue::from("test-001")],
-            )
-            .unwrap();
-        eprintln!("[ROOT-DIAG] ev3 WHERE bind: {} rows", ev_where.len());
-
-        // Test WHERE with literal (no bind) - uses full scan
-        let ev_literal = conn5
-            .query_with_params("SELECT id, msg FROM ev3 WHERE issue_id = 'test-001'", &[])
-            .unwrap();
-        eprintln!("[ROOT-DIAG] ev3 WHERE literal: {} rows", ev_literal.len());
-
-        // Test full scan (no WHERE)
-        let ev_all = conn5
-            .query_with_params("SELECT id, msg FROM ev3", &[])
-            .unwrap();
-        eprintln!("[ROOT-DIAG] ev3 ALL (no where): {} rows", ev_all.len());
-
-        // Test WHERE with ORDER BY
-        let ev_ordered = conn5
-            .query_with_params(
-                "SELECT id, msg FROM ev3 WHERE issue_id = ?1 ORDER BY created_at DESC, id DESC",
-                &[SqliteValue::from("test-001")],
-            )
-            .unwrap();
-        eprintln!("[ROOT-DIAG] ev3 WHERE+ORDER: {} rows", ev_ordered.len());
-        for row in &ev_ordered {
-            let id = row
-                .values()
-                .first()
-                .and_then(SqliteValue::as_integer)
-                .unwrap_or(-1);
-            let msg = row
-                .values()
-                .get(1)
-                .map(|v| format!("{v:?}"))
-                .unwrap_or_default();
-            eprintln!("[ROOT-DIAG]   id={id} msg={msg}");
-        }
-
-        assert!(max_rootpage >= 0, "diagnostic test completed");
-    }
-
     #[test]
     fn test_get_issue_not_found_returns_none() {
         let storage = SqliteStorage::open_memory().unwrap();
@@ -22028,7 +20874,7 @@ mod tests {
         storage.create_issue(&issue2, "tester").unwrap();
 
         // Add label to issue1
-        storage.add_label("bd-l1", "test-label", "tester").unwrap();
+        storage.add_label("bd-l1", "test-label").unwrap();
 
         // Filter by label
         let filters = ListFilters {
@@ -22059,9 +20905,9 @@ mod tests {
         storage.create_issue(&issue1, "tester").unwrap();
         storage.create_issue(&issue2, "tester").unwrap();
 
-        storage.add_label("bd-l3", "core", "tester").unwrap();
-        storage.add_label("bd-l4", "core", "tester").unwrap();
-        storage.add_label("bd-l4", "frontend", "tester").unwrap();
+        storage.add_label("bd-l3", "core").unwrap();
+        storage.add_label("bd-l4", "core").unwrap();
+        storage.add_label("bd-l4", "frontend").unwrap();
 
         let filters = ListFilters {
             labels: Some(vec!["core".to_string(), "frontend".to_string()]),
@@ -22105,8 +20951,8 @@ mod tests {
         storage.create_issue(&task_issue, "tester").unwrap();
         storage.create_issue(&feature_issue, "tester").unwrap();
 
-        storage.add_label("bd-l5", "core", "tester").unwrap();
-        storage.add_label("bd-l6", "core", "tester").unwrap();
+        storage.add_label("bd-l5", "core").unwrap();
+        storage.add_label("bd-l6", "core").unwrap();
 
         let filters = ListFilters {
             types: Some(vec![IssueType::Task]),
@@ -22137,7 +20983,7 @@ mod tests {
             ("bd-lj4", ["export", "swarm"].as_slice()),
         ] {
             for label in labels {
-                storage.add_label(issue_id, label, "tester").unwrap();
+                storage.add_label(issue_id, label).unwrap();
             }
         }
 
@@ -22220,9 +21066,9 @@ mod tests {
         storage.create_issue(&i2, "tester").unwrap();
         storage.create_issue(&i3, "tester").unwrap();
 
-        storage.add_label("bd-1", "backend", "tester").unwrap();
-        storage.add_label("bd-1", "urgent", "tester").unwrap();
-        storage.add_label("bd-2", "backend", "tester").unwrap();
+        storage.add_label("bd-1", "backend").unwrap();
+        storage.add_label("bd-1", "urgent").unwrap();
+        storage.add_label("bd-2", "backend").unwrap();
         // bd-3 has no labels
 
         // Filter AND: backend + urgent
@@ -22577,12 +21423,8 @@ mod tests {
                 .add_dependency(id, "bd-epic", "parent-child", "tester")
                 .unwrap();
         }
-        storage
-            .add_label("bd-epic.1", "mini-safe", "tester")
-            .unwrap();
-        storage
-            .add_label("bd-epic.2", "mini-safe", "tester")
-            .unwrap();
+        storage.add_label("bd-epic.1", "mini-safe").unwrap();
+        storage.add_label("bd-epic.2", "mini-safe").unwrap();
 
         // A labelled descendant under bd-epic.1 (for the recursive case).
         let grandchild = make_issue("bd-epic.1.1", "Grandchild", Status::Open, 2, None, t1, None);
@@ -22590,9 +21432,7 @@ mod tests {
         storage
             .add_dependency("bd-epic.1.1", "bd-epic.1", "parent-child", "tester")
             .unwrap();
-        storage
-            .add_label("bd-epic.1.1", "mini-safe", "tester")
-            .unwrap();
+        storage.add_label("bd-epic.1.1", "mini-safe").unwrap();
 
         // --parent alone: all three direct children are ready (non-epic parents
         // do not inherit a child-open blocker).

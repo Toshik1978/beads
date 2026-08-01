@@ -12,9 +12,9 @@ pub mod path;
 pub mod witness;
 
 pub use path::{
-    ALLOWED_EXACT_NAMES, ALLOWED_EXTENSIONS, PathValidation, is_sync_path_allowed,
-    require_safe_sync_overwrite_path, require_valid_sync_path, validate_no_git_path,
-    validate_sync_path, validate_sync_path_with_external, validate_temp_file_path,
+    ALLOWED_EXACT_NAMES, ALLOWED_EXTENSIONS, PathValidation, require_safe_sync_overwrite_path,
+    require_valid_sync_path, validate_no_git_path, validate_sync_path,
+    validate_sync_path_with_external, validate_temp_file_path,
 };
 
 use crate::error::{BeadsError, Result};
@@ -6588,7 +6588,7 @@ mod tests {
         tombstone.deleted_at = Some(fixed_time(100));
         storage.create_issue(&tombstone, "test").unwrap();
         storage
-            .clear_dirty_issues_legacy(&["bd-tomb".to_string()])
+            .clear_dirty_issues(&[("bd-tomb".to_string(), String::new())])
             .unwrap();
         storage.set_metadata("needs_flush", "false").unwrap();
 
@@ -6618,9 +6618,9 @@ mod tests {
 
         let existing = make_issue_at("bd-rel", "Same content", fixed_time(200));
         storage.create_issue(&existing, "test").unwrap();
-        storage.add_label("bd-rel", "local-only", "test").unwrap();
+        storage.add_label("bd-rel", "local-only").unwrap();
         storage
-            .clear_dirty_issues_legacy(&["bd-rel".to_string()])
+            .clear_dirty_issues(&[("bd-rel".to_string(), String::new())])
             .unwrap();
         storage.set_metadata("needs_flush", "false").unwrap();
 

@@ -38,7 +38,7 @@ fn test_create_from_file_rejects_parent_dir() {
     let ctx = OutputContext::from_flags(false, false, true);
 
     // We expect this to SUCCEED now (path traversal check removed for CLI input)
-    let result = create::execute(&args, &overrides, &ctx);
+    let result = create::execute_with_storage(&args, &overrides, &ctx, None);
 
     if let Err(e) = result {
         // If it fails for other reasons (e.g. invalid markdown), that's fine,
@@ -51,7 +51,7 @@ fn test_create_from_file_rejects_parent_dir() {
             "Test failed: Path traversal check still active!"
         );
         // Other errors might happen (e.g. no DB found if we didn't mock it?
-        // Wait, create::execute tries to open storage.
+        // Wait, create::execute_with_storage tries to open storage.
         // We are in a temp dir. discover_beads_dir might fail or init new?
         // discover_beads_dir looks for .beads.
         // We didn't create .beads in temp_dir.

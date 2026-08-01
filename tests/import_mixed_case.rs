@@ -7,7 +7,7 @@
 use beads::model::{IssueType, Status};
 use beads::storage::SqliteStorage;
 use beads::sync::{ExportConfig, ImportConfig, export_to_jsonl, import_from_jsonl};
-use beads::util::ContentHashable;
+use beads::util::content_hash;
 use std::fs;
 use tempfile::TempDir;
 
@@ -180,7 +180,7 @@ fn import_mixed_case_content_hash_matches_canonical() {
     )
     .unwrap();
     let mixed_issues = storage.get_all_issues_for_export().unwrap();
-    let mixed_hash = mixed_issues[0].content_hash();
+    let mixed_hash = content_hash(&mixed_issues[0]);
 
     let (_temp2, beads_dir2, jsonl_path2, mut storage2) = setup();
     let jsonl_canonical = make_jsonl_issue("bd-hash1", "Hash stability", "in_progress", "bug");
@@ -193,7 +193,7 @@ fn import_mixed_case_content_hash_matches_canonical() {
     )
     .unwrap();
     let canonical_issues = storage2.get_all_issues_for_export().unwrap();
-    let canonical_hash = canonical_issues[0].content_hash();
+    let canonical_hash = content_hash(&canonical_issues[0]);
 
     assert_eq!(
         mixed_hash, canonical_hash,

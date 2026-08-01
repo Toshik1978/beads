@@ -71,7 +71,7 @@ fn test_collision_identical_content_different_labels() {
     // Compute hash (excludes labels)
     issue_a.content_hash = Some(issue_a.compute_content_hash());
     storage.create_issue(&issue_a, "setup").unwrap();
-    storage.add_label("bd-a", "label-a", "setup").unwrap();
+    storage.add_label("bd-a", "label-a").unwrap();
 
     // 2. Create Issue B in JSONL (Same content, different label, different ID)
     // Timestamp is NEWER to force update

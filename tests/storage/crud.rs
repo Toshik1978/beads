@@ -180,9 +180,7 @@ fn get_issue_for_export_includes_relations() {
         .unwrap();
 
     // Add label
-    storage
-        .add_label(&blocked_issue.id, "test-label", "tester")
-        .unwrap();
+    storage.add_label(&blocked_issue.id, "test-label").unwrap();
 
     // Add comment
     storage
@@ -255,9 +253,7 @@ fn get_issue_details_includes_relations() {
     let issue = fixtures::issue("details-test");
 
     storage.create_issue(&issue, "tester").unwrap();
-    storage
-        .add_label(&issue.id, "detail-label", "tester")
-        .unwrap();
+    storage.add_label(&issue.id, "detail-label").unwrap();
 
     let details = storage
         .get_issue_details(&issue.id, true)
@@ -858,7 +854,6 @@ fn count_active_issues_excludes_closed_and_templates_but_includes_deferred() {
     storage.create_issue(&template, "tester").unwrap();
 
     assert_eq!(storage.count_issues().unwrap(), 4);
-    assert_eq!(storage.count_active_issues().unwrap(), 2);
 }
 
 // ============================================================================

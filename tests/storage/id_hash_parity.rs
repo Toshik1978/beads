@@ -15,7 +15,7 @@ use beads::model::{Issue, IssueType, Priority, Status};
 use beads::util::id::{
     IdConfig, IdGenerator, compute_id_hash, generate_id_seed, is_valid_id_format, parse_id,
 };
-use beads::util::{ContentHashable, content_hash, content_hash_from_parts};
+use beads::util::{content_hash, content_hash_from_parts};
 
 // =============================================================================
 // ID GENERATION FIXTURES
@@ -681,7 +681,7 @@ fn content_hash_trait_implementation() {
         comments: vec![],
     };
 
-    let hash_trait = issue.content_hash();
+    let hash_trait = content_hash(&issue);
     let hash_direct = content_hash(&issue);
 
     assert_eq!(
@@ -690,17 +690,17 @@ fn content_hash_trait_implementation() {
     );
 
     // Verify ID doesn't affect content hash
-    let hash_before = issue.content_hash();
+    let hash_before = content_hash(&issue);
     issue.id = "bd-different".to_string();
-    let hash_after = issue.content_hash();
+    let hash_after = content_hash(&issue);
 
     assert_eq!(hash_before, hash_after, "ID should not affect content hash");
 
     // Verify timestamps don't affect content hash
-    let hash_t1 = issue.content_hash();
+    let hash_t1 = content_hash(&issue);
     issue.updated_at = Utc::now();
     issue.created_at = Utc::now();
-    let hash_t2 = issue.content_hash();
+    let hash_t2 = content_hash(&issue);
 
     assert_eq!(
         hash_t1, hash_t2,

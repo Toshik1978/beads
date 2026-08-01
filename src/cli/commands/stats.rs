@@ -39,21 +39,6 @@ pub fn execute(
     execute_inner(args, cli, outer_ctx, &beads_dir, None, None)
 }
 
-/// Execute stats using storage that was already opened by the caller.
-///
-/// # Errors
-///
-/// Returns an error if queries fail.
-pub fn execute_with_storage(
-    args: &StatsArgs,
-    cli: &config::CliOverrides,
-    outer_ctx: &OutputContext,
-    beads_dir: &Path,
-    storage: &SqliteStorage,
-) -> Result<()> {
-    execute_inner(args, cli, outer_ctx, beads_dir, Some(storage), None)
-}
-
 /// Execute stats using the caller's preopened storage context.
 ///
 /// # Errors
@@ -1918,12 +1903,12 @@ mod tests {
         storage.create_issue(&closed_issue, "tester").unwrap();
         storage.create_issue(&template_issue, "tester").unwrap();
 
-        storage.add_label("t-1", "backend", "tester").unwrap();
-        storage.add_label("t-1", "urgent", "tester").unwrap();
-        storage.add_label("t-2", "backend", "tester").unwrap();
-        storage.add_label("t-4", "backend", "tester").unwrap();
-        storage.add_label("t-5", "closed", "tester").unwrap();
-        storage.add_label("t-6", "template", "tester").unwrap();
+        storage.add_label("t-1", "backend").unwrap();
+        storage.add_label("t-1", "urgent").unwrap();
+        storage.add_label("t-2", "backend").unwrap();
+        storage.add_label("t-4", "backend").unwrap();
+        storage.add_label("t-5", "closed").unwrap();
+        storage.add_label("t-6", "template").unwrap();
         storage
             .delete_issue("t-4", "tester", "tombstone label count target", None)
             .unwrap();

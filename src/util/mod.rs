@@ -14,7 +14,7 @@ pub mod markdown_import;
 pub mod progress;
 pub mod time;
 
-pub use hash::{ContentHashable, content_hash, content_hash_from_parts, hex_encode};
+pub use hash::{content_hash, content_hash_from_parts, hex_encode};
 pub use id::{
     IdConfig, IdGenerator, IdResolver, ParsedId, ResolvedId, ResolverConfig, child_id,
     find_matching_ids, is_valid_id_format, normalize_id, parse_id,

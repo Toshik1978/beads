@@ -645,19 +645,6 @@ pub fn require_valid_sync_path(path: &Path, beads_dir: &Path) -> Result<()> {
     }
 }
 
-/// Checks if a path would be allowed for sync without logging.
-///
-/// This is useful for preflight checks where we want to validate paths
-/// before attempting operations.
-#[must_use]
-pub fn is_sync_path_allowed(path: &Path, beads_dir: &Path) -> bool {
-    let Some(normalized_path) = normalize_path_lexically(path) else {
-        return false;
-    };
-
-    validate_sync_path(&normalized_path, beads_dir).is_allowed()
-}
-
 /// Validates a path for sync operations with optional external path support.
 ///
 /// This is the main entry point for sync path validation. It enforces:
@@ -1282,18 +1269,22 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("traversal"));
     }
 
+    /// The wrapper these used to call (`is_sync_path_allowed`) normalised the
+    /// path and asked `validate_sync_path` whether it was allowed. Nothing in
+    /// `br` called it — the sync path runs `validate_sync_path_with_external`,
+    /// which normalises internally — so these now state the same facts against
+    /// the validator itself.
+    fn allowed(path: &Path, beads_dir: &Path) -> bool {
+        normalize_path_lexically(path)
+            .is_some_and(|normalized| validate_sync_path(&normalized, beads_dir).is_allowed())
+    }
+
     #[test]
     fn test_is_sync_path_allowed_quick_check() {
         let (_temp, beads_dir) = setup_test_beads_dir();
 
-        assert!(is_sync_path_allowed(
-            &beads_dir.join("issues.jsonl"),
-            &beads_dir
-        ));
-        assert!(!is_sync_path_allowed(
-            &beads_dir.join("../evil.jsonl"),
-            &beads_dir
-        ));
+        assert!(allowed(&beads_dir.join("issues.jsonl"), &beads_dir));
+        assert!(!allowed(&beads_dir.join("../evil.jsonl"), &beads_dir));
     }
 
     #[test]
@@ -1302,7 +1293,7 @@ mod tests {
         let subdir = temp.path().join("subdir");
         std::fs::create_dir_all(&subdir).expect("create subdir");
 
-        assert!(is_sync_path_allowed(
+        assert!(allowed(
             &subdir.join("..").join(".beads").join("issues.jsonl"),
             &beads_dir
         ));

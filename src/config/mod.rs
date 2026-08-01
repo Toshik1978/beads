@@ -2796,14 +2796,6 @@ fn open_storage_with_cli_impl(
 pub fn open_storage_with_cli(beads_dir: &Path, cli: &CliOverrides) -> Result<OpenStorageResult> {
     open_storage_with_cli_impl(beads_dir, cli, false)
 }
-
-pub fn open_storage_with_cli_deferred_jsonl_recovery(
-    beads_dir: &Path,
-    cli: &CliOverrides,
-) -> Result<OpenStorageResult> {
-    open_storage_with_cli_impl(beads_dir, cli, true)
-}
-
 #[must_use]
 pub fn no_db_from_layer(layer: &ConfigLayer) -> Option<bool> {
     get_startup_value(layer, &["no-db", "no_db", "no.db"]).and_then(|value| parse_bool(value))
@@ -6504,7 +6496,7 @@ routing:
         write_single_issue_jsonl(&jsonl_path, "bd-import", "Deferred import payload");
 
         let mut storage_ctx =
-            open_storage_with_cli_deferred_jsonl_recovery(&beads_dir, &CliOverrides::default())
+            open_storage_with_cli_impl(&beads_dir, &CliOverrides::default(), true)
                 .expect("storage");
 
         assert!(
@@ -6549,7 +6541,7 @@ routing:
         write_single_issue_jsonl(&jsonl_path, "bd-import", "Deferred import payload");
 
         let mut storage_ctx =
-            open_storage_with_cli_deferred_jsonl_recovery(&beads_dir, &CliOverrides::default())
+            open_storage_with_cli_impl(&beads_dir, &CliOverrides::default(), true)
                 .expect("storage");
 
         assert!(
@@ -7455,7 +7447,7 @@ routing:
         let mut storage_ctx = open_storage_with_cli(&beads_dir, &cli).expect("storage");
         storage_ctx
             .storage
-            .purge_issue("bd-purge", "tester")
+            .purge_issue("bd-purge")
             .expect("purge issue");
 
         assert_eq!(
@@ -7870,9 +7862,8 @@ routing:
             "Deferred symlink recovery payload",
         );
 
-        let err =
-            open_storage_with_cli_deferred_jsonl_recovery(&beads_dir, &CliOverrides::default())
-                .expect_err("deferred recovery should refuse");
+        let err = open_storage_with_cli_impl(&beads_dir, &CliOverrides::default(), true)
+            .expect_err("deferred recovery should refuse");
 
         assert!(
             err.to_string().contains(SYMLINKED_DB_RECOVERY_ERROR_PREFIX),

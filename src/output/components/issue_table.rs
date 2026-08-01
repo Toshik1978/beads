@@ -39,17 +39,6 @@ pub struct IssueTableColumns {
 
 impl IssueTableColumns {
     #[must_use]
-    pub fn compact() -> Self {
-        Self {
-            id: true,
-            priority: true,
-            issue_type: true,
-            title: true,
-            ..Default::default()
-        }
-    }
-
-    #[must_use]
     pub fn standard() -> Self {
         Self {
             id: true,
@@ -59,22 +48,6 @@ impl IssueTableColumns {
             title: true,
             assignee: true,
             ..Default::default()
-        }
-    }
-
-    #[must_use]
-    pub fn full() -> Self {
-        Self {
-            id: true,
-            priority: true,
-            status: true,
-            issue_type: true,
-            title: true,
-            assignee: true,
-            labels: true,
-            created: true,
-            updated: true,
-            context: false,
         }
     }
 }

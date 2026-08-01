@@ -94,51 +94,6 @@ pub fn parse_flexible_timestamp(s: &str, field_name: &str) -> Result<DateTime<Ut
     }
 }
 
-/// Parse a relative time expression into a `DateTime<Utc>`.
-///
-/// Supports:
-/// - Relative duration: `+1h`, `+2d`, `+1w`, `+30m`, `-7d`
-/// - Keywords: `today`, `yesterday`, `tomorrow`, `next-week`
-///
-/// Returns `None` if the input cannot be parsed as a relative time.
-#[must_use]
-pub fn parse_relative_time(s: &str) -> Option<DateTime<Utc>> {
-    let s = s.trim();
-
-    if let Ok(Some(dt)) = parse_relative_timestamp(s) {
-        return Some(dt);
-    }
-
-    // Try keywords
-    let now = Local::now();
-    match s.to_lowercase().as_str() {
-        "today" => {
-            let time = NaiveTime::from_hms_opt(17, 0, 0)?;
-            let naive_dt = now.date_naive().and_time(time);
-            local_to_utc_opt(&naive_dt)
-        }
-        "yesterday" => {
-            let yesterday = now.date_naive() - Duration::days(1);
-            let time = NaiveTime::from_hms_opt(9, 0, 0)?;
-            let naive_dt = yesterday.and_time(time);
-            local_to_utc_opt(&naive_dt)
-        }
-        "tomorrow" => {
-            let tomorrow = now.date_naive() + Duration::days(1);
-            let time = NaiveTime::from_hms_opt(9, 0, 0)?;
-            let naive_dt = tomorrow.and_time(time);
-            local_to_utc_opt(&naive_dt)
-        }
-        "next-week" | "nextweek" => {
-            let next_week = now.date_naive() + Duration::weeks(1);
-            let time = NaiveTime::from_hms_opt(9, 0, 0)?;
-            let naive_dt = next_week.and_time(time);
-            local_to_utc_opt(&naive_dt)
-        }
-        _ => None,
-    }
-}
-
 fn parse_rfc3339_timestamp(s: &str) -> Option<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.with_timezone(&Utc));
@@ -317,25 +272,17 @@ fn local_to_utc(naive_dt: &chrono::NaiveDateTime, field_name: &str) -> Result<Da
         }
     }
 }
-
-fn local_to_utc_opt(naive_dt: &chrono::NaiveDateTime) -> Option<DateTime<Utc>> {
-    use chrono::LocalResult;
-    match Local.from_local_datetime(naive_dt) {
-        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => Some(dt.with_timezone(&Utc)),
-        LocalResult::None => {
-            let shifted = *naive_dt + Duration::hours(1);
-            match Local.from_local_datetime(&shifted) {
-                LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => {
-                    Some(dt.with_timezone(&Utc))
-                }
-                LocalResult::None => None,
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+
+    /// `parse_relative_timestamp` is the live relative-duration parser, reached
+    /// from `parse_flexible_timestamp`. These tests used to drive a
+    /// `parse_relative_time` wrapper that flattened its two failure modes into
+    /// `None` and additionally accepted `today`/`tomorrow`/`next-week`, which no
+    /// command ever offered.
+    fn parse_relative_time(s: &str) -> Option<DateTime<Utc>> {
+        parse_relative_timestamp(s).ok().flatten()
+    }
     use super::*;
     use chrono::Datelike;
 

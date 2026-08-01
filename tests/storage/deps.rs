@@ -145,9 +145,7 @@ fn remove_dependency_removes_link() {
         )
         .unwrap();
 
-    let removed = storage
-        .remove_dependency(&blocked.id, &blocker.id, "tester")
-        .unwrap();
+    let removed = storage.remove_dependency(&blocked.id, &blocker.id).unwrap();
     assert!(removed);
 
     let deps = storage.get_dependencies(&blocked.id).unwrap();
@@ -165,9 +163,7 @@ fn remove_dependency_nonexistent_returns_false() {
     storage.create_issue(&issue2, "tester").unwrap();
 
     // No dependency exists
-    let removed = storage
-        .remove_dependency(&issue1.id, &issue2.id, "tester")
-        .unwrap();
+    let removed = storage.remove_dependency(&issue1.id, &issue2.id).unwrap();
     assert!(!removed);
 }
 
@@ -195,9 +191,7 @@ fn remove_dependency_marks_dirty() {
     storage.clear_dirty_flags(&ids).unwrap();
 
     // Remove dependency
-    storage
-        .remove_dependency(&blocked.id, &blocker.id, "tester")
-        .unwrap();
+    storage.remove_dependency(&blocked.id, &blocker.id).unwrap();
 
     let dirty_ids = storage.get_dirty_issue_ids().unwrap();
     assert!(dirty_ids.contains(&blocked.id));
@@ -961,9 +955,7 @@ fn blocked_cache_invalidated_on_remove_dependency() {
     assert!(before_blocked.contains(&blocked.id));
 
     // Remove dependency - cache should be invalidated
-    storage
-        .remove_dependency(&blocked.id, &blocker.id, "tester")
-        .unwrap();
+    storage.remove_dependency(&blocked.id, &blocker.id).unwrap();
 
     // After removing, blocked should not be in cache
     let after_blocked = blocked_ids_for(&storage);
@@ -1053,7 +1045,7 @@ fn remove_all_dependencies_clears_all() {
         .unwrap();
 
     // Remove all dependencies for main
-    let count = storage.remove_all_dependencies(&main.id, "tester").unwrap();
+    let count = storage.remove_all_dependencies(&main.id).unwrap();
     assert!(count >= 2); // At least the outgoing deps
 
     // main should have no outgoing deps
@@ -1264,7 +1256,7 @@ fn test_dep_remove_parent_allows_subsequent_add() {
 
     // Remove
     storage
-        .remove_dependency(&child.id, &parent_a.id, "tester")
+        .remove_dependency(&child.id, &parent_a.id)
         .expect("remove must succeed");
 
     let deps = storage.get_dependencies(&child.id).unwrap();

@@ -9,7 +9,7 @@ fn test_parse_flexible_timestamp_panic_on_multibyte() {
 #[test]
 fn test_parse_relative_time_panic_on_multibyte() {
     let input = "+10🚀";
-    let result = beads::util::time::parse_relative_time(input);
-    // Should return None, not panic
-    assert!(result.is_none());
+    let result = beads::util::time::parse_flexible_timestamp(input, "test-field");
+    // Should return an error, not panic
+    assert!(result.is_err());
 }

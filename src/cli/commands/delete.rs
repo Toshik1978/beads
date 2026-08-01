@@ -279,7 +279,7 @@ pub fn execute(
                 !batch_has_mutated,
                 "delete remove dependencies",
                 Some(id.as_str()),
-                |storage| storage.remove_all_dependencies(id, &actor),
+                |storage| storage.remove_all_dependencies(id),
             )?;
             result.dependencies_removed += deps_removed;
             if deps_removed > 0 {
@@ -304,7 +304,7 @@ pub fn execute(
                     !batch_has_mutated,
                     "delete purge",
                     Some(id.as_str()),
-                    |storage| storage.purge_issue(id, &actor),
+                    |storage| storage.purge_issue(id),
                 )?;
             } else {
                 retry_mutation_with_jsonl_recovery(
@@ -379,8 +379,6 @@ fn purge_all_tombstones(
 ) -> Result<()> {
     let mut storage_ctx = config::open_storage_with_cli(beads_dir, cli)?;
     auto_import_storage_ctx_if_stale(&mut storage_ctx, cli)?;
-    let config_layer = storage_ctx.load_config(cli)?;
-    let actor = config::resolve_actor(&config_layer);
 
     let tombstone_ids = storage_ctx.storage.list_tombstone_ids()?;
 
@@ -416,7 +414,7 @@ fn purge_all_tombstones(
             !batch_has_mutated,
             "delete purge",
             Some(id.as_str()),
-            |storage| storage.purge_issue(id, &actor),
+            |storage| storage.purge_issue(id),
         )?;
         batch_has_mutated = true;
         result.deleted.push(id.clone());
@@ -647,7 +645,7 @@ fn apply_delete_route(
             !batch_has_mutated,
             "delete remove dependencies",
             Some(id.as_str()),
-            |storage| storage.remove_all_dependencies(id, &actor),
+            |storage| storage.remove_all_dependencies(id),
         )?;
         result.dependencies_removed += deps_removed;
         if deps_removed > 0 {
@@ -667,7 +665,7 @@ fn apply_delete_route(
                 !batch_has_mutated,
                 "delete purge",
                 Some(id.as_str()),
-                |storage| storage.purge_issue(id, &actor),
+                |storage| storage.purge_issue(id),
             )?;
         } else {
             retry_mutation_with_jsonl_recovery(
@@ -1288,7 +1286,7 @@ mod tests {
 
         // Add dependencies
         storage
-            .mutate("test_add_deps", "tester", |tx, _ctx| {
+            .mutate("test_add_deps", |tx, _ctx| {
                 tx.execute_with_params(
                     "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, ?, ?)",
                     &[SqliteValue::from("bd-b"), SqliteValue::from("bd-a"), SqliteValue::from("blocks"), SqliteValue::from(chrono::Utc::now().to_rfc3339().as_str())],
@@ -1324,7 +1322,7 @@ mod tests {
         storage.create_issue(&c, "tester").unwrap();
 
         storage
-            .mutate("test_add_direct_deps", "tester", |tx, _ctx| {
+            .mutate("test_add_direct_deps", |tx, _ctx| {
                 tx.execute_with_params(
                     "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, ?, ?)",
                     &[SqliteValue::from("bd-b"), SqliteValue::from("bd-a"), SqliteValue::from("blocks"), SqliteValue::from(chrono::Utc::now().to_rfc3339().as_str())],
@@ -1357,7 +1355,7 @@ mod tests {
         storage.create_issue(&c, "tester").unwrap();
 
         storage
-            .mutate("test_add_transitive_deps", "tester", |tx, _ctx| {
+            .mutate("test_add_transitive_deps", |tx, _ctx| {
                 tx.execute_with_params(
                     "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, ?, ?)",
                     &[SqliteValue::from("bd-b"), SqliteValue::from("bd-a"), SqliteValue::from("blocks"), SqliteValue::from(chrono::Utc::now().to_rfc3339().as_str())],
@@ -1393,7 +1391,7 @@ mod tests {
         storage.create_issue(&d, "tester").unwrap();
 
         storage
-            .mutate("test_add_chain_deps", "tester", |tx, _ctx| {
+            .mutate("test_add_chain_deps", |tx, _ctx| {
                 tx.execute_with_params(
                     "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, ?, ?)",
                     &[SqliteValue::from("bd-b"), SqliteValue::from("bd-a"), SqliteValue::from("blocks"), SqliteValue::from(chrono::Utc::now().to_rfc3339().as_str())],

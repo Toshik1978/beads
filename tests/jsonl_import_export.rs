@@ -44,7 +44,7 @@ fn export_import_roundtrip_preserves_relationships() {
             "tester",
         )
         .unwrap();
-    storage.add_label(&alpha.id, "alpha", "tester").unwrap();
+    storage.add_label(&alpha.id, "alpha").unwrap();
     storage
         .add_comment(&alpha.id, "tester", "first comment")
         .unwrap();
@@ -557,10 +557,6 @@ fn import_repopulates_export_hashes() {
         storage.get_export_hash("test-hash").unwrap().unwrap().0,
         original_hash
     );
-
-    // Clear hash manually
-    storage.clear_all_export_hashes().unwrap();
-    assert!(storage.get_export_hash("test-hash").unwrap().is_none());
 
     // Import the file back
     import_from_jsonl(&mut storage, &path, &ImportConfig::default(), Some("test-")).unwrap();

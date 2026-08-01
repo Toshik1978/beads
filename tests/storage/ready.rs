@@ -248,8 +248,8 @@ fn ready_filter_by_labels_and_single() {
     storage.create_issue(&issue2, "tester").unwrap();
     storage.create_issue(&issue3, "tester").unwrap();
 
-    storage.add_label(&issue1.id, "backend", "tester").unwrap();
-    storage.add_label(&issue2.id, "frontend", "tester").unwrap();
+    storage.add_label(&issue1.id, "backend").unwrap();
+    storage.add_label(&issue2.id, "frontend").unwrap();
 
     let filters = ReadyFilters {
         labels_and: vec!["backend".to_string()],
@@ -273,10 +273,10 @@ fn ready_filter_by_labels_and_multiple() {
     storage.create_issue(&issue2, "tester").unwrap();
     storage.create_issue(&issue3, "tester").unwrap();
 
-    storage.add_label(&issue1.id, "backend", "tester").unwrap();
-    storage.add_label(&issue1.id, "urgent", "tester").unwrap();
-    storage.add_label(&issue2.id, "backend", "tester").unwrap();
-    storage.add_label(&issue3.id, "urgent", "tester").unwrap();
+    storage.add_label(&issue1.id, "backend").unwrap();
+    storage.add_label(&issue1.id, "urgent").unwrap();
+    storage.add_label(&issue2.id, "backend").unwrap();
+    storage.add_label(&issue3.id, "urgent").unwrap();
 
     // AND logic: must have both labels
     let filters = ReadyFilters {
@@ -301,8 +301,8 @@ fn ready_filter_by_labels_or() {
     storage.create_issue(&issue2, "tester").unwrap();
     storage.create_issue(&issue3, "tester").unwrap();
 
-    storage.add_label(&issue1.id, "backend", "tester").unwrap();
-    storage.add_label(&issue2.id, "frontend", "tester").unwrap();
+    storage.add_label(&issue1.id, "backend").unwrap();
+    storage.add_label(&issue2.id, "frontend").unwrap();
 
     // OR logic: has any of the labels
     let filters = ReadyFilters {
@@ -556,15 +556,9 @@ fn ready_combined_priority_and_label_filter() {
     storage.create_issue(&p0_frontend, "tester").unwrap();
     storage.create_issue(&p2_backend, "tester").unwrap();
 
-    storage
-        .add_label(&p0_backend.id, "backend", "tester")
-        .unwrap();
-    storage
-        .add_label(&p0_frontend.id, "frontend", "tester")
-        .unwrap();
-    storage
-        .add_label(&p2_backend.id, "backend", "tester")
-        .unwrap();
+    storage.add_label(&p0_backend.id, "backend").unwrap();
+    storage.add_label(&p0_frontend.id, "frontend").unwrap();
+    storage.add_label(&p2_backend.id, "backend").unwrap();
 
     let filters = ReadyFilters {
         priorities: Some(vec![Priority::CRITICAL]),

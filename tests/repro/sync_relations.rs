@@ -42,7 +42,7 @@ fn test_relation_updates_bump_timestamp_and_sync() {
     // Check timestamp before
     let before_update = source_db.get_issue(&issue.id).unwrap().unwrap().updated_at;
 
-    source_db.add_label(&issue.id, "bug", "tester").unwrap();
+    source_db.add_label(&issue.id, "bug").unwrap();
 
     // Check timestamp after
     let after_update = source_db.get_issue(&issue.id).unwrap().unwrap().updated_at;

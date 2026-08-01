@@ -102,7 +102,6 @@ fn evaluate_close_policy(
     issue_id: &str,
     issue: &Issue,
     args: &CloseArgs,
-    close_actor: &str,
 ) -> Result<EvaluatedGates> {
     let evidence = CloseEvidence {
         issue_id,
@@ -111,7 +110,6 @@ fn evaluate_close_policy(
         design: issue.design.as_deref(),
         acceptance_criteria: issue.acceptance_criteria.as_deref(),
         notes: issue.notes.as_deref(),
-        close_actor,
     };
 
     let mut violations = close_policy::evaluate(policy, &evidence);
@@ -511,25 +509,6 @@ fn compute_batch_closable_ids(
     closable
 }
 
-/// Execute the close command.
-///
-/// # Errors
-///
-/// Returns an error if database operations fail or IDs cannot be resolved.
-pub fn execute(
-    ids: Vec<String>,
-    json: bool,
-    cli: &config::CliOverrides,
-    ctx: &OutputContext,
-) -> Result<()> {
-    let args = CloseArgs {
-        ids,
-        ..CloseArgs::default()
-    };
-
-    execute_with_args(&args, json, cli, ctx)
-}
-
 /// Execute the close command with full arguments.
 ///
 /// # Errors
@@ -922,7 +901,6 @@ fn execute_route(
                 id,
                 issue,
                 args,
-                &actor,
             )?;
             if !evaluated_gates.violations.is_empty() && !args.bypass_policy {
                 let summary = summarize_violations(&evaluated_gates.violations);

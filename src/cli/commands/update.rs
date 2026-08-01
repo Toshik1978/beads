@@ -561,7 +561,7 @@ fn execute_prepared_route(
                 !route_has_mutated,
                 "update label add",
                 Some(id.as_str()),
-                |storage| storage.add_label(id, label, &prepared.actor),
+                |storage| storage.add_label(id, label),
             );
             preserve_blocked_cache_on_error(
                 &mut prepared.storage_ctx.storage,
@@ -577,7 +577,7 @@ fn execute_prepared_route(
                 !route_has_mutated,
                 "update label remove",
                 Some(id.as_str()),
-                |storage| storage.remove_label(id, label, &prepared.actor),
+                |storage| storage.remove_label(id, label),
             );
             preserve_blocked_cache_on_error(
                 &mut prepared.storage_ctx.storage,
@@ -593,7 +593,7 @@ fn execute_prepared_route(
                 !route_has_mutated,
                 "update label set",
                 Some(id.as_str()),
-                |storage| storage.set_labels(id, &prepared.valid_set_labels, &prepared.actor),
+                |storage| storage.set_labels(id, &prepared.valid_set_labels),
             );
             preserve_blocked_cache_on_error(
                 &mut prepared.storage_ctx.storage,
@@ -715,7 +715,6 @@ fn execute_bulk_label_only_route(
     ctx: &OutputContext,
 ) -> Result<UpdateRouteOutput> {
     let resolved_ids = prepared.resolved_ids.clone();
-    let actor = prepared.actor.clone();
     let add_labels = prepared.add_labels.clone();
     let remove_labels = prepared.remove_labels.clone();
     let mut route_has_mutated = false;
@@ -726,7 +725,7 @@ fn execute_bulk_label_only_route(
             !route_has_mutated,
             "bulk update label add",
             None,
-            |storage| storage.add_label_to_issues_bulk(&resolved_ids, &label, &actor),
+            |storage| storage.add_label_to_issues_bulk(&resolved_ids, &label),
         );
         let _changed_ids = preserve_blocked_cache_on_error(
             &mut prepared.storage_ctx.storage,
@@ -743,7 +742,7 @@ fn execute_bulk_label_only_route(
             !route_has_mutated,
             "bulk update label remove",
             None,
-            |storage| storage.remove_label_from_issues_bulk(&resolved_ids, &label, &actor),
+            |storage| storage.remove_label_from_issues_bulk(&resolved_ids, &label),
         );
         let _changed_ids = preserve_blocked_cache_on_error(
             &mut prepared.storage_ctx.storage,
@@ -2168,7 +2167,7 @@ mod tests {
                 .expect("create issue");
             storage_ctx
                 .storage
-                .add_label(id, "bulk-route-remove", "tester")
+                .add_label(id, "bulk-route-remove")
                 .expect("add label");
         }
         storage_ctx

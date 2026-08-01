@@ -117,12 +117,10 @@ fn execute_dep_remove(
     let config_layer = storage_ctx.load_config(&route_cli)?;
     let id_config = config::id_config_from_layer(&config_layer);
     let resolver = IdResolver::new(ResolverConfig::with_prefix(id_config.prefix));
-    let actor = config::resolve_actor(&config_layer);
     dep_remove(
         args,
         &mut storage_ctx,
         &resolver,
-        &actor,
         ctx,
         local_beads_dir,
         auto_flush_external,
@@ -696,7 +694,6 @@ fn dep_remove(
     args: &DepRemoveArgs,
     storage_ctx: &mut config::OpenStorageResult,
     resolver: &IdResolver,
-    actor: &str,
     ctx: &OutputContext,
     local_beads_dir: &Path,
     auto_flush_external: bool,
@@ -717,7 +714,7 @@ fn dep_remove(
         true,
         "dep remove",
         Some(issue_id.as_str()),
-        |storage| storage.remove_dependency(&issue_id, &depends_on_id, actor),
+        |storage| storage.remove_dependency(&issue_id, &depends_on_id),
     )?;
 
     finalize_dep_mutation(storage_ctx, removed, "dep remove")?;
@@ -2244,15 +2241,11 @@ mod tests {
             .add_dependency("bd-001", "bd-002", "blocks", "tester")
             .unwrap();
 
-        let removed = storage
-            .remove_dependency("bd-001", "bd-002", "tester")
-            .unwrap();
+        let removed = storage.remove_dependency("bd-001", "bd-002").unwrap();
         assert!(removed);
 
         // Removing again should return false
-        let removed_again = storage
-            .remove_dependency("bd-001", "bd-002", "tester")
-            .unwrap();
+        let removed_again = storage.remove_dependency("bd-001", "bd-002").unwrap();
         assert!(!removed_again);
         info!("test_remove_dependency: assertions passed");
     }

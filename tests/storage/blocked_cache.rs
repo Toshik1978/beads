@@ -355,9 +355,7 @@ fn remove_all_dependencies_clears_cache() {
 
     assert!(blocked_ids(&storage).contains(&target.id));
 
-    storage
-        .remove_all_dependencies(&target.id, "tester")
-        .unwrap();
+    storage.remove_all_dependencies(&target.id).unwrap();
 
     assert!(
         !blocked_ids(&storage).contains(&target.id),
@@ -447,9 +445,7 @@ fn remove_parent_unblocks_child() {
     );
 
     // Remove parent-child link
-    storage
-        .remove_dependency(&child.id, &parent.id, "tester")
-        .unwrap();
+    storage.remove_dependency(&child.id, &parent.id).unwrap();
 
     assert!(
         !blocked_ids(&storage).contains(&child.id),

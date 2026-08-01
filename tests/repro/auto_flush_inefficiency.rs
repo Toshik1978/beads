@@ -107,7 +107,7 @@ fn test_auto_flush_flush_on_label_change() {
     assert!(result.flushed);
 
     // 3. Add a label
-    storage.add_label("bd-1", "bug", "tester").unwrap();
+    storage.add_label("bd-1", "bug").unwrap();
 
     // Verify dirty
     let dirty_ids = storage.get_dirty_issue_ids().unwrap();

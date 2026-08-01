@@ -107,7 +107,8 @@
 //! `rusqlite::Connection::prepare` rejects a trailing statement with
 //! `Error::MultipleStatement`, which this module surfaces as
 //! [`DbError::Internal`] rather than silently running only the first one.
-//! Use [`Connection::execute_batch`] for multi-statement SQL.
+//! Use `schema::execute_batch` for multi-statement SQL: it splits the
+//! script and runs each statement, reporting the one that failed.
 //!
 //! ## Which recovery-triggering errors real SQLite can actually produce
 //!
@@ -418,7 +419,7 @@ fn map_error(err: &rusqlite::Error, path: &str) -> DbError {
         }
         rusqlite::Error::MultipleStatement => {
             return DbError::Internal(
-                "multiple statements provided to execute; use execute_batch".to_string(),
+                "multiple statements provided to execute; use schema::execute_batch".to_string(),
             );
         }
         rusqlite::Error::ExecuteReturnedResults => {
@@ -512,23 +513,6 @@ impl SqliteValue {
             Self::Integer(i) => Some(*i),
             _ => None,
         }
-    }
-
-    /// Extract a float value. Strict, like the accessors above.
-    #[inline]
-    #[must_use]
-    pub const fn as_float(&self) -> Option<f64> {
-        match self {
-            Self::Float(f) => Some(*f),
-            _ => None,
-        }
-    }
-
-    /// Returns `true` for [`SqliteValue::Null`].
-    #[inline]
-    #[must_use]
-    pub const fn is_null(&self) -> bool {
-        matches!(self, Self::Null)
     }
 
     /// Build a value from a borrowed `rusqlite` value, one storage class to
@@ -812,12 +796,6 @@ impl Connection {
         Ok(())
     }
 
-    /// The path this connection was opened with.
-    #[must_use]
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
     /// Close the connection, reporting any error SQLite raises while doing so.
     pub fn close(mut self) -> Result<()> {
         let path = self.path.clone();
@@ -860,15 +838,6 @@ impl Connection {
         let conn = self.handle()?;
         let mut stmt = conn.prepare(sql).map_err(|e| map_error(&e, &self.path))?;
         run_statement(conn, &mut stmt, params, &self.path)
-    }
-
-    /// Run several `;`-separated statements for their effect.
-    ///
-    /// Required because [`Connection::execute`] handles exactly one statement.
-    pub fn execute_batch(&self, sql: &str) -> Result<()> {
-        self.handle()?
-            .execute_batch(sql)
-            .map_err(|e| map_error(&e, &self.path))
     }
 
     /// Run a query, materializing every row.
@@ -936,71 +905,11 @@ impl std::fmt::Debug for PreparedStatement<'_> {
 }
 
 impl PreparedStatement<'_> {
-    /// Run the statement as a query, materializing every row.
-    pub fn query(&self) -> Result<Vec<Row>> {
-        self.query_with_params(&[])
-    }
-
-    /// [`PreparedStatement::query`] with positional parameters.
+    /// Run the statement as a query with positional parameters,
+    /// materializing every row.
     pub fn query_with_params(&self, params: &[SqliteValue]) -> Result<Vec<Row>> {
         let mut stmt = self.stmt.borrow_mut();
         collect_rows(&mut stmt, params, &self.conn.path)
-    }
-
-    /// Run the statement expecting exactly one row.
-    pub fn query_row(&self) -> Result<Row> {
-        self.query().and_then(exactly_one_row)
-    }
-
-    /// [`PreparedStatement::query_row`] with positional parameters.
-    pub fn query_row_with_params(&self, params: &[SqliteValue]) -> Result<Row> {
-        self.query_with_params(params).and_then(exactly_one_row)
-    }
-
-    /// Run the statement for its effect. Same count semantics as
-    /// [`Connection::execute`].
-    pub fn execute(&self) -> Result<usize> {
-        self.execute_with_params(&[])
-    }
-
-    /// [`PreparedStatement::execute`] with positional parameters.
-    pub fn execute_with_params(&self, params: &[SqliteValue]) -> Result<usize> {
-        let conn = self.conn.handle()?;
-        let mut stmt = self.stmt.borrow_mut();
-        run_statement(conn, &mut stmt, params, &self.conn.path)
-    }
-
-    /// The query plan as SQLite's `EXPLAIN` reports it, one opcode per line.
-    ///
-    /// Parity shim for a diagnostic in `src/storage/sqlite.rs`; returns an
-    /// empty string if the statement cannot be explained. Any bind parameters
-    /// in the statement are bound to NULL, since `EXPLAIN` only needs the
-    /// plan, not the values.
-    #[must_use]
-    pub fn explain(&self) -> String {
-        let placeholders = vec![SqliteValue::Null; self.stmt.borrow().parameter_count()];
-        let Ok(rows) = self
-            .conn
-            .query_with_params(&format!("EXPLAIN {}", self.sql), &placeholders)
-        else {
-            return String::new();
-        };
-        rows.iter()
-            .map(|row| {
-                row.values()
-                    .iter()
-                    .map(|value| match value {
-                        SqliteValue::Null => "NULL".to_string(),
-                        SqliteValue::Integer(i) => i.to_string(),
-                        SqliteValue::Float(f) => f.to_string(),
-                        SqliteValue::Text(s) => s.to_string(),
-                        SqliteValue::Blob(b) => format!("<{} bytes>", b.len()),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
 
@@ -1030,18 +939,6 @@ pub mod compat {
         pub const SQLITE_OPEN_URI: Self = Self(0x40);
         /// Use full mutex protection.
         pub const SQLITE_OPEN_FULL_MUTEX: Self = Self(0x0001_0000);
-
-        /// `READ_WRITE | CREATE`.
-        #[must_use]
-        pub const fn default_flags() -> Self {
-            Self(Self::SQLITE_OPEN_READ_WRITE.0 | Self::SQLITE_OPEN_CREATE.0)
-        }
-
-        /// Combine two flag sets.
-        #[must_use]
-        pub const fn union(self, other: Self) -> Self {
-            Self(self.0 | other.0)
-        }
 
         /// Whether every bit of `flag` is set.
         #[must_use]
@@ -1287,7 +1184,6 @@ mod tests {
             .expect("insert");
         let row = s.conn.query_row("SELECT x FROM n").expect("select");
         assert_eq!(row.get(0), Some(&SqliteValue::Null));
-        assert!(row.get(0).expect("column").is_null());
         assert_eq!(row.get(0).and_then(SqliteValue::as_text), None);
     }
 
@@ -1588,9 +1484,8 @@ mod tests {
                 .query_row("SELECT 1 FROM sqlite_schema WHERE name = 'm1'"),
             Err(DbError::QueryReturnedNoRows)
         ));
-        // execute_batch is the supported route.
-        s.conn
-            .execute_batch("CREATE TABLE m1 (x); CREATE TABLE m2 (x)")
+        // `schema::execute_batch` is the supported route.
+        crate::storage::schema::execute_batch(&s.conn, "CREATE TABLE m1 (x); CREATE TABLE m2 (x)")
             .expect("batch");
         assert_eq!(
             s.conn
@@ -2176,29 +2071,19 @@ mod tests {
         assert_eq!(seen, vec![2, 1, 2], "a prepared statement must be reusable");
 
         let one = stmt
-            .query_row_with_params(&[SqliteValue::from("b")])
-            .expect("query_row");
-        assert_eq!(one.get(0).and_then(SqliteValue::as_integer), Some(2));
-
-        let none = stmt.query_row_with_params(&[SqliteValue::from("zz")]);
-        assert!(matches!(none, Err(DbError::QueryReturnedNoRows)));
-
-        let update = s
-            .conn
-            .prepare("UPDATE t SET v = v + 10 WHERE k = ?")
-            .expect("prepare");
+            .query_with_params(&[SqliteValue::from("b")])
+            .expect("query");
         assert_eq!(
-            update
-                .execute_with_params(&[SqliteValue::from("a")])
-                .expect("execute"),
-            2,
-            "a prepared DML statement must report affected rows"
+            one.first()
+                .and_then(|r| r.get(0))
+                .and_then(SqliteValue::as_integer),
+            Some(2)
         );
 
-        assert!(
-            !stmt.explain().is_empty(),
-            "explain() must produce a plan listing"
-        );
+        let none = stmt
+            .query_with_params(&[SqliteValue::from("zz")])
+            .expect("query");
+        assert!(none.is_empty());
     }
 
     // -- open flags ---------------------------------------------------------
@@ -2240,16 +2125,6 @@ mod tests {
             matches!(err, DbError::CannotOpen { .. }),
             "unexpected error: {err:?}"
         );
-    }
-
-    #[test]
-    fn open_flag_helpers_behave_like_a_bitmask() {
-        let default = OpenFlags::default_flags();
-        assert!(default.contains(OpenFlags::SQLITE_OPEN_READ_WRITE));
-        assert!(default.contains(OpenFlags::SQLITE_OPEN_CREATE));
-        assert!(!default.contains(OpenFlags::SQLITE_OPEN_READ_ONLY));
-        let combined = OpenFlags::SQLITE_OPEN_READ_WRITE.union(OpenFlags::SQLITE_OPEN_CREATE);
-        assert_eq!(combined, default);
     }
 
     // -- close --------------------------------------------------------------

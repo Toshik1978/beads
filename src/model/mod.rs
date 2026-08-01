@@ -118,12 +118,6 @@ impl Status {
     pub const fn is_active(&self) -> bool {
         matches!(self, Self::Open | Self::InProgress)
     }
-
-    /// Returns true if the issue is in draft state (not yet ready for execution).
-    #[must_use]
-    pub const fn is_draft(&self) -> bool {
-        matches!(self, Self::Draft)
-    }
 }
 
 impl fmt::Display for Status {
@@ -237,13 +231,6 @@ impl IssueType {
             Self::Custom(value) => value,
         }
     }
-
-    /// Returns true if this is a standard (non-custom) issue type.
-    /// Used for bd conformance validation in CLI commands.
-    #[must_use]
-    pub const fn is_standard(&self) -> bool {
-        !matches!(self, Self::Custom(_))
-    }
 }
 
 impl fmt::Display for IssueType {
@@ -317,14 +304,6 @@ impl DependencyType {
             Self::CausedBy => "caused-by",
             Self::Custom(value) => value,
         }
-    }
-
-    #[must_use]
-    pub const fn affects_ready_work(&self) -> bool {
-        matches!(
-            self,
-            Self::Blocks | Self::ParentChild | Self::ConditionalBlocks | Self::WaitsFor
-        )
     }
 
     #[must_use]
@@ -850,13 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn dependency_type_affects_ready_work() {
-        assert!(DependencyType::Blocks.affects_ready_work());
-        assert!(DependencyType::ParentChild.affects_ready_work());
-        assert!(!DependencyType::Related.affects_ready_work());
-    }
-
-    #[test]
     fn test_issue_serialization() {
         let issue = Issue {
             id: "bd-123".to_string(),
@@ -1268,22 +1240,6 @@ mod tests {
         assert!(!DependencyType::Supersedes.is_blocking());
         assert!(!DependencyType::CausedBy.is_blocking());
         assert!(!DependencyType::Custom("custom".to_string()).is_blocking());
-    }
-
-    #[test]
-    fn test_dependency_type_affects_ready_work_all() {
-        assert!(DependencyType::Blocks.affects_ready_work());
-        assert!(DependencyType::ParentChild.affects_ready_work());
-        assert!(DependencyType::ConditionalBlocks.affects_ready_work());
-        assert!(DependencyType::WaitsFor.affects_ready_work());
-        assert!(!DependencyType::Related.affects_ready_work());
-        assert!(!DependencyType::DiscoveredFrom.affects_ready_work());
-        assert!(!DependencyType::RepliesTo.affects_ready_work());
-        assert!(!DependencyType::RelatesTo.affects_ready_work());
-        assert!(!DependencyType::Duplicates.affects_ready_work());
-        assert!(!DependencyType::Supersedes.affects_ready_work());
-        assert!(!DependencyType::CausedBy.affects_ready_work());
-        assert!(!DependencyType::Custom("custom".to_string()).affects_ready_work());
     }
 
     #[test]

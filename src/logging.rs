@@ -4,7 +4,7 @@
 
 use std::io::IsTerminal;
 use std::path::Path;
-use std::sync::{Mutex, Once};
+use std::sync::Mutex;
 
 use crate::error::{BeadsError, Result};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -96,8 +96,12 @@ fn default_filter(verbosity: u8, quiet: bool) -> String {
 }
 
 /// Initialize logging for tests with the test writer.
+///
+/// No production caller — `br` configures logging through `init_logging`. This
+/// cannot be `#[cfg(test)]`: the `test-support` crate and the integration
+/// binaries link the library compiled without it.
 pub fn init_test_logging() {
-    static INIT: Once = Once::new();
+    static INIT: std::sync::Once = std::sync::Once::new();
 
     INIT.call_once(|| {
         tracing_subscriber::fmt()

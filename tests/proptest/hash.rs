@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use tracing::info;
 
 use beads::model::{Issue, IssueType, Priority, Status};
-use beads::util::{ContentHashable, content_hash, content_hash_from_parts};
+use beads::util::{content_hash, content_hash_from_parts};
 
 /// Initialize test logging for proptest
 fn init_test_logging() {
@@ -219,19 +219,6 @@ proptest! {
         let hash2 = content_hash(&issue2);
 
         prop_assert_ne!(hash1, hash2, "Different titles should produce different hashes");
-    }
-
-    /// Property: ContentHashable trait produces same result as direct function
-    #[test]
-    fn trait_matches_function(title in "\\PC{1,100}") {
-        init_test_logging();
-
-        let issue = make_issue(&title, None);
-
-        let trait_hash = ContentHashable::content_hash(&issue);
-        let fn_hash = content_hash(&issue);
-
-        prop_assert_eq!(trait_hash, fn_hash, "Trait and function should produce same hash");
     }
 
     /// Property: content_hash_from_parts produces same result as content_hash

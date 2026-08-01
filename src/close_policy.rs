@@ -1188,8 +1188,6 @@ pub struct CloseEvidence<'a> {
     pub design: Option<&'a str>,
     pub acceptance_criteria: Option<&'a str>,
     pub notes: Option<&'a str>,
-    /// The actor performing the close.
-    pub close_actor: &'a str,
 }
 
 /// Evaluate every enabled gate against the supplied evidence.
@@ -1822,7 +1820,6 @@ mod tests {
         CloseEvidence {
             issue_id,
             close_reason: Some(reason),
-            close_actor: "alice",
             ..Default::default()
         }
     }
@@ -2076,7 +2073,6 @@ mod tests {
         let evidence = CloseEvidence {
             issue_id: "bd-1",
             close_reason: None,
-            close_actor: "alice",
             ..Default::default()
         };
         let violations = evaluate(&policy, &evidence);
@@ -2329,7 +2325,6 @@ mod tests {
         let body = "## Acceptance Criteria\n- [ ] Outstanding\n";
         let mut evidence = evidence_with_reason("short", "bd-1");
         evidence.description = Some(body);
-        evidence.close_actor = "alice";
 
         let violations = evaluate(&policy, &evidence);
         assert_eq!(violations.len(), 2);

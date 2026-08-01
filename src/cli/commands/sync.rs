@@ -3593,7 +3593,7 @@ mod tests {
         let delete = make_test_issue("bd-delete", "Delete");
         storage.create_issue(&keep, "test").unwrap();
         storage.create_issue(&delete, "test").unwrap();
-        storage.add_label("bd-delete", "urgent", "test").unwrap();
+        storage.add_label("bd-delete", "urgent").unwrap();
         storage
             .add_comment("bd-delete", "test", "preserve this comment")
             .unwrap();
@@ -3645,7 +3645,7 @@ mod tests {
         let issue = make_test_issue("bd-delete", "Delete");
         storage.create_issue(&keep, "test").unwrap();
         storage.create_issue(&issue, "test").unwrap();
-        storage.add_label("bd-delete", "urgent", "test").unwrap();
+        storage.add_label("bd-delete", "urgent").unwrap();
         storage
             .add_comment("bd-delete", "test", "preserve this comment")
             .unwrap();

@@ -1201,9 +1201,7 @@ mod tests {
             ..Issue::default()
         };
         storage.create_issue(&issue, "tester").expect("create");
-        storage
-            .add_label("bd-labeled", "backend", "tester")
-            .expect("label");
+        storage.add_label("bd-labeled", "backend").expect("label");
 
         let stored_issue = storage
             .get_issue("bd-labeled")

@@ -78,16 +78,6 @@ struct CreateWithCapacityWarnings<'a, T> {
     warnings: &'a [crate::close_policy::WorkflowCapacityWarning],
 }
 
-/// Execute the create command.
-///
-/// # Errors
-///
-/// Returns an error if validation fails, the database cannot be opened, or the issue cannot be created.
-#[allow(clippy::too_many_lines)]
-pub fn execute(args: &CreateArgs, cli: &config::CliOverrides, ctx: &OutputContext) -> Result<()> {
-    execute_with_storage(args, cli, ctx, None)
-}
-
 /// Execute the create command, optionally reusing a pre-opened storage
 /// connection. When `pre_opened` is `Some`, the caller's connection is used
 /// directly, avoiding a redundant second open that would compete for the

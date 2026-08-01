@@ -2,35 +2,25 @@ use crate::format::{
     IssueDetails, IssueWithDependencyMetadata, format_status_label, format_type_label,
     render_markdown_text, sanitize_terminal_inline, sanitize_terminal_text, show_fields,
 };
-use crate::model::{Comment, Dependency, Issue};
+use crate::model::{Comment, Issue};
 use crate::output::{OutputContext, Theme};
 use crate::util::time::to_local;
 use rich_rust::prelude::*;
 
 /// Renders a single issue with full details in a styled panel.
 pub struct IssuePanel<'a> {
-    issue: &'a Issue,
-    details: Option<&'a IssueDetails>,
+    details: &'a IssueDetails,
     theme: &'a Theme,
 }
 
 impl<'a> IssuePanel<'a> {
     #[must_use]
-    pub fn new(issue: &'a Issue, theme: &'a Theme) -> Self {
-        Self {
-            issue,
-            details: None,
-            theme,
-        }
+    pub const fn from_details(details: &'a IssueDetails, theme: &'a Theme) -> Self {
+        Self { details, theme }
     }
 
-    #[must_use]
-    pub fn from_details(details: &'a IssueDetails, theme: &'a Theme) -> Self {
-        Self {
-            issue: &details.issue,
-            details: Some(details),
-            theme,
-        }
+    const fn issue(&self) -> &Issue {
+        &self.details.issue
     }
 
     pub fn print(&self, ctx: &OutputContext, wrap: bool) {
@@ -44,7 +34,7 @@ impl<'a> IssuePanel<'a> {
             content
         };
 
-        let issue_id = sanitize_terminal_inline(&self.issue.id);
+        let issue_id = sanitize_terminal_inline(&self.issue().id);
         let panel = Panel::from_rich_text(&content, panel_width)
             .title(Text::styled(
                 issue_id.into_owned(),
@@ -62,7 +52,7 @@ impl<'a> IssuePanel<'a> {
     /// without a terminal.
     fn build_content(&self, content_width: usize) -> Text {
         let mut content = Text::new("");
-        let issue_id = sanitize_terminal_inline(&self.issue.id);
+        let issue_id = sanitize_terminal_inline(&self.issue().id);
 
         // Header: ID and Status badges
         content.append_styled(
@@ -70,27 +60,27 @@ impl<'a> IssuePanel<'a> {
             self.theme.issue_id.clone(),
         );
         content.append_styled(
-            &format!("[P{}]  ", self.issue.priority.0),
-            self.theme.priority_style(self.issue.priority),
+            &format!("[P{}]  ", self.issue().priority.0),
+            self.theme.priority_style(self.issue().priority),
         );
         content.append_styled(
-            &format!("{}  ", format_status_label(&self.issue.status, false)),
-            self.theme.status_style(&self.issue.status),
+            &format!("{}  ", format_status_label(&self.issue().status, false)),
+            self.theme.status_style(&self.issue().status),
         );
         content.append_styled(
-            &format!("{}\n\n", format_type_label(&self.issue.issue_type)),
-            self.theme.type_style(&self.issue.issue_type),
+            &format!("{}\n\n", format_type_label(&self.issue().issue_type)),
+            self.theme.type_style(&self.issue().issue_type),
         );
 
         // Title
         content.append_styled(
-            sanitize_terminal_inline(&self.issue.title).as_ref(),
+            sanitize_terminal_inline(&self.issue().title).as_ref(),
             self.theme.issue_title.clone(),
         );
         content.append("\n");
 
         // Description
-        if let Some(ref desc) = self.issue.description {
+        if let Some(ref desc) = self.issue().description {
             content.append("\n");
             content.append_text(&render_markdown_text(
                 sanitize_terminal_text(desc).as_ref(),
@@ -106,7 +96,7 @@ impl<'a> IssuePanel<'a> {
         );
 
         // Assignee
-        if let Some(ref assignee) = self.issue.assignee {
+        if let Some(ref assignee) = self.issue().assignee {
             content.append_styled("Assignee: ", self.theme.dimmed.clone());
             content.append_styled(
                 &format!("{}\n", sanitize_terminal_inline(assignee)),
@@ -115,9 +105,7 @@ impl<'a> IssuePanel<'a> {
         }
 
         // Labels
-        let labels = self
-            .details
-            .map_or(self.issue.labels.as_slice(), |d| d.labels.as_slice());
+        let labels = self.details.labels.as_slice();
         if !labels.is_empty() {
             content.append_styled("Labels:   ", self.theme.dimmed.clone());
             for (i, label) in labels.iter().enumerate() {
@@ -137,7 +125,7 @@ impl<'a> IssuePanel<'a> {
         content.append_styled(
             &format!(
                 "{}\n",
-                to_local(self.issue.created_at).format("%Y-%m-%d %H:%M %:z")
+                to_local(self.issue().created_at).format("%Y-%m-%d %H:%M %:z")
             ),
             self.theme.timestamp.clone(),
         );
@@ -146,7 +134,7 @@ impl<'a> IssuePanel<'a> {
         content.append_styled(
             &format!(
                 "{}\n",
-                to_local(self.issue.updated_at).format("%Y-%m-%d %H:%M %:z")
+                to_local(self.issue().updated_at).format("%Y-%m-%d %H:%M %:z")
             ),
             self.theme.timestamp.clone(),
         );
@@ -157,9 +145,7 @@ impl<'a> IssuePanel<'a> {
         self.append_relationships(&mut content);
 
         // Comments
-        let comments: &[Comment] = self
-            .details
-            .map_or(self.issue.comments.as_slice(), |d| d.comments.as_slice());
+        let comments: &[Comment] = self.details.comments.as_slice();
         self.append_comments(&mut content, comments, content_width);
 
         content
@@ -172,7 +158,7 @@ impl<'a> IssuePanel<'a> {
     /// Plain renderer again: adding a field to that list makes it appear here
     /// with no change to this file. The panel previously omitted all six.
     fn append_shared_metadata(&self, content: &mut Text) {
-        for row in show_fields::metadata_rows(self.issue) {
+        for row in show_fields::metadata_rows(self.issue()) {
             content.append_styled(
                 &format!("{:<9} ", format!("{}:", row.label)),
                 self.theme.dimmed.clone(),
@@ -187,7 +173,7 @@ impl<'a> IssuePanel<'a> {
     /// end before reaching any of them, so the human-facing renderer was the
     /// lossy one while the piped renderer was complete.
     fn append_prose_sections(&self, content: &mut Text, content_width: usize) {
-        for section in show_fields::prose_sections(self.issue) {
+        for section in show_fields::prose_sections(self.issue()) {
             content.append("\n");
             content.append_styled(
                 &format!("{}:\n", section.heading),
@@ -202,21 +188,20 @@ impl<'a> IssuePanel<'a> {
     }
 
     fn append_relationships(&self, content: &mut Text) {
-        if let Some(details) = self.details {
-            render_dependency_list(
-                "Dependencies",
-                &details.dependencies,
-                content,
-                self.theme,
-                false,
-            );
-        } else if !self.issue.dependencies.is_empty() {
-            render_dependency_refs(&self.issue.dependencies, content, self.theme);
-        }
-
-        if let Some(details) = self.details {
-            render_dependency_list("Dependents", &details.dependents, content, self.theme, true);
-        }
+        render_dependency_list(
+            "Dependencies",
+            &self.details.dependencies,
+            content,
+            self.theme,
+            false,
+        );
+        render_dependency_list(
+            "Dependents",
+            &self.details.dependents,
+            content,
+            self.theme,
+            true,
+        );
     }
 
     fn append_comments(&self, content: &mut Text, comments: &[Comment], content_width: usize) {
@@ -311,42 +296,31 @@ fn render_dependency_list(
 fn dependency_arrow(is_dependent: bool) -> &'static str {
     if is_dependent { "  ← " } else { "  → " }
 }
-
-fn render_dependency_refs(deps: &[Dependency], content: &mut Text, theme: &Theme) {
-    if deps.is_empty() {
-        return;
-    }
-
-    content.append_styled(
-        "\n───────────────────────────────────\n",
-        theme.dimmed.clone(),
-    );
-    content.append_styled("Dependencies:\n", theme.emphasis.clone());
-    for dep in deps {
-        content.append_styled("  → ", theme.dimmed.clone());
-        content.append_styled(
-            sanitize_terminal_inline(&dep.depends_on_id).as_ref(),
-            theme.issue_id.clone(),
-        );
-        content.append(" ");
-        content.append_styled(
-            &format!("({})", sanitize_terminal_inline(dep.dep_type.as_str())),
-            theme.muted.clone(),
-        );
-        content.append("\n");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::IssuePanel;
-    use super::{dependency_arrow, render_dependency_list, render_dependency_refs};
+    use super::{dependency_arrow, render_dependency_list};
     use crate::format::IssueWithDependencyMetadata;
     use crate::model::Issue;
-    use crate::model::{Dependency, DependencyType, Priority, Status};
+    use crate::model::{Priority, Status};
     use crate::output::Theme;
     use chrono::Utc;
     use rich_rust::prelude::Text;
+
+    /// A panel is only ever built from `IssueDetails`, so the tests build one
+    /// too: the issue under test with no relations hanging off it.
+    fn details_for(issue: Issue) -> crate::format::IssueDetails {
+        // `show` hydrates labels and comments onto the details, not the issue,
+        // which is where the panel reads them from.
+        crate::format::IssueDetails {
+            labels: issue.labels.clone(),
+            comments: issue.comments.clone(),
+            issue,
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            parent: None,
+        }
+    }
 
     #[test]
     fn test_dependency_arrow_tracks_direction() {
@@ -373,31 +347,12 @@ mod tests {
             false,
         );
 
-        let raw_deps = vec![Dependency {
-            issue_id: "bd-source".to_string(),
-            depends_on_id: "bd-target\x1b]52;c;bad\x07".to_string(),
-            dep_type: DependencyType::Custom("custom\x08type".to_string()),
-            created_at: Utc::now(),
-            created_by: None,
-            metadata: None,
-            thread_id: None,
-        }];
-        let mut raw_content = Text::new("");
-        render_dependency_refs(&raw_deps, &mut raw_content, &theme);
-
-        for rendered in [metadata_content.plain(), raw_content.plain()] {
-            assert!(!rendered.contains('\x1b'));
-            assert!(!rendered.contains('\x07'));
-            assert!(!rendered.contains('\x08'));
-        }
-        assert!(metadata_content.plain().contains("bd-dep\\u{1b}[2J"));
-        assert!(metadata_content.plain().contains("blocks\\u{7}"));
-        assert!(
-            raw_content
-                .plain()
-                .contains("bd-target\\u{1b}]52;c;bad\\u{7}")
-        );
-        assert!(raw_content.plain().contains("custom\\u{8}type"));
+        let rendered = metadata_content.plain();
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\x07'));
+        assert!(!rendered.contains('\x08'));
+        assert!(rendered.contains("bd-dep\\u{1b}[2J"));
+        assert!(rendered.contains("blocks\\u{7}"));
     }
 
     #[test]
@@ -410,7 +365,8 @@ mod tests {
             ..Issue::default()
         };
 
-        let content = IssuePanel::new(&issue, &theme).build_content(60);
+        let details = details_for(issue);
+        let content = IssuePanel::from_details(&details, &theme).build_content(60);
 
         assert!(content.plain().contains("Heading two"));
         assert!(!content.plain().contains("##"), "got {:?}", content.plain());
@@ -440,7 +396,8 @@ mod tests {
             ..Issue::default()
         };
 
-        let content = IssuePanel::new(&issue, &theme).build_content(60);
+        let details = details_for(issue);
+        let content = IssuePanel::from_details(&details, &theme).build_content(60);
         let segments = content.render("");
         let heading_segment = segments
             .iter()
@@ -473,7 +430,8 @@ mod tests {
             ..Issue::default()
         };
 
-        let content = IssuePanel::new(&issue, &theme).build_content(60);
+        let details = details_for(issue);
+        let content = IssuePanel::from_details(&details, &theme).build_content(60);
         let plain = content.plain();
 
         assert!(plain.contains("Design head"));
@@ -496,7 +454,8 @@ mod tests {
             ..Issue::default()
         };
 
-        let content = IssuePanel::new(&issue, &theme).build_content(60);
+        let details = details_for(issue);
+        let content = IssuePanel::from_details(&details, &theme).build_content(60);
 
         assert!(
             !content.plain().contains('\x1b'),
