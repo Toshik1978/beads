@@ -195,30 +195,6 @@ impl ConfigPaths {
         })
     }
 
-    /// Get the user config path (~/.config/beads/config.yaml).
-    /// Returns None if HOME is not set.
-    #[must_use]
-    pub fn user_config_path(&self) -> Option<PathBuf> {
-        env::var("HOME").ok().map(|home| {
-            let config_root = Path::new(&home).join(".config");
-            let beads_path = config_root.join("beads").join("config.yaml");
-            if beads_path.exists() {
-                beads_path
-            } else {
-                config_root.join("bd").join("config.yaml")
-            }
-        })
-    }
-
-    /// Get the legacy user config path (~/.beads/config.yaml).
-    /// Returns None if HOME is not set.
-    #[must_use]
-    pub fn legacy_user_config_path(&self) -> Option<PathBuf> {
-        env::var("HOME")
-            .ok()
-            .map(|home| Path::new(&home).join(".beads").join("config.yaml"))
-    }
-
     /// Get the project config path (.beads/config.yaml).
     #[must_use]
     pub fn project_config_path(&self) -> Option<PathBuf> {
@@ -2305,35 +2281,6 @@ where
         .collect())
 }
 
-/// Open storage using resolved config paths, returning the storage and paths used.
-///
-/// # Errors
-///
-/// Returns an error if metadata cannot be read or the database cannot be opened.
-pub fn open_storage(
-    beads_dir: &Path,
-    db_override: Option<&PathBuf>,
-    lock_timeout: Option<u64>,
-) -> Result<(SqliteStorage, ConfigPaths)> {
-    let startup = load_startup_config_with_paths(beads_dir, db_override)?;
-    let merged_layer = ConfigLayer::merge_layers(&startup.layers);
-
-    let resolved_lock_timeout = lock_timeout
-        .or_else(|| lock_timeout_from_layer(&merged_layer))
-        .or(Some(30000));
-
-    let (mut storage, _auto_rebuilt, _pending_recovery_backup) = open_sqlite_storage_with_recovery(
-        beads_dir,
-        &startup.paths,
-        resolved_lock_timeout,
-        &merged_layer,
-        false,
-    )?;
-    let workflow = crate::close_policy::load_for_beads_dir(beads_dir)?.workflow;
-    storage.set_workflow_policy(workflow);
-    Ok((storage, startup.paths))
-}
-
 /// Storage handle with no-db awareness.
 #[derive(Debug)]
 pub struct OpenStorageResult {
@@ -3416,25 +3363,6 @@ pub fn load_legacy_user_config() -> Result<ConfigLayer> {
     };
     let path = Path::new(&home).join(".beads").join("config.yaml");
     ConfigLayer::from_yaml(&path)
-}
-
-/// Load startup-only configuration layers (YAML + env, no DB).
-///
-/// # Errors
-///
-/// Returns an error if any config file cannot be read or parsed.
-pub fn load_startup_config(beads_dir: &Path) -> Result<ConfigLayer> {
-    let legacy_user = load_legacy_user_config()?;
-    let user = load_user_config()?;
-    let project = load_project_config(beads_dir)?;
-    let env_layer = ConfigLayer::from_env();
-
-    Ok(ConfigLayer::merge_layers(&[
-        legacy_user,
-        user,
-        project,
-        env_layer,
-    ]))
 }
 
 /// Default config layer (lowest precedence).

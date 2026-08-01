@@ -1158,18 +1158,6 @@ impl From<OutputFormatBasic> for OutputFormat {
     }
 }
 
-/// Resolve effective output format with CLI/env precedence.
-#[must_use]
-pub fn resolve_output_format(requested: Option<OutputFormat>, json: bool) -> OutputFormat {
-    if json {
-        OutputFormat::Json
-    } else if let Some(requested) = requested {
-        requested
-    } else {
-        OutputFormat::from_env().unwrap_or(OutputFormat::Text)
-    }
-}
-
 /// Machine-readable or quiet state inherited from an outer command context.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum InheritedOutputMode {
@@ -1198,19 +1186,6 @@ pub fn resolve_output_format_with_outer_mode(
         OutputFormat::Text
     } else {
         OutputFormat::from_env().unwrap_or(OutputFormat::Text)
-    }
-}
-
-/// Resolve effective output format for commands without CSV support.
-#[must_use]
-pub fn resolve_output_format_basic(
-    requested: Option<OutputFormatBasic>,
-    json: bool,
-) -> OutputFormat {
-    let resolved = resolve_output_format(requested.map(Into::into), json);
-    match resolved {
-        OutputFormat::Csv => OutputFormat::Text,
-        other => other,
     }
 }
 

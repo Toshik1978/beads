@@ -92,6 +92,7 @@ pub struct TextFormatOptions {
 
 impl TextFormatOptions {
     #[must_use]
+    #[cfg(test)]
     pub const fn plain() -> Self {
         Self {
             use_color: false,
@@ -385,6 +386,7 @@ pub fn format_issue_line_with(issue: &Issue, options: TextFormatOptions) -> Stri
 ///
 /// Format: `{icon} {id} [{priority}] [{type}] {title}`
 #[must_use]
+#[cfg(test)]
 pub fn format_issue_line(issue: &Issue) -> String {
     format_issue_line_with(issue, TextFormatOptions::plain())
 }

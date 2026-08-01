@@ -181,16 +181,11 @@ fn is_broken_pipe_serialization_error(err: &serde_json::Error) -> bool {
 }
 
 impl OutputContext {
-    /// Detect output mode from environment and terminal state without CLI args.
-    #[must_use]
-    pub fn detect() -> Self {
-        if let Some(format) = OutputFormat::from_env() {
-            return Self::from_output_format(format, false, false);
-        }
-        Self::from_flags(false, false, false)
-    }
-
     /// Create a context with an explicit mode.
+    ///
+    /// Test-only: production picks the mode from CLI flags or the terminal,
+    /// and `Rich` cannot be requested any other way without a tty.
+    #[cfg(test)]
     #[must_use]
     pub fn with_mode(mode: OutputMode) -> Self {
         Self {
@@ -319,10 +314,6 @@ impl OutputContext {
     pub fn is_quiet(&self) -> bool {
         self.mode == OutputMode::Quiet
     }
-    pub fn is_plain(&self) -> bool {
-        self.mode == OutputMode::Plain
-    }
-
     pub const fn inherited_output_mode(&self) -> InheritedOutputMode {
         match self.mode {
             OutputMode::Json => InheritedOutputMode::Json,
@@ -346,17 +337,6 @@ impl OutputContext {
     // ─────────────────────────────────────────────────────────────
     // Output Methods
     // ─────────────────────────────────────────────────────────────
-
-    pub fn print(&self, content: &str) {
-        let content = sanitize_terminal_text(content);
-        match self.mode {
-            OutputMode::Rich | OutputMode::Plain => {
-                self.console()
-                    .print_renderable(&Text::new(content.into_owned()));
-            }
-            OutputMode::Quiet | OutputMode::Json => {} // No console access - zero overhead
-        }
-    }
 
     pub fn print_line(&self, content: &str) {
         let content = sanitize_terminal_text(content);
@@ -485,20 +465,6 @@ impl OutputContext {
         }
     }
 
-    pub fn error(&self, message: &str) {
-        let message = sanitize_terminal_text(message);
-        match self.mode {
-            OutputMode::Rich => {
-                let panel = Panel::from_text(message.as_ref())
-                    .title(Text::new("Error"))
-                    .border_style(self.theme().error.clone());
-                self.console().print_renderable(&panel);
-            }
-            OutputMode::Plain | OutputMode::Quiet => eprintln!("Error: {}", message),
-            OutputMode::Json => {} //
-        }
-    }
-
     pub fn warning(&self, message: &str) {
         let message = sanitize_terminal_inline(message);
         match self.mode {
@@ -531,50 +497,9 @@ impl OutputContext {
         }
     }
 
-    pub fn section(&self, title: &str) {
-        let title = sanitize_terminal_inline(title);
-        if self.is_rich() {
-            let rule =
-                Rule::with_title(Text::new(title.into_owned())).style(self.theme().section.clone());
-            self.console().print_renderable(&rule);
-        } else if self.is_plain() {
-            println!("\n─── {} ───\n", title);
-        }
-    }
-
     pub fn newline(&self) {
         if !self.is_quiet() && !self.is_json() {
             println!();
-        }
-    }
-
-    pub fn error_panel(&self, title: &str, description: &str, suggestions: &[&str]) {
-        let title = sanitize_terminal_inline(title);
-        let description = sanitize_terminal_text(description);
-        match self.mode {
-            OutputMode::Rich => {
-                let mut text = Text::from(description.as_ref());
-                text.append("\n\nSuggestions:\n");
-                for suggestion in suggestions {
-                    let suggestion = sanitize_terminal_inline(suggestion);
-                    text.append("• ");
-                    text.append(suggestion.as_ref());
-                    text.append("\n");
-                }
-
-                let panel = Panel::from_rich_text(&text, self.width())
-                    .title(Text::new(title.as_ref()))
-                    .border_style(self.theme().error.clone());
-                self.console().print_renderable(&panel);
-            }
-            OutputMode::Plain => {
-                eprintln!("Error: {} - {}", title, description);
-                for suggestion in suggestions {
-                    eprintln!("  Suggestion: {}", sanitize_terminal_inline(suggestion));
-                }
-            }
-            OutputMode::Quiet => eprintln!("Error: {}", description),
-            OutputMode::Json => {} //
         }
     }
 }

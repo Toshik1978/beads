@@ -9,7 +9,6 @@
 //! - [`IssueWithCounts`] - Issue with dependency/dependent counts (list/search)
 //! - [`IssueDetails`] - Issue with full relations (show)
 //! - [`BlockedIssue`] - Issue with blocking info (blocked)
-//! - [`TreeNode`] - Issue in dependency tree (dep tree)
 //! - [`Statistics`] - Aggregate stats (stats/status)
 //!
 //! # CSV Output
@@ -26,9 +25,9 @@
 //! - Panels for detailed issue views, including rendered markdown via
 //!   [`markdown::render_markdown_text`]
 //! - Trees for dependency visualization
-//! - Consistent theming via [`Theme`]
+//! - Consistent theming via [`crate::output::Theme`]
 //!
-//! Output mode is determined by [`OutputContext`]:
+//! Output mode is determined by [`crate::output::OutputContext`]:
 //! - Rich: TTY with colors enabled
 //! - Plain: TTY with `--no-color` or not a TTY
 //! - JSON: `--json` flag
@@ -38,32 +37,22 @@ pub mod csv;
 pub mod markdown;
 mod output;
 pub mod show_fields;
-pub mod syntax;
 mod text;
-pub mod theme;
 
 pub use output::{
     BlockedIssue, BlockedIssueOutput, Breakdown, BreakdownEntry, IssueDetails, IssueWithCounts,
     IssueWithDependencyMetadata, ReadyIssue, RecentActivity, StaleIssue, Statistics, StatsSummary,
-    TreeNode,
 };
 pub use text::{
-    TextFormatOptions, format_issue_line, format_issue_line_with, format_issue_long_with,
-    format_issue_pretty_with, format_priority, format_priority_badge, format_priority_label,
-    format_status_icon, format_status_icon_colored, format_status_label, format_type_badge,
-    format_type_badge_colored, format_type_label, sanitize_terminal_inline, sanitize_terminal_text,
-    terminal_height, terminal_width, truncate_title,
+    TextFormatOptions, format_issue_line_with, format_issue_long_with, format_issue_pretty_with,
+    format_priority, format_priority_badge, format_priority_label, format_status_icon,
+    format_status_icon_colored, format_status_label, format_type_badge, format_type_badge_colored,
+    format_type_label, sanitize_terminal_inline, sanitize_terminal_text, terminal_height,
+    terminal_width, truncate_title,
 };
 
-// Rich output support
-pub use crate::output::{OutputContext, OutputMode};
-pub use theme::Theme;
-
-// Syntax highlighting
-pub use syntax::{
-    available_themes, detect_language_from_filename, highlight_code, parse_code_fence,
-    supported_languages,
-};
+#[cfg(test)]
+pub use text::format_issue_line;
 
 // Markdown rendering
 pub use markdown::render_markdown_text;

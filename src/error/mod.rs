@@ -13,7 +13,7 @@
 mod context;
 mod structured;
 
-pub use context::{OptionExt, ResultExt};
+pub use context::ResultExt;
 pub use structured::{ErrorCode, StructuredError};
 
 use std::path::PathBuf;

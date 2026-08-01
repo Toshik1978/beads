@@ -359,12 +359,6 @@ fn append_label_or_membership_exists(
 // existing `export_hashes` rows with a single multi-values INSERT. Batch the
 // DELETE side for efficiency, but re-insert one row at a time for correctness.
 const EXPORT_HASH_CHUNK_SIZE: usize = 32;
-// The previous engine could surface the same false primary-key conflict when an existing
-// blocked-cache population is rewritten via a large multi-values INSERT. Keep
-// the delete batched/full-table, but re-insert rows individually.
-const BLOCKED_CACHE_DELETE_CHUNK_SIZE: usize = 400;
-const DIRTY_ISSUE_CHUNK_SIZE: usize = 900;
-const BLOCKS_DEP_EDGE_FILTER_LIMIT: usize = 400;
 const IMPORT_DEPENDENCY_CHUNK_SIZE: usize = 140;
 const DEPENDENCY_TRAVERSAL_MAX_DEPTH: usize = 500;
 const BLOCKED_CACHE_STATE_KEY: &str = "blocked_cache_state";
@@ -404,7 +398,11 @@ const KNOWN_METADATA_DEFAULTS: [(&str, &str); 7] = [
     (METADATA_LAST_EXPORT_TIME, METADATA_EMPTY_VALUE),
     (METADATA_LAST_IMPORT_TIME, METADATA_EMPTY_VALUE),
 ];
-
+// The previous engine could surface the same false primary-key conflict when an existing
+// blocked-cache population is rewritten via a large multi-values INSERT. Keep
+// the delete batched/full-table, but re-insert rows individually.
+const BLOCKED_CACHE_DELETE_CHUNK_SIZE: usize = 400;
+const DIRTY_ISSUE_CHUNK_SIZE: usize = 900;
 /// SQLite-based storage backend.
 #[derive(Debug)]
 pub struct SqliteStorage {
@@ -438,7 +436,6 @@ pub struct SqliteStorage {
 
 /// Context for a mutation operation, tracking side effects.
 pub struct MutationContext {
-    pub op_name: String,
     pub actor: String,
     pub dirty_ids: HashSet<String>,
     pub invalidate_blocked_cache: bool,
@@ -660,9 +657,8 @@ impl BlockedIssueProjection {
 
 impl MutationContext {
     #[must_use]
-    pub fn new(op_name: &str, actor: &str) -> Self {
+    pub fn new(actor: &str) -> Self {
         Self {
-            op_name: op_name.to_string(),
             actor: actor.to_string(),
             dirty_ids: HashSet::new(),
             invalidate_blocked_cache: false,
@@ -2550,27 +2546,13 @@ impl SqliteStorage {
         // The previous engine could surface false FK violations when its page buffer pool
         // is exhausted, even though the referenced issue_id was just
         // written/verified in the same transaction (#215).  All FK
-        // invariants (dependencies -> issues, events -> issues,
-        // dirty_issues -> issues, etc.) are enforced by application logic
+        // invariants (dependencies -> issues, dirty_issues -> issues, etc.)
+        // are enforced by application logic
         // within the mutation closures.
         self.conn.execute("PRAGMA foreign_keys = OFF")?;
 
-        // Peek (clone) — do NOT take — the per-command attribution staged for
-        // this mutation. We must not permanently consume the staged value until
-        // the mutation is known to COMMIT: if `with_write_transaction` returns a
-        // recoverable `Database(_)` error, `retry_mutation_with_jsonl_recovery`
-        // re-invokes this `mutate()` after rebuilding the DB from JSONL, and the
-        // staged slot must still be present so the recovered write records the
-        // attribution (#312 hardening, F1). Cloning here also means the internal
-        // BUSY-retry loop inside `with_write_transaction` re-applies the SAME
-        // value on each attempt and stamps exactly once on the committing run.
-        //
-        // Invariant: pending attribution is consumed by exactly one committing
-        // mutation, or cleared — it never leaks into a later, unrelated
-        // operation. It is `.take()`n below only after a successful commit.
-
         let tx_result: Result<_> = self.with_write_transaction(|storage| {
-            let mut ctx = MutationContext::new(op, actor);
+            let mut ctx = MutationContext::new(actor);
             let result = f(&storage.conn, &mut ctx)?;
 
             // Mark dirty
@@ -5660,112 +5642,6 @@ impl SqliteStorage {
             }
         }
         Ok(ids)
-    }
-
-    /// Get raw `blocks` dependency edges as (issue_id, depends_on_id) pairs.
-    ///
-    /// This is a lightweight single-table query (no JOINs) suitable for
-    /// callers that already have issues loaded in memory and can filter
-    /// by status themselves.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn get_blocks_dep_edges(&self) -> Result<Vec<(String, String)>> {
-        let mut edges = Vec::new();
-
-        // Query 1: Standard blocking types
-        let rows1 = self.conn.query(
-            "SELECT issue_id, depends_on_id FROM dependencies \
-             WHERE type IN ('blocks', 'conditional-blocks', 'waits-for')",
-        )?;
-        for row in &rows1 {
-            if let Some(issue_id) = row.get(0).and_then(SqliteValue::as_text)
-                && let Some(depends_on) = row.get(1).and_then(SqliteValue::as_text)
-            {
-                edges.push((issue_id.to_string(), depends_on.to_string()));
-            }
-        }
-
-        // Query 2: Parent-child (reversed direction)
-        let rows2 = self.conn.query(
-            "SELECT depends_on_id, issue_id FROM dependencies \
-             WHERE type = 'parent-child'",
-        )?;
-        for row in &rows2 {
-            if let Some(issue_id) = row.get(0).and_then(SqliteValue::as_text)
-                && let Some(depends_on) = row.get(1).and_then(SqliteValue::as_text)
-            {
-                edges.push((issue_id.to_string(), depends_on.to_string()));
-            }
-        }
-
-        Ok(edges)
-    }
-
-    /// Get raw blocking dependency edges whose endpoints are in `issue_ids`.
-    ///
-    /// Returns `(issue_id, depends_on_id)` pairs, matching [`Self::get_blocks_dep_edges`].
-    /// For large active sets, falls back to the full edge scan to stay below
-    /// SQLite's parameter limit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn get_blocks_dep_edges_for_issue_ids(
-        &self,
-        issue_ids: &[&str],
-    ) -> Result<Vec<(String, String)>> {
-        if issue_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        if issue_ids.len() > BLOCKS_DEP_EDGE_FILTER_LIMIT {
-            return self.get_blocks_dep_edges();
-        }
-
-        let mut edges = Vec::new();
-        let placeholders: Vec<&str> = issue_ids.iter().map(|_| "?").collect();
-        let placeholders = placeholders.join(", ");
-
-        let mut params = Vec::with_capacity(issue_ids.len() * 2);
-        for issue_id in issue_ids {
-            params.push(SqliteValue::from(*issue_id));
-        }
-        for issue_id in issue_ids {
-            params.push(SqliteValue::from(*issue_id));
-        }
-
-        let standard_sql = format!(
-            "SELECT issue_id, depends_on_id FROM dependencies \
-             WHERE type IN ('blocks', 'conditional-blocks', 'waits-for') \
-               AND issue_id IN ({placeholders}) \
-               AND depends_on_id IN ({placeholders})"
-        );
-        let rows1 = self.conn.query_with_params(&standard_sql, &params)?;
-        for row in &rows1 {
-            if let Some(issue_id) = row.get(0).and_then(SqliteValue::as_text)
-                && let Some(depends_on) = row.get(1).and_then(SqliteValue::as_text)
-            {
-                edges.push((issue_id.to_string(), depends_on.to_string()));
-            }
-        }
-
-        let parent_child_sql = format!(
-            "SELECT depends_on_id, issue_id FROM dependencies \
-             WHERE type = 'parent-child' \
-               AND depends_on_id IN ({placeholders}) \
-               AND issue_id IN ({placeholders})"
-        );
-        let rows2 = self.conn.query_with_params(&parent_child_sql, &params)?;
-        for row in &rows2 {
-            if let Some(issue_id) = row.get(0).and_then(SqliteValue::as_text)
-                && let Some(depends_on) = row.get(1).and_then(SqliteValue::as_text)
-            {
-                edges.push((issue_id.to_string(), depends_on.to_string()));
-            }
-        }
-
-        Ok(edges)
     }
 
     /// Check if an issue is blocked (in the blocked cache).
@@ -9079,61 +8955,6 @@ impl SqliteStorage {
             .collect()
     }
 
-    /// Prefetch all reverse-dependency edges for blocking relationship types
-    /// (`blocks`, `conditional-blocks`, `waits-for`, `parent-child`).
-    ///
-    /// Returns a map from `depends_on_id` → `Vec<IssueWithDependencyMetadata>`,
-    /// enabling in-memory graph traversal without per-node queries.
-    pub fn prefetch_blocking_dependents(
-        &self,
-    ) -> Result<HashMap<String, Vec<IssueWithDependencyMetadata>>> {
-        let rows = self.conn.query(
-            "SELECT d.depends_on_id, d.issue_id, i.title, i.status, i.priority, d.type
-             FROM dependencies d
-             LEFT JOIN issues i ON d.issue_id = i.id
-             WHERE d.type IN ('blocks', 'conditional-blocks', 'waits-for', 'parent-child')
-             ORDER BY COALESCE(i.priority, 2) ASC, i.created_at DESC, d.issue_id ASC",
-        )?;
-
-        let mut map: HashMap<String, Vec<IssueWithDependencyMetadata>> = HashMap::new();
-        for row in &rows {
-            let Some(depends_on_id) = row.get(0).and_then(SqliteValue::as_text) else {
-                continue;
-            };
-            let Some(issue_id) = row.get(1).and_then(SqliteValue::as_text) else {
-                continue;
-            };
-            let dep_type = row
-                .get(5)
-                .and_then(SqliteValue::as_text)
-                .unwrap_or("blocks")
-                .to_string();
-            let title = row.get(2).and_then(SqliteValue::as_text);
-            let status = row.get(3).and_then(SqliteValue::as_text);
-            let priority = row.get(4).and_then(SqliteValue::as_integer);
-
-            let meta = match (title, status, priority) {
-                (Some(title), Some(status), Some(priority)) => IssueWithDependencyMetadata {
-                    id: issue_id.to_string(),
-                    title: title.to_string(),
-                    status: parse_status(Some(status)),
-                    priority: Priority(i32::try_from(priority).unwrap_or(2)),
-                    dep_type,
-                },
-                _ => IssueWithDependencyMetadata {
-                    id: issue_id.to_string(),
-                    title: format!("[missing issue: {issue_id}]"),
-                    status: Status::Tombstone,
-                    priority: Priority::MEDIUM,
-                    dep_type,
-                },
-            };
-
-            map.entry(depends_on_id.to_string()).or_default().push(meta);
-        }
-        Ok(map)
-    }
-
     /// Get parent issue ID.
     ///
     /// # Errors
@@ -9351,154 +9172,6 @@ impl SqliteStorage {
         Ok(())
     }
 
-    /// Count dependencies for multiple issues efficiently.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn count_dependencies_for_issues(
-        &self,
-        issue_ids: &[String],
-    ) -> Result<HashMap<String, usize>> {
-        const SQLITE_VAR_LIMIT: usize = 900;
-
-        if issue_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut map: HashMap<String, usize> = HashMap::new();
-
-        for chunk in issue_ids.chunks(SQLITE_VAR_LIMIT) {
-            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-            let sql = format!(
-                "SELECT issue_id, COUNT(*) FROM dependencies WHERE issue_id IN ({}) GROUP BY issue_id",
-                placeholders.join(",")
-            );
-
-            let params: Vec<SqliteValue> = chunk
-                .iter()
-                .map(|s| SqliteValue::from(s.as_str()))
-                .collect();
-
-            let rows = self.conn.query_with_params(&sql, &params)?;
-            for row in &rows {
-                let issue_id = row
-                    .get(0)
-                    .and_then(SqliteValue::as_text)
-                    .unwrap_or("")
-                    .to_string();
-                let count = row.get(1).and_then(SqliteValue::as_integer).unwrap_or(0);
-                map.insert(issue_id, usize::try_from(count).unwrap_or(0));
-            }
-        }
-
-        Ok(map)
-    }
-
-    /// Fetch reverse-dependency edges for a bounded set of blocking roots.
-    ///
-    /// Returns a map from blocker-graph root ID to dependents. Standard
-    /// dependency rows use `depends_on_id` as the root; `parent-child` rows are
-    /// reversed because parents are blocked by children.
-    /// Unlike [`Self::prefetch_blocking_dependents`], this keeps focused graph
-    /// traversals from hydrating the entire workspace dependency graph.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn get_blocking_dependents_for_issue_ids(
-        &self,
-        issue_ids: &[String],
-    ) -> Result<HashMap<String, Vec<IssueWithDependencyMetadata>>> {
-        if issue_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut map: HashMap<String, Vec<IssueWithDependencyMetadata>> = HashMap::new();
-        let chunk_size = SQLITE_VAR_LIMIT.saturating_div(2).max(1);
-        for chunk in issue_ids.chunks(chunk_size) {
-            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-            let sql = format!(
-                "SELECT root_id, dependent_id, title, status, priority, type
-                 FROM (
-                     SELECT d.depends_on_id AS root_id,
-                            d.issue_id AS dependent_id,
-                            i.title AS title,
-                            i.status AS status,
-                            i.priority AS priority,
-                            i.created_at AS created_at,
-                            d.type AS type
-                       FROM dependencies d
-                       LEFT JOIN issues i ON d.issue_id = i.id
-                      WHERE d.depends_on_id IN ({placeholders})
-                        AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
-                     UNION ALL
-                     SELECT d.issue_id AS root_id,
-                            d.depends_on_id AS dependent_id,
-                            i.title AS title,
-                            i.status AS status,
-                            i.priority AS priority,
-                            i.created_at AS created_at,
-                            d.type AS type
-                       FROM dependencies d
-                       LEFT JOIN issues i ON d.depends_on_id = i.id
-                      WHERE d.issue_id IN ({placeholders})
-                        AND d.type = 'parent-child'
-                 )
-                 ORDER BY COALESCE(priority, 2) ASC, created_at DESC, dependent_id ASC",
-                placeholders = placeholders.join(",")
-            );
-            let mut params: Vec<SqliteValue> = chunk
-                .iter()
-                .map(|issue_id| SqliteValue::from(issue_id.as_str()))
-                .collect();
-            params.extend(
-                chunk
-                    .iter()
-                    .map(|issue_id| SqliteValue::from(issue_id.as_str())),
-            );
-            let rows = self.conn.query_with_params(&sql, &params)?;
-
-            for row in &rows {
-                let Some(root_id) = row.get(0).and_then(SqliteValue::as_text) else {
-                    continue;
-                };
-                let Some(dependent_id) = row.get(1).and_then(SqliteValue::as_text) else {
-                    continue;
-                };
-                let dep_type = row
-                    .get(5)
-                    .and_then(SqliteValue::as_text)
-                    .unwrap_or("blocks")
-                    .to_string();
-                let title = row.get(2).and_then(SqliteValue::as_text);
-                let status = row.get(3).and_then(SqliteValue::as_text);
-                let priority = row.get(4).and_then(SqliteValue::as_integer);
-
-                let meta = match (title, status, priority) {
-                    (Some(title), Some(status), Some(priority)) => IssueWithDependencyMetadata {
-                        id: dependent_id.to_string(),
-                        title: title.to_string(),
-                        status: parse_status(Some(status)),
-                        priority: Priority(i32::try_from(priority).unwrap_or(2)),
-                        dep_type,
-                    },
-                    _ => IssueWithDependencyMetadata {
-                        id: dependent_id.to_string(),
-                        title: format!("[missing issue: {dependent_id}]"),
-                        status: Status::Tombstone,
-                        priority: Priority::MEDIUM,
-                        dep_type,
-                    },
-                };
-
-                map.entry(root_id.to_string()).or_default().push(meta);
-            }
-        }
-
-        Ok(map)
-    }
-
     /// Count dependencies and dependents for multiple issues with one round-trip per chunk.
     ///
     /// # Errors
@@ -9615,50 +9288,6 @@ impl SqliteStorage {
         }
 
         Ok((dependency_counts, dependent_counts))
-    }
-
-    /// Count dependents for multiple issues efficiently.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn count_dependents_for_issues(
-        &self,
-        issue_ids: &[String],
-    ) -> Result<HashMap<String, usize>> {
-        const SQLITE_VAR_LIMIT: usize = 900;
-
-        if issue_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut map: HashMap<String, usize> = HashMap::new();
-
-        for chunk in issue_ids.chunks(SQLITE_VAR_LIMIT) {
-            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-            let sql = format!(
-                "SELECT depends_on_id, COUNT(*) FROM dependencies WHERE depends_on_id IN ({}) GROUP BY depends_on_id",
-                placeholders.join(",")
-            );
-
-            let params: Vec<SqliteValue> = chunk
-                .iter()
-                .map(|s| SqliteValue::from(s.as_str()))
-                .collect();
-
-            let rows = self.conn.query_with_params(&sql, &params)?;
-            for row in &rows {
-                let issue_id = row
-                    .get(0)
-                    .and_then(SqliteValue::as_text)
-                    .unwrap_or("")
-                    .to_string();
-                let count = row.get(1).and_then(SqliteValue::as_integer).unwrap_or(0);
-                map.insert(issue_id, usize::try_from(count).unwrap_or(0));
-            }
-        }
-
-        Ok(map)
     }
 
     /// Fetch a config value.
@@ -10076,30 +9705,6 @@ impl SqliteStorage {
         }
     }
 
-    /// Set the export hash for an issue after successful export.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database update fails.
-    pub fn set_export_hash(&mut self, issue_id: &str, content_hash: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.with_write_transaction(|storage| {
-            storage.conn.execute_with_params(
-                "DELETE FROM export_hashes WHERE issue_id = ?",
-                &[SqliteValue::from(issue_id)],
-            )?;
-            storage.conn.execute_with_params(
-                "INSERT INTO export_hashes (issue_id, content_hash, exported_at) VALUES (?, ?, ?)",
-                &[
-                    SqliteValue::from(issue_id),
-                    SqliteValue::from(content_hash),
-                    SqliteValue::from(now.as_str()),
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
     /// Batch set export hashes for multiple issues after successful export.
     ///
     /// More efficient than calling `set_export_hash` in a loop.
@@ -10125,51 +9730,6 @@ impl SqliteStorage {
     pub fn clear_all_export_hashes(&mut self) -> Result<usize> {
         let count = self.conn.execute("DELETE FROM export_hashes")?;
         Ok(count)
-    }
-
-    /// Get issues that need to be exported (dirty issues whose content hash differs from stored export hash).
-    ///
-    /// This enables incremental export by filtering out issues that haven't actually changed
-    /// since the last export, even if they were marked dirty.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn get_issues_needing_export(&self, dirty_ids: &[String]) -> Result<Vec<String>> {
-        const SQLITE_VAR_LIMIT: usize = 900;
-        if dirty_ids.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let mut results = Vec::new();
-        for chunk in dirty_ids.chunks(SQLITE_VAR_LIMIT) {
-            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-            let sql = format!(
-                "SELECT i.id FROM issues i
-                 WHERE i.id IN ({})
-                   AND i.deleted_at IS NULL
-                   AND (
-                     i.id NOT IN (SELECT issue_id FROM export_hashes)
-                     OR i.content_hash != (SELECT e.content_hash FROM export_hashes e WHERE e.issue_id = i.id)
-                   )
-                 ORDER BY i.id",
-                placeholders.join(",")
-            );
-
-            let params: Vec<SqliteValue> = chunk
-                .iter()
-                .map(|s| SqliteValue::from(s.as_str()))
-                .collect();
-
-            let rows = self.conn.query_with_params(&sql, &params)?;
-            results.extend(
-                rows.iter()
-                    .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from)),
-            );
-        }
-
-        results.sort();
-        Ok(results)
     }
 
     /// Get a metadata value by key.
@@ -10214,19 +9774,6 @@ impl SqliteStorage {
             Self::upsert_metadata_key_in_tx(conn, key, value)?;
             Ok(())
         })
-    }
-
-    /// Delete a metadata key.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database update fails.
-    pub fn delete_metadata(&mut self, key: &str) -> Result<bool> {
-        let count = self.conn.execute_with_params(
-            "DELETE FROM metadata WHERE key = ?",
-            &[SqliteValue::from(key)],
-        )?;
-        Ok(count > 0)
     }
 
     /// Count issues in the database.
@@ -11973,56 +11520,6 @@ impl SqliteStorage {
         Ok(total_deleted)
     }
 
-    /// Clear all dirty flags.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn clear_all_dirty_flags(&mut self) -> Result<usize> {
-        let deleted = self.conn.execute("DELETE FROM dirty_issues")?;
-        Ok(deleted)
-    }
-
-    /// Get the count of issues (for safety guard).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn count_exportable_issues(&self) -> Result<usize> {
-        let count = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM issues WHERE ephemeral = 0 AND id NOT LIKE '%-wisp-%'",
-            )?
-            .get(0)
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(0);
-        // count is always non-negative from COUNT(*), safe to cast
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        Ok(count as usize)
-    }
-
-    /// Check if a dependency exists between two issues.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn dependency_exists_between(&self, issue_id: &str, depends_on_id: &str) -> Result<bool> {
-        let count = self
-            .conn
-            .query_row_with_params(
-                "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
-                &[
-                    SqliteValue::from(issue_id),
-                    SqliteValue::from(depends_on_id),
-                ],
-            )?
-            .get(0)
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or(0);
-        Ok(count > 0)
-    }
-
     /// Check if adding a standard dependency edge would create a cycle.
     ///
     /// If `blocking_only` is true, only considers dependency types that affect ready-work
@@ -12057,37 +11554,6 @@ impl SqliteStorage {
         blocking_only: bool,
     ) -> Result<bool> {
         Self::check_parent_child_cycle(&self.conn, child_id, parent_id, blocking_only)
-    }
-
-    /// Detect all cycles in the dependency graph.
-    ///
-    /// Returns deterministic cycle witnesses, where each cycle is a vector of
-    /// issue IDs ending with its starting ID. The implementation finds strongly
-    /// connected components first, then emits one witness per cyclic component.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn detect_all_cycles(&self) -> Result<Vec<Vec<String>>> {
-        self.detect_cycles(false)
-    }
-
-    /// Detect cycles in dependency types that affect ready-work blocking.
-    ///
-    /// This uses the same edge semantics as `would_create_cycle(..., true)`:
-    /// `blocks`, `conditional-blocks`, and `waits-for` point from dependent to blocker;
-    /// `parent-child` edges are reversed so parent/child hierarchy cycles are still reported.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn detect_blocking_cycles(&self) -> Result<Vec<Vec<String>>> {
-        self.detect_cycles(true)
-    }
-
-    fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>> {
-        let graph = self.load_dependency_cycle_graph(blocking_only)?;
-        Ok(Self::cycle_witnesses_from_graph(&graph))
     }
 
     /// Detect dependency cycles split into active and closed-only archive buckets.
@@ -12181,6 +11647,10 @@ impl SqliteStorage {
         Ok(statuses)
     }
 
+    /// Cycle witnesses without their components.
+    ///
+    /// Used by the bulk dependency-insert path, which needs one witness to
+    /// report and does not care which component produced it.
     fn cycle_witnesses_from_graph(graph: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
         Self::cycle_witnesses_with_components_from_graph(graph)
             .into_iter()
@@ -12937,36 +12407,6 @@ fn is_import_comment_id_collision(error: &DbError) -> bool {
 }
 
 /// Implement the `DependencyStore` trait for `SqliteStorage`.
-impl crate::validation::DependencyStore for SqliteStorage {
-    fn issue_exists(&self, id: &str) -> std::result::Result<bool, crate::error::BeadsError> {
-        self.id_exists(id)
-    }
-
-    fn dependency_exists(
-        &self,
-        issue_id: &str,
-        depends_on_id: &str,
-    ) -> std::result::Result<bool, crate::error::BeadsError> {
-        self.dependency_exists_between(issue_id, depends_on_id)
-    }
-
-    fn would_create_cycle(
-        &self,
-        issue_id: &str,
-        depends_on_id: &str,
-    ) -> std::result::Result<bool, crate::error::BeadsError> {
-        Self::check_cycle(&self.conn, issue_id, depends_on_id, true)
-    }
-
-    fn would_create_parent_child_cycle(
-        &self,
-        child_id: &str,
-        parent_id: &str,
-    ) -> std::result::Result<bool, crate::error::BeadsError> {
-        Self::check_parent_child_cycle(&self.conn, child_id, parent_id, true)
-    }
-}
-
 fn validate_new_comment(issue_id: &str, author: &str, text: &str) -> Result<()> {
     let comment = Comment {
         id: 1,
@@ -16456,7 +15896,11 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            storage.detect_blocking_cycles().unwrap().is_empty(),
+            storage
+                .detect_dependency_cycle_report(true)
+                .unwrap()
+                .active_cycles
+                .is_empty(),
             "duplicate parent -> child graph edges are acyclic"
         );
     }
@@ -17282,8 +16726,19 @@ mod tests {
         storage.add_dependency("bd-rel-cy1", "bd-rel-cy2", "related", "tester")?;
         storage.add_dependency("bd-rel-cy2", "bd-rel-cy1", "related", "tester")?;
 
-        assert!(!storage.detect_all_cycles()?.is_empty());
-        assert!(storage.detect_blocking_cycles()?.is_empty());
+        // `related` edges form a cycle in the full graph but not the blocking one.
+        assert!(
+            !storage
+                .detect_dependency_cycle_report(false)?
+                .active_cycles
+                .is_empty()
+        );
+        assert!(
+            storage
+                .detect_dependency_cycle_report(true)?
+                .active_cycles
+                .is_empty()
+        );
         Ok(())
     }
 

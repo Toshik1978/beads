@@ -38,21 +38,6 @@ pub fn execute(
     execute_inner(args, cli, outer_ctx, &beads_dir, None, None)
 }
 
-/// Execute ready using storage that was already opened by the caller.
-///
-/// # Errors
-///
-/// Returns an error if configuration loading or the ready query fails.
-pub fn execute_with_storage(
-    args: &ReadyArgs,
-    cli: &config::CliOverrides,
-    outer_ctx: &OutputContext,
-    beads_dir: &Path,
-    storage: &SqliteStorage,
-) -> Result<()> {
-    execute_inner(args, cli, outer_ctx, beads_dir, Some(storage), None)
-}
-
 /// Execute ready using the caller's preopened storage context.
 ///
 /// # Errors

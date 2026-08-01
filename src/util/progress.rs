@@ -3,21 +3,10 @@
 //! Provides:
 //! - Determinate progress bars for known-count operations
 //! - Spinners for indeterminate operations
-//! - Multi-progress for parallel operations
 //! - Conditional display based on terminal detection
 
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::io::{IsTerminal, stderr};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::time::Duration;
-
-/// Check if we should show progress indicators.
-///
-/// Progress is shown only if stderr is an interactive terminal.
-/// This respects piped output and non-interactive environments.
-#[must_use]
-pub fn should_show_progress() -> bool {
-    stderr().is_terminal()
-}
 
 /// Create a determinate progress bar for operations with known total count.
 ///
@@ -91,97 +80,6 @@ pub fn create_spinner(message: &str, show: bool) -> ProgressBar {
     pb
 }
 
-/// Create a multi-progress container for parallel operations.
-///
-/// # Arguments
-/// * `show` - Whether to actually show progress (use `should_show_progress()`)
-///
-/// # Example
-/// ```ignore
-/// let multi = create_multi_progress(should_show_progress());
-/// let pb1 = multi.add(create_progress_bar(100, "Task 1", true));
-/// let pb2 = multi.add(create_progress_bar(50, "Task 2", true));
-/// // ... run parallel operations
-/// ```
-#[must_use]
-pub fn create_multi_progress(show: bool) -> MultiProgress {
-    let multi = MultiProgress::new();
-
-    if !show {
-        multi.set_draw_target(ProgressDrawTarget::hidden());
-    }
-
-    multi
-}
-
-/// Progress bar wrapper that tracks whether we're showing output.
-///
-/// This is useful for conditionally showing progress without
-/// checking `should_show_progress()` on every operation.
-pub struct ProgressTracker {
-    bar: ProgressBar,
-    showing: bool,
-}
-
-impl ProgressTracker {
-    /// Create a new progress tracker with a determinate total.
-    #[must_use]
-    pub fn new(total: u64, message: &str) -> Self {
-        let showing = should_show_progress();
-        Self {
-            bar: create_progress_bar(total, message, showing),
-            showing,
-        }
-    }
-
-    /// Create a new spinner tracker for indeterminate operations.
-    #[must_use]
-    pub fn new_spinner(message: &str) -> Self {
-        let showing = should_show_progress();
-        Self {
-            bar: create_spinner(message, showing),
-            showing,
-        }
-    }
-
-    /// Increment the progress by one.
-    pub fn inc(&self, delta: u64) {
-        self.bar.inc(delta);
-    }
-
-    /// Set the current position.
-    pub fn set_position(&self, pos: u64) {
-        self.bar.set_position(pos);
-    }
-
-    /// Update the message.
-    pub fn set_message(&self, message: impl Into<String>) {
-        self.bar.set_message(message.into());
-    }
-
-    /// Finish with a message.
-    pub fn finish_with_message(&self, message: impl Into<String>) {
-        self.bar.finish_with_message(message.into());
-    }
-
-    /// Finish and clear the progress bar.
-    pub fn finish_and_clear(&self) {
-        self.bar.finish_and_clear();
-    }
-
-    /// Check if we're actually showing progress.
-    #[must_use]
-    pub const fn is_showing(&self) -> bool {
-        self.showing
-    }
-
-    /// Get the underlying progress bar.
-    #[must_use]
-    pub const fn bar(&self) -> &ProgressBar {
-        &self.bar
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,55 +105,5 @@ mod tests {
 
         spinner.finish();
         assert!(spinner.is_finished());
-    }
-
-    #[test]
-    fn test_progress_tracker_determinate() {
-        let tracker = ProgressTracker::new(10, "Processing");
-        assert_eq!(tracker.bar().length(), Some(10));
-        assert_eq!(tracker.bar().position(), 0);
-        assert_eq!(tracker.is_showing(), should_show_progress());
-
-        for _ in 0..10 {
-            tracker.inc(1);
-        }
-        assert_eq!(tracker.bar().position(), 10);
-
-        tracker.finish_with_message("Done");
-        assert!(tracker.bar().is_finished());
-        assert_eq!(tracker.bar().message(), "Done");
-    }
-
-    #[test]
-    fn test_progress_tracker_spinner() {
-        let tracker = ProgressTracker::new_spinner("Loading...");
-        assert_eq!(tracker.bar().length(), None);
-        assert_eq!(tracker.is_showing(), should_show_progress());
-        let expected_initial_message = if tracker.is_showing() {
-            "Loading..."
-        } else {
-            ""
-        };
-        assert_eq!(tracker.bar().message(), expected_initial_message);
-
-        tracker.set_message("Still loading...");
-        assert_eq!(tracker.bar().message(), "Still loading...");
-
-        tracker.finish_and_clear();
-        assert!(tracker.bar().is_finished());
-    }
-
-    #[test]
-    fn test_multi_progress_hidden() {
-        let multi = create_multi_progress(false);
-        let pb = multi.add(create_progress_bar(10, "Test", false));
-        assert_eq!(pb.length(), Some(10));
-        assert_eq!(pb.position(), 0);
-
-        pb.inc(5);
-        assert_eq!(pb.position(), 5);
-
-        pb.finish();
-        assert!(pb.is_finished());
     }
 }

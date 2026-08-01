@@ -436,14 +436,6 @@ fn resolve_route_entry(
     }
 }
 
-/// Check if an issue ID would be routed externally.
-///
-/// Quick check without fully resolving the route.
-#[must_use]
-pub fn is_external_id(issue_id: &str, local_prefix: &str) -> bool {
-    extract_prefix(issue_id).is_some_and(|prefix| !prefix.eq_ignore_ascii_case(local_prefix))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,14 +701,6 @@ mod tests {
             return;
         };
         assert!(msg.contains("loop detected"));
-    }
-
-    #[test]
-    fn is_external_id_check() {
-        assert!(is_external_id("fe-abc", "bd-"));
-        assert!(!is_external_id("bd-abc", "bd-"));
-        assert!(!is_external_id("BD-abc", "bd-")); // case insensitive
-        assert!(!is_external_id("nohyphen", "bd-")); // no prefix
     }
 
     #[test]

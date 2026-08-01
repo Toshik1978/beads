@@ -155,16 +155,6 @@ pub struct BlockedIssue {
     pub blocked_by: Vec<String>,
 }
 
-/// Tree node for dependency tree view.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TreeNode {
-    #[serde(flatten)]
-    pub issue: Issue,
-    pub depth: usize,
-    pub parent_id: Option<String>,
-    pub truncated: bool,
-}
-
 /// Summary statistics for the project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsSummary {

@@ -425,6 +425,20 @@ fn would_create_cycle_mixed_types() {
     assert!(any_cycle, "Should detect general graph cycle");
 }
 
+/// Every cycle witness, active or closed-only.
+///
+/// `detect_all_cycles` used to give this directly. It was a thin projection of
+/// `detect_dependency_cycle_report` -- same graph loader, same
+/// strongly-connected-component search, with the component dropped -- and
+/// nothing but tests called it, so it went (bds-cn6). The algorithm these
+/// tests exercise is unchanged and still live behind `br dep cycles`.
+fn all_cycle_witnesses(storage: &SqliteStorage) -> Vec<Vec<String>> {
+    let report = storage.detect_dependency_cycle_report(false).unwrap();
+    let mut cycles = report.active_cycles;
+    cycles.extend(report.archived_closed_cycles);
+    cycles
+}
+
 #[test]
 fn detect_all_cycles_finds_cycles() {
     let mut storage = test_db();
@@ -448,7 +462,7 @@ fn detect_all_cycles_finds_cycles() {
         .add_dependency(&c.id, &a.id, DependencyType::Related.as_str(), "tester")
         .unwrap();
 
-    let cycles = storage.detect_all_cycles().unwrap();
+    let cycles = all_cycle_witnesses(&storage);
     assert!(!cycles.is_empty());
 
     // At least one cycle should contain all three issues
@@ -478,7 +492,7 @@ fn detect_all_cycles_empty_when_no_cycles() {
         .add_dependency(&b.id, &c.id, DependencyType::Blocks.as_str(), "tester")
         .unwrap();
 
-    let cycles = storage.detect_all_cycles().unwrap();
+    let cycles = all_cycle_witnesses(&storage);
     assert!(cycles.is_empty());
 }
 
@@ -501,7 +515,7 @@ fn detect_all_cycles_finds_long_cycle_beyond_legacy_depth_cap() {
             .unwrap();
     }
 
-    let cycles = storage.detect_all_cycles().unwrap();
+    let cycles = all_cycle_witnesses(&storage);
 
     assert_eq!(cycles.len(), 1);
     assert_eq!(cycles[0].first(), cycles[0].last());
@@ -535,7 +549,7 @@ fn detect_all_cycles_collapses_dense_component_to_witness() {
         }
     }
 
-    let cycles = storage.detect_all_cycles().unwrap();
+    let cycles = all_cycle_witnesses(&storage);
 
     assert_eq!(cycles.len(), 1);
     assert_eq!(cycles[0].first(), cycles[0].last());
@@ -845,7 +859,7 @@ fn diamond_pattern_dependencies() {
     assert!(would_cycle);
 
     // No cycles currently exist
-    let cycles = storage.detect_all_cycles().unwrap();
+    let cycles = all_cycle_witnesses(&storage);
     assert!(cycles.is_empty());
 }
 

@@ -52,20 +52,6 @@ where
 }
 
 /// Extension trait for `Option` types.
-pub trait OptionExt<T> {
-    /// Convert `None` to an error with the given message.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the option is `None`.
-    fn ok_or_context(self, ctx: impl Into<String>) -> Result<T, BeadsError>;
-}
-
-impl<T> OptionExt<T> for Option<T> {
-    fn ok_or_context(self, ctx: impl Into<String>) -> Result<T, BeadsError> {
-        self.ok_or_else(|| BeadsError::internal(ctx.into()))
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -92,23 +78,5 @@ mod tests {
         assert!(with_context.is_err());
         let err = with_context.unwrap_err();
         assert!(err.to_string().contains("/some/path"));
-    }
-
-    #[test]
-    fn test_option_ext() {
-        let none: Option<i32> = None;
-        let result = none.ok_or_context("value was required");
-
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("value was required")
-        );
-
-        let some: Option<i32> = Some(42);
-        let result = some.ok_or_context("value was required");
-        assert_eq!(result.unwrap(), 42);
     }
 }

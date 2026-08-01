@@ -23,8 +23,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 /// Set when one of the registered termination signals has been
-/// observed. Public callers should use [`is_requested`] /
-/// [`exit_code`].
+/// observed. Production reads it through [`exit_code`].
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// `128 + signo` of the signal that triggered the shutdown, encoding
@@ -44,8 +43,8 @@ static INSTALLED: OnceLock<()> = OnceLock::new();
 /// # Behaviour
 ///
 /// * The first signal records the exit code `128 + signo` and flips
-///   [`is_requested`]. The main thread is responsible for noticing the
-///   flag at a safe checkpoint and returning from `main`.
+///   this flag. The main thread is responsible for noticing it at a safe
+///   checkpoint and returning from `main`.
 /// * The second matching signal calls
 ///   [`signal_hook::low_level::exit`] (an async-signal-safe `_exit`
 ///   wrapper) immediately so a user can always escape a hung command
@@ -60,7 +59,13 @@ pub fn install() {
     install_unix();
 }
 
-/// Returns `true` once any registered signal has been observed.
+/// Whether a termination signal has been observed.
+///
+/// Test-only. Production observes shutdown through [`exit_code`], which
+/// carries the same flag plus the signal number; `main` checks it at its safe
+/// checkpoint. This predicate exists so tests can guard assertions on the
+/// unsignalled state without depending on that encoding.
+#[cfg(test)]
 #[must_use]
 pub fn is_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Acquire)

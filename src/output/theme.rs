@@ -25,7 +25,6 @@ pub struct Theme {
 
     pub issue_id: Style,
     pub issue_title: Style,
-    pub issue_description: Style,
 
     pub status_open: Style,
     pub status_in_progress: Style,
@@ -75,7 +74,6 @@ impl Default for Theme {
 
             issue_id: Style::new().color(color("cyan")).bold(),
             issue_title: Style::new().bold(),
-            issue_description: Style::new(),
 
             status_open: Style::new().color(color("green")),
             status_in_progress: Style::new().color(color("yellow")).bold(),

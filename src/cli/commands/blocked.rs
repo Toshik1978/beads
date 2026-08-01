@@ -37,21 +37,6 @@ pub fn execute(
     execute_inner(args, overrides, outer_ctx, &beads_dir, None, None)
 }
 
-/// Execute blocked using storage that was already opened by the caller.
-///
-/// # Errors
-///
-/// Returns an error if querying blocked issues fails.
-pub fn execute_with_storage(
-    args: &BlockedArgs,
-    overrides: &CliOverrides,
-    outer_ctx: &OutputContext,
-    beads_dir: &Path,
-    storage: &SqliteStorage,
-) -> Result<()> {
-    execute_inner(args, overrides, outer_ctx, beads_dir, Some(storage), None)
-}
-
 /// Execute blocked using the caller's preopened storage context.
 ///
 /// # Errors

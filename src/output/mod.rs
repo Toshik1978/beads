@@ -26,7 +26,6 @@
 //!
 //! // Mode-aware output
 //! ctx.success("Operation completed");
-//! ctx.error("Something went wrong");
 //! ctx.json(&data);  // Only outputs in JSON mode
 //!
 //! // Rich rendering (only in Rich mode)

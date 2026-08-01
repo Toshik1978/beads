@@ -12,9 +12,6 @@ pub struct IssuePanel<'a> {
     issue: &'a Issue,
     details: Option<&'a IssueDetails>,
     theme: &'a Theme,
-    show_dependencies: bool,
-    show_dependents: bool,
-    show_comments: bool,
 }
 
 impl<'a> IssuePanel<'a> {
@@ -24,9 +21,6 @@ impl<'a> IssuePanel<'a> {
             issue,
             details: None,
             theme,
-            show_dependencies: true,
-            show_dependents: true,
-            show_comments: true,
         }
     }
 
@@ -36,28 +30,7 @@ impl<'a> IssuePanel<'a> {
             issue: &details.issue,
             details: Some(details),
             theme,
-            show_dependencies: true,
-            show_dependents: true,
-            show_comments: true,
         }
-    }
-
-    #[must_use]
-    pub fn show_dependencies(mut self, show: bool) -> Self {
-        self.show_dependencies = show;
-        self
-    }
-
-    #[must_use]
-    pub fn show_dependents(mut self, show: bool) -> Self {
-        self.show_dependents = show;
-        self
-    }
-
-    #[must_use]
-    pub fn show_comments(mut self, show: bool) -> Self {
-        self.show_comments = show;
-        self
     }
 
     pub fn print(&self, ctx: &OutputContext, wrap: bool) {
@@ -229,29 +202,25 @@ impl<'a> IssuePanel<'a> {
     }
 
     fn append_relationships(&self, content: &mut Text) {
-        if self.show_dependencies {
-            if let Some(details) = self.details {
-                render_dependency_list(
-                    "Dependencies",
-                    &details.dependencies,
-                    content,
-                    self.theme,
-                    false,
-                );
-            } else if !self.issue.dependencies.is_empty() {
-                render_dependency_refs(&self.issue.dependencies, content, self.theme);
-            }
+        if let Some(details) = self.details {
+            render_dependency_list(
+                "Dependencies",
+                &details.dependencies,
+                content,
+                self.theme,
+                false,
+            );
+        } else if !self.issue.dependencies.is_empty() {
+            render_dependency_refs(&self.issue.dependencies, content, self.theme);
         }
 
-        if self.show_dependents
-            && let Some(details) = self.details
-        {
+        if let Some(details) = self.details {
             render_dependency_list("Dependents", &details.dependents, content, self.theme, true);
         }
     }
 
     fn append_comments(&self, content: &mut Text, comments: &[Comment], content_width: usize) {
-        if !self.show_comments || comments.is_empty() {
+        if comments.is_empty() {
             return;
         }
 

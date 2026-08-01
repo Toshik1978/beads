@@ -588,8 +588,6 @@ pub struct ImportResult {
     pub skipped_count: usize,
     /// Number of tombstones skipped.
     pub tombstone_skipped: usize,
-    /// Conflict markers detected (if any).
-    pub conflict_markers: Vec<ConflictMarker>,
     /// Number of orphaned DB entries removed during --rebuild.
     pub orphans_removed: usize,
     /// Number of orphaned FK rows cleaned after deferred-FK import.
@@ -5076,15 +5074,6 @@ pub fn three_way_merge(
     }
 
     report
-}
-
-/// Configuration for a 3-way merge operation.
-#[derive(Debug, Clone, Default)]
-pub struct MergeConfig {
-    /// Strategy for resolving conflicts.
-    pub strategy: ConflictResolution,
-    /// Whether to skip tombstoned issues.
-    pub respect_tombstones: bool,
 }
 
 /// Save the base snapshot to a file.

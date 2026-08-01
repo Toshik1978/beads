@@ -524,16 +524,6 @@ impl SqliteValue {
         }
     }
 
-    /// Extract a blob reference. Strict, like the accessors above.
-    #[inline]
-    #[must_use]
-    pub fn as_blob(&self) -> Option<&[u8]> {
-        match self {
-            Self::Blob(b) => Some(b),
-            _ => None,
-        }
-    }
-
     /// Returns `true` for [`SqliteValue::Null`].
     #[inline]
     #[must_use]
@@ -1038,8 +1028,6 @@ pub mod compat {
         pub const SQLITE_OPEN_CREATE: Self = Self(0x04);
         /// Interpret the path as a URI.
         pub const SQLITE_OPEN_URI: Self = Self(0x40);
-        /// Omit per-connection mutexes.
-        pub const SQLITE_OPEN_NO_MUTEX: Self = Self(0x0000_8000);
         /// Use full mutex protection.
         pub const SQLITE_OPEN_FULL_MUTEX: Self = Self(0x0001_0000);
 
