@@ -65,7 +65,7 @@ pub fn execute(
     cli: &config::CliOverrides,
     ctx: &OutputContext,
 ) -> Result<()> {
-    let use_structured_output = json || ctx.is_json() || args.robot;
+    let use_structured_output = json || ctx.is_json();
 
     tracing::info!("Executing reopen command");
 
@@ -535,7 +535,6 @@ mod tests {
         let args = ReopenArgs {
             ids: vec!["bd-reopen-deferred".to_string()],
             reason: None,
-            robot: false,
             ..Default::default()
         };
         let overrides = CliOverrides {
@@ -593,7 +592,6 @@ mod tests {
         let args = ReopenArgs {
             ids: vec!["bd-reopen-tombstone".to_string()],
             reason: None,
-            robot: false,
             ..Default::default()
         };
         let overrides = CliOverrides {

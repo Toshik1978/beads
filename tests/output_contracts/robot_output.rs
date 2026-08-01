@@ -173,7 +173,7 @@ fn robot_golden_ready_output() {
         &workspace,
         [
             "ready",
-            "--robot",
+            "--json",
             "--include-deferred",
             "--sort",
             "priority",
@@ -184,10 +184,10 @@ fn robot_golden_ready_output() {
     );
     assert!(
         output.status.success(),
-        "ready --robot failed: {}",
+        "ready --json failed: {}",
         output.stderr
     );
-    assert_valid_json(&output.stdout, "ready --robot");
+    assert_valid_json(&output.stdout, "ready --json");
     assert_snapshot!("robot_ready_output", output.stdout.trim_end());
 }
 

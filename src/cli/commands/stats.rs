@@ -92,11 +92,8 @@ fn execute_inner(
             || beads_dir.join("issues.jsonl"),
             |ctx| ctx.paths.jsonl_path.clone(),
         );
-    let output_format = resolve_output_format_basic_with_outer_mode(
-        args.format,
-        outer_ctx.inherited_output_mode(),
-        args.robot,
-    );
+    let output_format =
+        resolve_output_format_basic_with_outer_mode(args.format, outer_ctx.inherited_output_mode());
     let quiet = cli.quiet.unwrap_or(false);
     let early_ctx = OutputContext::from_output_format(output_format, quiet, true);
     let storage_ctx_for_config = preloaded_storage_ctx.or(owned_storage_ctx.as_ref());

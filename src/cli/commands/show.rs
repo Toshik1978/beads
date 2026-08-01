@@ -91,11 +91,8 @@ fn execute_routed(
         );
     }
 
-    let output_format = resolve_output_format_basic_with_outer_mode(
-        args.format,
-        outer_ctx.inherited_output_mode(),
-        false,
-    );
+    let output_format =
+        resolve_output_format_basic_with_outer_mode(args.format, outer_ctx.inherited_output_mode());
     let quiet = cli.quiet.unwrap_or(false);
     let normalized_local_beads_dir =
         dunce::canonicalize(beads_dir).unwrap_or_else(|_| beads_dir.to_path_buf());
@@ -242,11 +239,8 @@ fn execute_inner(
         preloaded_storage,
         preloaded_storage_ctx,
     )?;
-    let output_format = resolve_output_format_basic_with_outer_mode(
-        args.format,
-        outer_ctx.inherited_output_mode(),
-        false,
-    );
+    let output_format =
+        resolve_output_format_basic_with_outer_mode(args.format, outer_ctx.inherited_output_mode());
     let quiet = cli.quiet.unwrap_or(false);
     let ctx = OutputContext::from_output_format(output_format, quiet, !use_color);
 

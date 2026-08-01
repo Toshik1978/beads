@@ -131,7 +131,7 @@ fn e2e_dep_cycles_default_hides_closed_archive_and_include_closed_exposes_it() {
     );
 }
 
-/// #368: an active dependency cycle must surface to scripted/robot callers via
+/// #368: an active dependency cycle must surface to scripted callers via
 /// a non-zero exit code (5 = CycleDetected) on both the text and JSON surfaces,
 /// while the cycle data itself is still emitted on stdout.
 #[test]

@@ -4,7 +4,7 @@ description: >-
   Use when working inside a directory that has a `.beads/` workspace (or when
   asked to initialize one), and the task involves tracking, creating,
   querying, updating, or closing issues with the `br` CLI. Covers the full
-  24-command surface, the `--json`/`--robot` agent output modes, the
+  23-command surface, the `--json` agent output mode, the
   auto-flush/auto-import sync model, and the claim-work-close loop. Load this
   before shelling out to `br` for the first time in a session.
 ---
@@ -49,8 +49,7 @@ workspace; see the "Cross-Project Routing" section of `CLI_REFERENCE.md`.
 ## Always use `--json` when scripting
 
 Every query and mutating command accepts `--json` for machine-readable
-output; several also accept `--robot` for a machine-oriented variant of their
-text output. Parse `--json` output with `jq` rather than the human-formatted
+output. Parse `--json` output with `jq` rather than the human-formatted
 default:
 
 ```bash

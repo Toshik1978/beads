@@ -730,7 +730,7 @@ pub fn execute_with_args(
 /// Lists up to five `id: reason` pairs (sanitized for
 /// terminal safety) so the error names WHY each issue was skipped instead of
 /// leaving the operator to guess (issue #380). Longer batches get a
-/// `+N more` suffix; JSON/robot callers still receive the full skip list in
+/// `+N more` suffix; JSON callers still receive the full skip list in
 /// the structured payload.
 fn summarize_skip_reasons(skipped: &[SkippedIssue]) -> String {
     const SKIP_SUMMARY_PREVIEW: usize = 5;

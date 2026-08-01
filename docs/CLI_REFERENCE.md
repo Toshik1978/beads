@@ -353,7 +353,6 @@ br close [OPTIONS] [IDS]...
 | `-f, --force` | Close even if blocked by open dependencies |
 | `--suggest-next` | Return newly unblocked issues |
 | `--session <ID>` | Session ID for tracking |
-| `--robot` | Machine-readable output |
 
 **Examples:**
 ```bash
@@ -384,7 +383,6 @@ br reopen [OPTIONS] [IDS]...
 | Option | Description |
 |--------|-------------|
 | `-r, --reason <TEXT>` | Reason for reopening, stored as a comment |
-| `--robot` | Machine-readable output |
 
 ---
 
@@ -434,7 +432,6 @@ br ready [OPTIONS]
 | `-r, --recursive` | Include all descendants with `--parent` |
 | `--wrap` | Wrap long lines instead of truncating in text output |
 | `--format <FMT>` | Output format: text, json |
-| `--robot` | Machine-readable output |
 
 **Examples:**
 ```bash
@@ -468,7 +465,7 @@ Semantics:
   group is `[open]` — exactly the pre-#354 behavior (zero change for existing
   repos).
 - **Status preserved:** returned issues keep their real status, so a `rework`
-  item still emits `{"status":"rework"}` in `--json`/`--robot`.
+  item still emits `{"status":"rework"}` in `--json`.
 - **Validation:** when `workflow.strict: true` (and `workflow.statuses` is set),
   every member of the ready group must be in `workflow.statuses`; an
   out-of-vocabulary member is rejected with a clear error. Without `strict`, the
@@ -478,8 +475,7 @@ Semantics:
   `defer_until` stays out of `br ready` until it elapses. `--include-deferred`
   additionally surfaces `deferred` work and drops the time-gate, without
   double-counting `deferred` if it is also listed in the group.
-- **Scope:** `br ready`, `br ready --json`, and `br ready --robot` all use the
-  same ready group.
+- **Scope:** `br ready` and `br ready --json` both use the same ready group.
 
 **Atomic workflow capacity (`.beads/policy.yaml`):**
 
@@ -568,7 +564,6 @@ Shows issues that are blocked by other open issues.
 | `-p, --priority <N>` | Filter by priority |
 | `-l, --label <LABEL>` | Filter by label |
 | `--format <FMT>` | Output format: text, json |
-| `--robot` | Machine-readable output |
 
 ---
 
@@ -760,7 +755,6 @@ br undefer <IDS>... [OPTIONS]
 |--------|-------------|
 | `--until <DATE>` | Defer until date |
 | `--transition-comment <TEXT>` | Add a fresh comment atomically with each status transition |
-| `--robot` | Machine-readable output |
 
 ---
 
@@ -800,7 +794,6 @@ br sync [OPTIONS]
 | `--orphans <MODE>` | Orphan handling: strict, resurrect, skip, allow |
 | `--rename-prefix` | During import, rewrite mismatched issue IDs into the configured default prefix |
 | `--rebuild` | During import, rebuild SQLite from JSONL and remove DB entries absent from JSONL |
-| `--robot` | Machine-readable output |
 
 **Merge semantics:**
 - `--merge` uses `.beads/beads.base.jsonl` as the common ancestor and compares it with the local SQLite database and current JSONL file.
@@ -903,7 +896,6 @@ br stats [OPTIONS]
 | `--no-activity` | Skip recent activity stats |
 | `--activity-hours <HOURS>` | Activity window in hours (default: 24) |
 | `--format <FMT>` | Output format: text, json |
-| `--robot` | Machine-readable output |
 
 ---
 

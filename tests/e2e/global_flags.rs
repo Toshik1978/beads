@@ -1,6 +1,6 @@
 //! E2E tests for global CLI flags and output modes.
 //!
-//! Tests --json, --robot, --no-color, --no-db, and other global flags.
+//! Tests --json, --no-color, --no-db, and other global flags.
 //! Part of beads-pnvt.
 
 // `common` is now the `test-support` crate; aliased so that the 753
@@ -196,25 +196,23 @@ fn e2e_json_flag_stats() {
 }
 
 // ============================================================================
-// --robot flag tests
+// JSON output-mode tests
 // ============================================================================
 
-/// Note: --robot is not a global flag for `list` command.
-/// The `list --json` flag provides machine-readable output.
-/// The `--robot` flag exists on specific commands like `sync` and `history`.
-/// This test verifies that list --json provides robot-parseable output.
+/// Complements `e2e_json_flag_list` above, which checks the issues it finds:
+/// this one pins the *envelope* `list --json` wraps them in.
 #[test]
-fn e2e_robot_flag_list() {
-    let _log = common::test_log("e2e_robot_flag_list");
+fn e2e_json_flag_list_emits_envelope() {
+    let _log = common::test_log("e2e_json_flag_list_emits_envelope");
     let workspace = BrWorkspace::new();
 
     let init = run_br(&workspace, ["init"], "init");
     assert!(init.status.success(), "init failed: {}", init.stderr);
 
-    let create = run_br(&workspace, ["create", "Robot test issue"], "create");
+    let create = run_br(&workspace, ["create", "Envelope test issue"], "create");
     assert!(create.status.success(), "create failed: {}", create.stderr);
 
-    // List with --json flag (provides robot-parseable output)
+    // List with --json flag (machine-parseable output)
     let list = run_br(&workspace, ["list", "--json"], "list_json");
     assert!(list.status.success(), "list --json failed: {}", list.stderr);
 
@@ -229,8 +227,8 @@ fn e2e_robot_flag_list() {
 }
 
 #[test]
-fn e2e_robot_flag_stderr_diagnostics() {
-    let _log = common::test_log("e2e_robot_flag_stderr_diagnostics");
+fn e2e_json_flag_stderr_diagnostics() {
+    let _log = common::test_log("e2e_json_flag_stderr_diagnostics");
     let workspace = BrWorkspace::new();
 
     let init = run_br(&workspace, ["init"], "init");
@@ -261,8 +259,8 @@ fn e2e_robot_flag_stderr_diagnostics() {
 }
 
 #[test]
-fn e2e_robot_flag_sync_flush_outputs_json() {
-    let _log = common::test_log("e2e_robot_flag_sync_flush_outputs_json");
+fn e2e_json_flag_sync_flush_outputs_json() {
+    let _log = common::test_log("e2e_json_flag_sync_flush_outputs_json");
     let workspace = BrWorkspace::new();
 
     let init = run_br(&workspace, ["init"], "init");
@@ -277,17 +275,13 @@ fn e2e_robot_flag_sync_flush_outputs_json() {
 
     let sync = run_br(
         &workspace,
-        ["sync", "--flush-only", "--robot"],
-        "sync_robot_flush",
+        ["sync", "--flush-only", "--json"],
+        "sync_json_flush",
     );
-    assert!(
-        sync.status.success(),
-        "sync --robot failed: {}",
-        sync.stderr
-    );
+    assert!(sync.status.success(), "sync --json failed: {}", sync.stderr);
 
     let payload = extract_json_payload(&sync.stdout);
-    let json: Value = serde_json::from_str(&payload).expect("robot mode should output valid JSON");
+    let json: Value = serde_json::from_str(&payload).expect("json mode should output valid JSON");
     assert_eq!(json["exported_issues"].as_u64(), Some(1));
 }
 

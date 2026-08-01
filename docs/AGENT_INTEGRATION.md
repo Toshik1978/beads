@@ -31,8 +31,7 @@ optionally with `--prefix <PREFIX>` to control the issue-ID prefix.
 
 ## JSON is the integration surface
 
-Every query and mutating command accepts `--json`; several also accept
-`--robot` for a machine-oriented variant of their human output. Treat
+Every query and mutating command accepts `--json`. Treat
 `--json` output as the stable interface and the default text/table rendering
 as for humans only — parse with `jq`, not by scraping text columns:
 

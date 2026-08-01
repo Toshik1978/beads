@@ -1,5 +1,5 @@
 use beads::cli::commands;
-use beads::cli::{Cli, Commands, OutputFormat, command_requests_robot_json};
+use beads::cli::{Cli, Commands, OutputFormat};
 use beads::config;
 use beads::logging::init_logging;
 use beads::output::OutputContext;
@@ -304,10 +304,10 @@ fn main() {
             }
         }
         Commands::Close(args) => {
-            commands::close::execute_cli(&args, cli.json || args.robot, &overrides, &output_ctx)
+            commands::close::execute_cli(&args, cli.json, &overrides, &output_ctx)
         }
         Commands::Reopen(args) => {
-            commands::reopen::execute(&args, cli.json || args.robot, &overrides, &output_ctx)
+            commands::reopen::execute(&args, cli.json, &overrides, &output_ctx)
         }
         Commands::Dep { command } => {
             if let (Some(res), Some(beads_dir)) = (storage_result.as_ref(), ctx.beads_dir.as_ref())
@@ -395,7 +395,7 @@ fn main() {
                     res,
                 )
             } else {
-                commands::blocked::execute(&args, cli.json || args.robot, &overrides, &output_ctx)
+                commands::blocked::execute(&args, cli.json, &overrides, &output_ctx)
             }
         }
         Commands::Sync(args) => commands::sync::execute(
@@ -419,7 +419,7 @@ fn main() {
                     res,
                 )
             } else {
-                commands::stats::execute(&args, cli.json || args.robot, &overrides, &output_ctx)
+                commands::stats::execute(&args, cli.json, &overrides, &output_ctx)
             }
         }
         Commands::Config { command } => {
@@ -822,7 +822,6 @@ fn should_render_errors_as_json_with_env(
     env_output_format: Option<OutputFormat>,
 ) -> bool {
     cli.json
-        || command_requests_robot_json(&cli.command)
         || matches!(
             command_requested_output_format(&cli.command).or(env_output_format),
             Some(OutputFormat::Json)
@@ -856,7 +855,7 @@ fn handle_error(err: &BeadsError, json_mode: bool, color_mode: bool) -> ! {
 
     if json_mode {
         // #336: In `--json` mode, route the structured JSON error envelope to
-        // STDOUT (where success JSON already goes) so robot callers read ONE
+        // STDOUT (where success JSON already goes) so scripted callers read ONE
         // clean, parseable stream. tracing/log lines stay on stderr (see
         // `logging::init_logging`, which writes to `std::io::stderr`), so the
         // stdout JSON is never interleaved with diagnostic noise.

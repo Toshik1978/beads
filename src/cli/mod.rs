@@ -1230,39 +1230,13 @@ impl From<OutputFormatBasic> for OutputFormat {
 
 /// Resolve effective output format with CLI/env precedence.
 #[must_use]
-pub fn resolve_output_format(
-    requested: Option<OutputFormat>,
-    json: bool,
-    robot: bool,
-) -> OutputFormat {
-    if json || robot {
+pub fn resolve_output_format(requested: Option<OutputFormat>, json: bool) -> OutputFormat {
+    if json {
         OutputFormat::Json
     } else if let Some(requested) = requested {
         requested
     } else {
         OutputFormat::from_env().unwrap_or(OutputFormat::Text)
-    }
-}
-
-/// Returns true when a subcommand-local `--robot` flag requests JSON output.
-#[must_use]
-pub const fn command_requests_robot_json(cmd: &Commands) -> bool {
-    match cmd {
-        Commands::Close(args) => args.robot,
-        Commands::Reopen(args) => args.robot,
-        Commands::Ready(args) => args.robot,
-        Commands::Blocked(args) => args.robot,
-        Commands::Stats(args) => args.robot,
-        Commands::Sync(args) => args.robot,
-        Commands::Dep { command } => match command {
-            DepCommands::Import(args) => args.robot,
-            DepCommands::Add(_)
-            | DepCommands::Remove(_)
-            | DepCommands::List(_)
-            | DepCommands::Tree(_)
-            | DepCommands::Cycles(_) => false,
-        },
-        _ => false,
     }
 }
 
@@ -1285,9 +1259,8 @@ pub enum InheritedOutputMode {
 pub fn resolve_output_format_with_outer_mode(
     requested: Option<OutputFormat>,
     inherited_mode: InheritedOutputMode,
-    robot: bool,
 ) -> OutputFormat {
-    if matches!(inherited_mode, InheritedOutputMode::Json) || robot {
+    if matches!(inherited_mode, InheritedOutputMode::Json) {
         OutputFormat::Json
     } else if let Some(requested) = requested {
         requested
@@ -1303,9 +1276,8 @@ pub fn resolve_output_format_with_outer_mode(
 pub fn resolve_output_format_basic(
     requested: Option<OutputFormatBasic>,
     json: bool,
-    robot: bool,
 ) -> OutputFormat {
-    let resolved = resolve_output_format(requested.map(Into::into), json, robot);
+    let resolved = resolve_output_format(requested.map(Into::into), json);
     match resolved {
         OutputFormat::Csv => OutputFormat::Text,
         other => other,
@@ -1318,10 +1290,8 @@ pub fn resolve_output_format_basic(
 pub fn resolve_output_format_basic_with_outer_mode(
     requested: Option<OutputFormatBasic>,
     inherited_mode: InheritedOutputMode,
-    robot: bool,
 ) -> OutputFormat {
-    let resolved =
-        resolve_output_format_with_outer_mode(requested.map(Into::into), inherited_mode, robot);
+    let resolved = resolve_output_format_with_outer_mode(requested.map(Into::into), inherited_mode);
     match resolved {
         OutputFormat::Csv => OutputFormat::Text,
         other => other,
@@ -1541,10 +1511,6 @@ pub struct DepAddArgs {
 pub struct DepImportArgs {
     /// JSONL file containing edge objects or issue records with dependencies
     pub path: PathBuf,
-
-    /// Machine-readable output (alias for --json)
-    #[arg(long)]
-    pub robot: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1811,10 +1777,6 @@ pub struct ReadyArgs {
     /// Output format (text, json). Env: BR_OUTPUT_FORMAT.
     #[arg(long, value_enum)]
     pub format: Option<OutputFormatBasic>,
-
-    /// Machine-readable output (alias for --json)
-    #[arg(long)]
-    pub robot: bool,
 }
 
 /// Arguments for the blocked command.
@@ -1848,10 +1810,6 @@ pub struct BlockedArgs {
     /// Output format (text, json). Env: BR_OUTPUT_FORMAT.
     #[arg(long, value_enum)]
     pub format: Option<OutputFormatBasic>,
-
-    /// Machine-readable output (alias for --json)
-    #[arg(long)]
-    pub robot: bool,
 }
 
 /// Arguments for the close command.
@@ -1881,10 +1839,6 @@ pub struct CloseArgs {
     /// Session ID for tracking
     #[arg(long)]
     pub session: Option<String>,
-
-    /// Machine-readable output (alias for --json)
-    #[arg(long)]
-    pub robot: bool,
 
     // Closure-time policy gates (issue #274 — Phase 1).
     //
@@ -1925,10 +1879,6 @@ pub struct ReopenArgs {
     /// Reason for reopening (stored as a comment)
     #[arg(long, short = 'r')]
     pub reason: Option<String>,
-
-    /// Machine-readable output (alias for --json)
-    #[arg(long)]
-    pub robot: bool,
 
     // Tier 1 attribution (issue #312, Layer 3 — capture-only). Recorded on the
     // reopen status-change audit event; NEVER gated or enforced on.
@@ -2017,7 +1967,7 @@ pub struct SyncArgs {
     /// Parallel worker cap for read-only JSONL witness hashing and work planning
     ///
     /// Only used with --witness. When omitted, br uses a deterministic
-    /// 64-worker cap rather than host-dependent CPU detection so robot output
+    /// 64-worker cap rather than host-dependent CPU detection so machine output
     /// remains stable across machines.
     #[arg(
         long = "witness-parallelism",
@@ -2083,10 +2033,6 @@ pub struct SyncArgs {
     /// the JSONL source of truth.
     #[arg(long)]
     pub rebuild: bool,
-
-    /// Machine-readable output (alias for --json)
-    #[arg(long)]
-    pub robot: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -2170,10 +2116,6 @@ pub struct StatsArgs {
     /// Output format (text, json). Env: BR_OUTPUT_FORMAT.
     #[arg(long, value_enum)]
     pub format: Option<OutputFormatBasic>,
-
-    /// Machine-readable output (alias for --json)
-    #[arg(long)]
-    pub robot: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2525,8 +2467,7 @@ mod tests {
 
     #[test]
     fn test_resolve_output_format_with_outer_mode_keeps_quiet_over_env_defaults() {
-        let resolved =
-            resolve_output_format_with_outer_mode(None, InheritedOutputMode::Quiet, false);
+        let resolved = resolve_output_format_with_outer_mode(None, InheritedOutputMode::Quiet);
         assert_eq!(resolved, OutputFormat::Text);
     }
 
@@ -2535,7 +2476,6 @@ mod tests {
         let resolved = resolve_output_format_basic_with_outer_mode(
             Some(OutputFormatBasic::Json),
             InheritedOutputMode::Quiet,
-            false,
         );
         assert_eq!(resolved, OutputFormat::Json);
     }

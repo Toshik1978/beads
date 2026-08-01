@@ -1,5 +1,5 @@
 use super::Theme;
-use crate::cli::{Cli, InheritedOutputMode, OutputFormat, command_requests_robot_json};
+use crate::cli::{Cli, InheritedOutputMode, OutputFormat};
 use crate::format::{sanitize_terminal_inline, sanitize_terminal_text};
 use rich_rust::prelude::*;
 use rich_rust::renderables::Renderable;
@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::io::{self, IsTerminal, Write};
 use std::sync::{Mutex, OnceLock};
 
-/// Central output coordinator that respects robot/json/quiet modes.
+/// Central output coordinator that respects json/quiet modes.
 ///
 /// Uses lazy initialization for console and theme to ensure zero overhead
 /// in JSON/Quiet modes where rich output is never used.
@@ -272,7 +272,7 @@ impl OutputContext {
     }
 
     fn detect_mode_with_env(args: &Cli, env_output_format: Option<OutputFormat>) -> OutputMode {
-        if args.json || command_requests_robot_json(&args.command) {
+        if args.json {
             return OutputMode::Json;
         }
         if args.quiet {
@@ -626,62 +626,48 @@ mod tests {
     }
 
     #[test]
-    fn detect_mode_uses_robot_flag_for_sync() {
-        let cli = Cli::parse_from(["br", "sync", "--robot"]);
-        assert_eq!(
-            OutputContext::detect_mode_with_env(&cli, Some(OutputFormat::Text)),
-            OutputMode::Json
-        );
-    }
-
-    #[test]
     fn detect_mode_global_flag_matrix_has_unambiguous_precedence() {
         for quiet in [false, true] {
             for json in [false, true] {
-                for robot in [false, true] {
-                    for no_color in [false, true] {
-                        let mut argv = vec!["br"];
-                        if quiet {
-                            argv.push("--quiet");
-                        }
-                        if json {
-                            argv.push("--json");
-                        }
-                        if no_color {
-                            argv.push("--no-color");
-                        }
-                        argv.extend(["sync", "--status"]);
-                        if robot {
-                            argv.push("--robot");
-                        }
+                for no_color in [false, true] {
+                    let mut argv = vec!["br"];
+                    if quiet {
+                        argv.push("--quiet");
+                    }
+                    if json {
+                        argv.push("--json");
+                    }
+                    if no_color {
+                        argv.push("--no-color");
+                    }
+                    argv.extend(["sync", "--status"]);
 
-                        let cli = Cli::parse_from(argv);
-                        let mode = OutputContext::detect_mode_with_env(&cli, None);
+                    let cli = Cli::parse_from(argv);
+                    let mode = OutputContext::detect_mode_with_env(&cli, None);
 
-                        if json || robot {
-                            assert_eq!(
-                                mode,
-                                OutputMode::Json,
-                                "json/robot must override quiet/no-color: quiet={quiet}, json={json}, robot={robot}, no_color={no_color}"
-                            );
-                        } else if quiet {
-                            assert_eq!(
-                                mode,
-                                OutputMode::Quiet,
-                                "quiet must override no-color: quiet={quiet}, json={json}, robot={robot}, no_color={no_color}"
-                            );
-                        } else if no_color {
-                            assert_eq!(
-                                mode,
-                                OutputMode::Plain,
-                                "no-color must force plain output: quiet={quiet}, json={json}, robot={robot}, no_color={no_color}"
-                            );
-                        } else {
-                            assert!(
-                                matches!(mode, OutputMode::Rich | OutputMode::Plain),
-                                "no explicit output controls should be TTY-dependent, got {mode:?}"
-                            );
-                        }
+                    if json {
+                        assert_eq!(
+                            mode,
+                            OutputMode::Json,
+                            "json must override quiet/no-color: quiet={quiet}, json={json}, no_color={no_color}"
+                        );
+                    } else if quiet {
+                        assert_eq!(
+                            mode,
+                            OutputMode::Quiet,
+                            "quiet must override no-color: quiet={quiet}, json={json}, no_color={no_color}"
+                        );
+                    } else if no_color {
+                        assert_eq!(
+                            mode,
+                            OutputMode::Plain,
+                            "no-color must force plain output: quiet={quiet}, json={json}, no_color={no_color}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(mode, OutputMode::Rich | OutputMode::Plain),
+                            "no explicit output controls should be TTY-dependent, got {mode:?}"
+                        );
                     }
                 }
             }

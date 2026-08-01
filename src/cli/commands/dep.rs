@@ -821,11 +821,8 @@ fn dep_list(
     quiet: bool,
     no_color: bool,
 ) -> Result<()> {
-    let output_format = resolve_output_format_basic_with_outer_mode(
-        args.format,
-        outer_ctx.inherited_output_mode(),
-        false,
-    );
+    let output_format =
+        resolve_output_format_basic_with_outer_mode(args.format, outer_ctx.inherited_output_mode());
     let ctx = OutputContext::from_output_format(output_format, quiet, no_color);
     let issue_id = resolve_issue_id(storage, resolver, &args.issue)?;
     let dep_type_filter = args
@@ -1779,7 +1776,7 @@ fn dep_cycles(
     let total_count = active_count + archived_closed_count;
 
     // #368: An active dependency cycle is a machine-actionable condition, so a
-    // scripted/robot caller gating on the exit code must be able to see it. We
+    // scripted caller gating on the exit code must be able to see it. We
     // still emit the full, data-carrying output on every surface below (text,
     // rich, JSON `count`) — the exit code is recorded here and applied by
     // `main` after output completes, so the JSON stream stays a single

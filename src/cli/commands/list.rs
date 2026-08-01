@@ -72,11 +72,8 @@ fn execute_inner(
     let client_filters = needs_client_filters(args);
 
     // Determine output format early so we know whether to run a count query.
-    let output_format = resolve_output_format_with_outer_mode(
-        args.format,
-        outer_ctx.inherited_output_mode(),
-        false,
-    );
+    let output_format =
+        resolve_output_format_with_outer_mode(args.format, outer_ctx.inherited_output_mode());
     let is_json_output = matches!(output_format, OutputFormat::Json);
 
     // The effective limit and offset from the user's request.

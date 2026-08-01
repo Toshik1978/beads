@@ -92,11 +92,8 @@ fn execute_inner(
         .or_else(|| preloaded_storage_ctx.map(|ctx| &ctx.storage))
         .or_else(|| owned_storage_ctx.as_ref().map(|ctx| &ctx.storage))
         .expect("blocked should have an open storage handle");
-    let output_format = resolve_output_format_basic_with_outer_mode(
-        args.format,
-        outer_ctx.inherited_output_mode(),
-        args.robot,
-    );
+    let output_format =
+        resolve_output_format_basic_with_outer_mode(args.format, outer_ctx.inherited_output_mode());
     let quiet = overrides.quiet.unwrap_or(false);
     let fast_ctx = OutputContext::from_output_format(output_format, quiet, true);
     if matches!(output_format, OutputFormat::Json) && !storage.may_have_blocked_command_results()? {
@@ -624,7 +621,6 @@ mod tests {
         assert!(args.type_.is_empty());
         assert!(args.priority.is_empty());
         assert!(args.label.is_empty());
-        assert!(!args.robot);
         info!("test_blocked_args_defaults: assertions passed");
     }
 

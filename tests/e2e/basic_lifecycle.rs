@@ -1326,7 +1326,7 @@ fn dep_import_auto_flushes_imported_edges_to_jsonl() {
     let import_arg = import_path.to_string_lossy().to_string();
     let import = run_br(
         &workspace,
-        ["dep", "import", import_arg.as_str(), "--robot"],
+        ["dep", "import", import_arg.as_str(), "--json"],
         "dep_import_auto_flush_import",
     );
     assert_br_success(&import, "dep import failed");

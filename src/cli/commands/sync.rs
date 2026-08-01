@@ -217,7 +217,7 @@ pub fn execute(
 
     if args.witness {
         let (_, _, path_policy) = resolve_sync_startup_paths(args, cli)?;
-        return execute_witness(&path_policy, args, ctx.is_json() || args.robot, ctx);
+        return execute_witness(&path_policy, args, ctx.is_json(), ctx);
     }
 
     let mut startup = prepare_sync_startup(args, cli, startup_write_lock_held)?;
@@ -507,7 +507,7 @@ fn dispatch_sync_subcommand(
     path_policy: &SyncPathPolicy,
     open_result: &mut config::OpenStorageResult,
 ) -> Result<()> {
-    let options = sync_dispatch_options(args, cli, ctx, open_result);
+    let options = sync_dispatch_options(cli, ctx, open_result);
 
     match sync_operation(args) {
         SyncOperation::Status => execute_status(
@@ -562,12 +562,11 @@ fn dispatch_sync_subcommand(
 }
 
 fn sync_dispatch_options(
-    args: &SyncArgs,
     cli: &config::CliOverrides,
     ctx: &OutputContext,
     open_result: &config::OpenStorageResult,
 ) -> SyncDispatchOptions {
-    let use_json = ctx.is_json() || args.robot;
+    let use_json = ctx.is_json();
     let quiet = cli.quiet.unwrap_or(false);
     SyncDispatchOptions {
         db_path: open_result.paths.db_path.clone(),
@@ -633,7 +632,7 @@ fn finalize_sync_result(
 }
 
 fn should_render_human_sync_output(ctx: &OutputContext, use_json: bool) -> bool {
-    // Keep JSON/robot output paths alive even when quiet suppresses human text.
+    // Keep JSON output paths alive even when quiet suppresses human text.
     !ctx.is_quiet() || use_json
 }
 
@@ -1058,7 +1057,7 @@ fn execute_status(
     }
 
     if use_json {
-        // Print JSON directly so --robot works even if OutputContext is non-JSON.
+        // Print JSON directly so --json works even if OutputContext is non-JSON.
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else if ctx.is_rich() {
         render_status_rich(&status, ctx);

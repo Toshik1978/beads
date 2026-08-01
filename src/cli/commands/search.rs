@@ -64,7 +64,6 @@ pub fn execute_with_storage_ctx(
     let output_format = resolve_output_format_with_outer_mode(
         args.filters.format,
         outer_ctx.inherited_output_mode(),
-        false,
     );
     let issues = collect_search_results_for_output(storage, query, &args.filters, output_format)?;
     render_search_results(

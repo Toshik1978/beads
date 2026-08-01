@@ -3571,7 +3571,7 @@ fn e2e_sync_merge_detects_conflict_markers_in_base_snapshot() {
 }
 
 /// #336: In `--json` mode, the structured error envelope must go to STDOUT
-/// (where success JSON already goes) so robot callers read ONE clean,
+/// (where success JSON already goes) so scripted callers read ONE clean,
 /// parseable stream. Tracing/log lines belong on stderr and must not be
 /// interleaved into the stdout JSON. Human mode keeps errors on stderr.
 #[test]

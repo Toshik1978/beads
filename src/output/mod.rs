@@ -7,7 +7,7 @@
 //!
 //! Output mode is determined by the following priority:
 //!
-//! 1. `--json` or `--robot` flags → **JSON mode** (machine-readable)
+//! 1. `--json` flag → **JSON mode** (machine-readable)
 //! 2. `--quiet` flag → **Quiet mode** (minimal output)
 //! 3. `NO_COLOR` env or `--no-color` → **Plain mode** (no ANSI codes)
 //! 4. Non-TTY stdout → **Plain mode** (piped output)
