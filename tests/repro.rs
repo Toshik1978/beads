@@ -38,6 +38,8 @@ mod id_collision;
 mod import_collision_remap;
 #[path = "repro/issue_256_update_diff_target.rs"]
 mod issue_256_update_diff_target;
+#[path = "repro/issue_not_found_suggestions.rs"]
+mod issue_not_found_suggestions;
 #[path = "repro/list_sort.rs"]
 mod list_sort;
 #[path = "repro/list_sort_alias.rs"]

@@ -849,8 +849,56 @@ fn should_color_human_errors_for_cli(cli: &Cli) -> bool {
 }
 
 /// Handle errors with structured output support.
+/// Read every issue ID out of the workspace's JSONL export.
+///
+/// The JSONL rather than the database, for two reasons. It needs no lock,
+/// which matters on a path that is already failing and may be failing
+/// *because* the database is busy; and it is the same source the shell
+/// completers read, so a suggestion cannot name an ID that TAB would not have
+/// offered. The cost is that an issue created since the last export is not a
+/// candidate -- acceptable for a hint, and the alternative is opening a
+/// database to decorate an error message.
+///
+/// Returns an empty vector on any failure. Every caller degrades to the
+/// unsuggested error, which is the behaviour that shipped before.
+fn known_issue_ids() -> Vec<String> {
+    use std::io::BufRead;
+
+    let Ok(beads_dir) = config::discover_beads_dir(None) else {
+        return Vec::new();
+    };
+    let Ok(paths) = config::resolve_paths(&beads_dir, None) else {
+        return Vec::new();
+    };
+    let Ok(file) = std::fs::File::open(&paths.jsonl_path) else {
+        return Vec::new();
+    };
+
+    std::io::BufReader::new(file)
+        .lines()
+        // Spelled out: bare `Result::ok` would resolve to beads' own `Result`
+        // alias, which this module imports.
+        .map_while(std::result::Result::ok)
+        .filter_map(|line| {
+            serde_json::from_str::<serde_json::Value>(&line)
+                .ok()?
+                .get("id")?
+                .as_str()
+                .map(ToString::to_string)
+        })
+        .collect()
+}
+
 fn handle_error(err: &BeadsError, json_mode: bool, color_mode: bool) -> ! {
     let structured = StructuredError::from_error(err);
+    // bds-k7e. Only ISSUE_NOT_FOUND is enriched, and `with_id_suggestions` is
+    // a no-op for anything else -- so the JSONL is read only when a lookup has
+    // actually failed, never on the success path.
+    let structured = if structured.code == beads::ErrorCode::IssueNotFound {
+        structured.with_id_suggestions(&known_issue_ids())
+    } else {
+        structured
+    };
     let exit_code = structured.code.exit_code();
 
     if json_mode {

@@ -25,12 +25,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-const PRIORITY_DETAIL_HINT: &str =
-    "Priority must be 0-4 (or P0-P4): 0=critical, 1=high, 2=medium, 3=low, 4=backlog";
 const PRIORITY_SHORT_HINT: &str = "Priority must be 0-4 (0=critical, 4=backlog).";
-const VALID_STATUS_HINT: &str =
-    "Valid statuses: open, in_progress, blocked, deferred, draft, closed, tombstone, pinned";
-const VALID_TYPE_HINT: &str = "Valid types: task, bug, feature, epic, chore, docs, question";
 
 #[must_use]
 fn flag_value_hint(flag: &str, detected: &str) -> String {
@@ -369,135 +364,54 @@ impl StructuredError {
         }
     }
 
-    /// Create a structured error for ambiguous ID.
+    /// Add "did you mean" suggestions to an `ISSUE_NOT_FOUND` error.
+    ///
+    /// A no-op for every other code, and for an error whose context is missing
+    /// the `searched_id` it would compare against.
+    ///
+    /// This exists because the searched ID and the set of IDs that exist are
+    /// known in different places. `BeadsError::IssueNotFound` is constructed at
+    /// 31 sites, most of which are storage functions holding one ID and no
+    /// catalogue; the candidate set is only cheaply available at the point the
+    /// error is finally rendered. Rather than widen the error variant and make
+    /// all 31 sites answer a question they cannot, the suggestion is attached
+    /// once, here, on the way out.
+    ///
+    /// The hint shaping -- singular, plural, and the `br list` fallback when
+    /// nothing is close -- is not reimplemented: it comes from
+    /// [`Self::issue_not_found`], which was written for exactly this and had
+    /// never been called.
     #[must_use]
-    pub fn ambiguous_id(partial: &str, matches: &[String]) -> Self {
-        let hint = Some(format!(
-            "Provide more characters to disambiguate. Matches: {}",
-            matches.join(", ")
-        ));
-
-        let context = json!({
-            "partial_id": partial,
-            "matches": matches,
-            "match_count": matches.len(),
-        });
-
-        Self {
-            code: ErrorCode::AmbiguousId,
-            message: format!(
-                "Ambiguous ID '{}': matches {} issues",
-                partial,
-                matches.len()
-            ),
-            hint,
-            retryable: true,
-            context: Some(context),
+    pub fn with_id_suggestions(mut self, existing_ids: &[String]) -> Self {
+        if self.code != ErrorCode::IssueNotFound {
+            return self;
         }
-    }
 
-    /// Create a structured error for cycle detection.
-    #[must_use]
-    pub fn cycle_detected(cycle_path: &str) -> Self {
-        let parts: Vec<&str> = cycle_path.split(" -> ").collect();
+        let Some(searched) = self
+            .context
+            .as_ref()
+            .and_then(|context| context.get("searched_id"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+        else {
+            return self;
+        };
 
-        let context = json!({
-            "cycle_path": cycle_path,
-            "cycle_nodes": parts,
-        });
+        let enriched = Self::issue_not_found(&searched, existing_ids);
+        self.hint = enriched.hint;
 
-        Self {
-            code: ErrorCode::CycleDetected,
-            message: format!("Cycle detected in dependencies: {cycle_path}"),
-            hint: Some("Remove one dependency to break the cycle.".to_string()),
-            retryable: false,
-            context: Some(context),
-        }
-    }
-
-    /// Create a structured error for not initialized.
-    #[must_use]
-    pub fn not_initialized() -> Self {
-        Self {
-            code: ErrorCode::NotInitialized,
-            message: "Beads not initialized: run 'br init' first".to_string(),
-            hint: Some("Run: br init".to_string()),
-            retryable: false,
-            context: None,
-        }
-    }
-
-    /// Create a structured error for invalid priority.
-    #[must_use]
-    pub fn invalid_priority(provided: &str) -> Self {
-        let hint = Some(detect_priority_intent(provided).map_or_else(
-            || PRIORITY_DETAIL_HINT.to_string(),
-            |detected| format!("Did you mean --priority {detected}? {PRIORITY_DETAIL_HINT}"),
-        ));
-
-        let context = json!({
-            "provided": provided,
-            "valid_values": ["0", "1", "2", "3", "4", "P0", "P1", "P2", "P3", "P4"],
-            "priority_mapping": {
-                "0": "critical",
-                "1": "high",
-                "2": "medium",
-                "3": "low",
-                "4": "backlog"
+        // Merge rather than replace: a wrapped error carries `wrapper_context`
+        // in the same object, and losing it would trade one diagnostic for
+        // another.
+        self.context = match (self.context.take(), enriched.context) {
+            (Some(Value::Object(mut current)), Some(Value::Object(added))) => {
+                current.extend(added);
+                Some(Value::Object(current))
             }
-        });
+            (_, added) => added,
+        };
 
-        Self {
-            code: ErrorCode::InvalidPriority,
-            message: format!("Invalid priority: {provided}"),
-            hint,
-            retryable: true,
-            context: Some(context),
-        }
-    }
-
-    /// Create a structured error for invalid status.
-    #[must_use]
-    pub fn invalid_status(provided: &str) -> Self {
-        let hint = Some(detect_status_intent(provided).map_or_else(
-            || VALID_STATUS_HINT.to_string(),
-            |detected| flag_value_hint("status", detected),
-        ));
-
-        let context = json!({
-            "provided": provided,
-            "valid_values": VALID_STATUSES.iter().collect::<Vec<_>>(),
-        });
-
-        Self {
-            code: ErrorCode::InvalidStatus,
-            message: format!("Invalid status: {provided}"),
-            hint,
-            retryable: true,
-            context: Some(context),
-        }
-    }
-
-    /// Create a structured error for invalid issue type.
-    #[must_use]
-    pub fn invalid_type(provided: &str) -> Self {
-        let hint = Some(detect_type_intent(provided).map_or_else(
-            || VALID_TYPE_HINT.to_string(),
-            |detected| flag_value_hint("type", detected),
-        ));
-
-        let context = json!({
-            "provided": provided,
-            "valid_values": VALID_TYPES.iter().collect::<Vec<_>>(),
-        });
-
-        Self {
-            code: ErrorCode::InvalidType,
-            message: format!("Invalid issue type: {provided}"),
-            hint,
-            retryable: true,
-            context: Some(context),
-        }
+        self
     }
 
     /// Serialize to JSON value.
@@ -983,9 +897,13 @@ fn detect_priority_intent(input: &str) -> Option<&'static str> {
 
 // === Levenshtein Distance ===
 
-/// Calculate the Levenshtein distance between two strings.
+/// Calculate the Damerau-Levenshtein (optimal string alignment) distance.
 ///
-/// This is used to find similar IDs when an issue is not found.
+/// This is used to find similar IDs when an issue is not found. Adjacent
+/// transpositions cost 1 rather than 2, which matters here: a transposed pair
+/// is one of the commonest ways to mistype an opaque ID by hand, and at the
+/// distance threshold [`find_similar_ids`] uses, charging it 2 would put every
+/// transposition out of reach.
 fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_len = a.chars().count();
     let b_len = b.chars().count();
@@ -1017,15 +935,52 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
                 std::cmp::min(matrix[i][j + 1] + 1, matrix[i + 1][j] + 1),
                 matrix[i][j] + cost,
             );
+
+            // Transposition of an adjacent pair, charged as one edit.
+            if i > 0
+                && j > 0
+                && *a_char == b_chars[j - 1]
+                && a_chars[i - 1] == *b_char
+                && let transposed = matrix[i - 1][j - 1] + 1
+                && transposed < matrix[i + 1][j + 1]
+            {
+                matrix[i + 1][j + 1] = transposed;
+            }
         }
     }
 
     matrix[a_len][b_len]
 }
 
-/// Find IDs similar to the searched ID using Levenshtein distance.
+/// The edit distance at which two IDs stop being plausible typos of each other.
 ///
-/// Returns up to `max_suggestions` IDs with distance <= 3.
+/// One edit: a single substitution, insertion, deletion, or transposition.
+///
+/// The value this replaced -- a hardcoded `<= 3` -- was unusable. Beads IDs are
+/// a shared prefix and a short random suffix (`bds-k7e`), so two *unrelated*
+/// IDs differ by exactly the suffix length. With a 3-character suffix every ID
+/// in a workspace sits at distance 3 from every other, and a bound of 3
+/// therefore matched the whole workspace: one mistyped character produced "Did
+/// you mean one of:" followed by three alphabetically-first strangers.
+///
+/// Scaling the bound with ID length was tried first and is also wrong, which is
+/// worth recording because it looks reasonable. Length is the wrong signal: the
+/// prefix is shared by every ID in a workspace, so it contributes length
+/// without contributing anything that distinguishes one ID from another. A
+/// workspace whose prefix happens to be long would relax the bound to 2 while
+/// still having only 3 characters that differ -- and at distance 2 of 3
+/// characters, unrelated IDs start matching again. An end-to-end test in a
+/// temp directory, where the prefix is derived from the directory name, caught
+/// exactly that.
+///
+/// A flat single edit needs no heuristic and cannot be inflated by a prefix.
+/// Two typos in an opaque identifier is not a near miss worth guessing at.
+const SUGGESTION_MAX_DISTANCE: usize = 1;
+
+/// Find IDs similar to the searched ID using edit distance.
+///
+/// Returns up to `max_suggestions` IDs within [`SUGGESTION_MAX_DISTANCE`] of
+/// `searched`, closest first.
 pub fn find_similar_ids(
     searched: &str,
     existing: &[String],
@@ -1034,7 +989,7 @@ pub fn find_similar_ids(
     let mut candidates: Vec<(usize, &str)> = existing
         .iter()
         .map(|id| (levenshtein_distance(searched, id), id.as_str()))
-        .filter(|(dist, _)| *dist <= 3) // Only suggest if reasonably close
+        .filter(|(dist, _)| *dist <= SUGGESTION_MAX_DISTANCE)
         .collect();
 
     // Sort by distance, then alphabetically
@@ -1156,6 +1111,96 @@ mod tests {
         assert!(suggestions.contains(&"bd-abc123".to_string()));
     }
 
+    /// The defect that made the suggester unusable, and the reason it had to be
+    /// fixed before being wired up rather than after.
+    ///
+    /// IDs are a fixed prefix plus a short random suffix, so two unrelated IDs
+    /// differ by exactly the suffix length -- 3 here. Under the old hardcoded
+    /// `distance <= 3` every ID in a workspace was "similar" to every other,
+    /// and a single mistyped character produced three strangers.
+    #[test]
+    fn unrelated_short_ids_are_not_suggested_for_each_other() {
+        let existing = vec![
+            "bds-k7e".to_string(),
+            "bds-cn6".to_string(),
+            "bds-i3g".to_string(),
+            "bds-ja3".to_string(),
+            "bds-yyz".to_string(),
+        ];
+
+        // One wrong character: the near-miss, and only the near-miss.
+        assert_eq!(find_similar_ids("bds-k7x", &existing, 3), vec!["bds-k7e"]);
+
+        // Nothing within one edit: no suggestion at all, so the caller falls
+        // back to the `br list` hint rather than inventing candidates.
+        assert!(find_similar_ids("bds-q42", &existing, 3).is_empty());
+    }
+
+    /// Transpositions are the reason the distance is Damerau rather than plain
+    /// Levenshtein: under the latter a swapped pair costs 2, which at this
+    /// threshold would mean no suggestion for one of the commonest typos.
+    #[test]
+    fn a_transposed_pair_is_one_edit_away() {
+        assert_eq!(levenshtein_distance("bds-k7e", "bds-7ke"), 1);
+
+        let existing = vec!["bds-k7e".to_string(), "bds-cn6".to_string()];
+        assert_eq!(find_similar_ids("bds-7ke", &existing, 3), vec!["bds-k7e"]);
+    }
+
+    /// A long shared prefix must not buy a looser bound -- the regression that
+    /// a length-scaled threshold introduced, and that the end-to-end tests
+    /// caught in a temp directory whose name became the workspace prefix.
+    #[test]
+    fn a_long_shared_prefix_does_not_loosen_the_bound() {
+        let existing = vec!["tmpcp2h0t-0c8".to_string(), "tmpcp2h0t-04o".to_string()];
+
+        // Two edits away from the second ID, one from the first.
+        assert_eq!(
+            find_similar_ids("tmpcp2h0t-0cx", &existing, 3),
+            vec!["tmpcp2h0t-0c8"]
+        );
+    }
+
+    #[test]
+    fn issue_not_found_suggestions_reach_the_rendered_error() {
+        let base = StructuredError::from_error(&BeadsError::IssueNotFound {
+            id: "bds-k7x".to_string(),
+        });
+        assert_eq!(
+            base.hint.as_deref(),
+            Some("Run 'br list' to see available issues.")
+        );
+
+        let enriched = base.with_id_suggestions(&["bds-k7e".to_string(), "bds-cn6".to_string()]);
+        assert_eq!(enriched.hint.as_deref(), Some("Did you mean 'bds-k7e'?"));
+        let context = enriched.context.as_ref().unwrap();
+        assert_eq!(context["searched_id"], "bds-k7x");
+        assert_eq!(context["similar_ids"], json!(["bds-k7e"]));
+    }
+
+    #[test]
+    fn with_id_suggestions_keeps_the_br_list_hint_when_nothing_is_close() {
+        let enriched = StructuredError::from_error(&BeadsError::IssueNotFound {
+            id: "bds-q42".to_string(),
+        })
+        .with_id_suggestions(&["bds-k7e".to_string()]);
+
+        assert_eq!(
+            enriched.hint.as_deref(),
+            Some("Run 'br list' to see available issues.")
+        );
+        assert_eq!(enriched.context.as_ref().unwrap()["similar_ids"], json!([]));
+    }
+
+    #[test]
+    fn with_id_suggestions_ignores_errors_that_are_not_issue_not_found() {
+        let err = StructuredError::from_error(&BeadsError::NotInitialized);
+        let before = err.clone();
+        let after = err.with_id_suggestions(&["bds-k7e".to_string()]);
+        assert_eq!(after.hint, before.hint);
+        assert_eq!(after.context, before.context);
+    }
+
     #[test]
     fn test_detect_status_intent() {
         assert_eq!(detect_status_intent("done"), Some("closed"));
@@ -1227,32 +1272,52 @@ mod tests {
         assert_eq!(detect_priority_intent("P"), None);
     }
 
+    // These four asserted the behaviour of `StructuredError` constructors that
+    // nothing ever called (bds-k7e). Rewritten against `from_error`, the path
+    // the CLI actually renders through, so they now assert what a user sees.
+
     #[test]
-    fn test_structured_error_not_initialized() {
-        let err = StructuredError::not_initialized();
+    fn not_initialized_error_points_at_br_init() {
+        let err = StructuredError::from_error(&BeadsError::NotInitialized);
         assert_eq!(err.code, ErrorCode::NotInitialized);
         assert!(err.hint.as_ref().unwrap().contains("br init"));
     }
 
     #[test]
-    fn test_structured_error_invalid_priority() {
-        let err = StructuredError::invalid_priority("high");
+    fn invalid_priority_error_is_retryable_and_explains_the_range() {
+        let err = StructuredError::from_error(&BeadsError::InvalidPriority {
+            priority: "high".to_string(),
+        });
         assert_eq!(err.code, ErrorCode::InvalidPriority);
-        assert!(err.hint.as_ref().unwrap().contains("--priority 1"));
         assert!(err.retryable);
+        // Deliberately not asserting "--priority 1". The live path cannot
+        // produce it: `generate_hint` returns `BeadsError::suggestion()` before
+        // reaching its own `detect_priority_intent` arm, so the static range
+        // text always wins. That is bds-b0m.
+        assert!(err.hint.as_ref().unwrap().contains("0 (critical)"));
     }
 
     #[test]
-    fn test_structured_error_invalid_status() {
-        let err = StructuredError::invalid_status("done");
+    fn invalid_status_error_lists_the_valid_statuses() {
+        let err = StructuredError::from_error(&BeadsError::InvalidStatus {
+            status: "done".to_string(),
+        });
         assert_eq!(err.code, ErrorCode::InvalidStatus);
         assert!(err.hint.as_ref().unwrap().contains("closed"));
+        // The intent detection is not lost, only demoted: it lands in the
+        // machine-readable context rather than the human hint.
+        assert_eq!(
+            err.context.as_ref().unwrap()["hint"],
+            "Did you mean --status closed?"
+        );
     }
 
     #[test]
-    fn test_structured_error_ambiguous_id() {
-        let matches = vec!["bd-abc".to_string(), "bd-abd".to_string()];
-        let err = StructuredError::ambiguous_id("bd-ab", &matches);
+    fn ambiguous_id_error_carries_the_matches() {
+        let err = StructuredError::from_error(&BeadsError::AmbiguousId {
+            partial: "bd-ab".to_string(),
+            matches: vec!["bd-abc".to_string(), "bd-abd".to_string()],
+        });
         assert_eq!(err.code, ErrorCode::AmbiguousId);
         assert!(err.retryable);
         assert!(err.context.as_ref().unwrap()["matches"].is_array());

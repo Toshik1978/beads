@@ -1056,14 +1056,41 @@ This keeps successful commands readable by suppressing low-level dependency logs
 
 ### Error Object
 
+Errors in `--json` mode go to **stdout**, so a scripted caller reads one
+parseable stream; log lines stay on stderr.
+
 ```json
 {
-  "error_code": 3,
-  "message": "Issue not found: bd-xyz999",
-  "kind": "not_found",
-  "recovery_hints": ["Check the issue ID", "Use 'br list' to find issues"]
+  "error": {
+    "code": "ISSUE_NOT_FOUND",
+    "message": "Issue not found: bd-xyz999",
+    "hint": "Did you mean 'bd-xyz99'?",
+    "retryable": false,
+    "context": {
+      "searched_id": "bd-xyz999",
+      "similar_ids": ["bd-xyz99"]
+    }
+  }
 }
 ```
+
+| Field | Meaning |
+| --- | --- |
+| `code` | Stable `SCREAMING_SNAKE_CASE` identifier — match on this, not on `message`. |
+| `message` | Human-readable description. Wording is not a stable interface. |
+| `hint` | Optional suggested fix. Absent when there is nothing useful to say. |
+| `retryable` | Whether retrying could succeed — after fixing the input, or after waiting when the database is locked. |
+| `context` | Optional, code-specific structured detail. |
+
+The process exit code is derived from `code`: 2 for database errors, 3 for
+issue errors, 4 for validation, 5 for dependencies, 6 for sync/JSONL, 7 for
+config, 8 for I/O, 1 for internal, and 130 for an interrupted run.
+
+For `ISSUE_NOT_FOUND`, `context.similar_ids` lists IDs within one edit of what
+was searched for, closest first, and is `[]` when nothing is close — in which
+case `hint` falls back to `Run 'br list' to see available issues.` Suggestions
+are drawn from `issues.jsonl`, so an issue created since the last export is not
+a candidate.
 
 ---
 
