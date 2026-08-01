@@ -20,6 +20,6 @@
   "source_hint": "Covers the cloud-drive/editor interference class from rsei.3.3.",
   "notes": [
     "The lock file is intentionally stale metadata, not an active lock held by this test process.",
-    "Per the post-#292 contract any non-OK doctor check causes `ok=false` and a non-zero exit; the stale lock plus db-newer drift trip WARN-level checks so doctor reports workspace_health=degraded and exits 1."
+    "The stale lock plus db-newer drift trip the file-state checks, so the workspace classifies as degraded."
   ]
 }

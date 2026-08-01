@@ -20,6 +20,6 @@
   "source_hint": "Complements the WAL-without-SHM fixture with the opposite external sidecar-pruning shape from rsei.3.3.",
   "notes": [
     "The database and JSONL content are otherwise healthy so the fixture isolates the orphaned SHM sidecar.",
-    "Current posture is degraded but repairable: doctor reports the sidecar mismatch and doctor --repair quarantines the stray sidecar."
+    "Current posture is degraded but repairable: the sidecar mismatch is reported as an anomaly and recovery quarantines the stray sidecar."
   ]
 }

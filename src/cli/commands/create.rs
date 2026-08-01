@@ -229,7 +229,7 @@ pub fn execute_with_storage(
 /// below). Validating the default too keeps `br create`, `br create --status
 /// open`, and `br update --status open` consistent: if a strict workflow omits
 /// the starting status, `br create` must name a valid one rather than silently
-/// producing a bead whose status `br doctor` will immediately flag.
+/// producing a bead in a status the close policy will immediately reject.
 ///
 /// # Errors
 ///

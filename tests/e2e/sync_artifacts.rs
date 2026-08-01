@@ -980,8 +980,7 @@ fn e2e_staleness_detects_real_content_change() {
 ///
 /// The root cause was that the force/rebuild path drops and recreates the
 /// data tables before bulk-inserting from JSONL, but (unlike the
-/// `rebuild_database_family` chokepoint used by `br doctor --repair` and auto
-/// recovery) it did not run a post-import `VACUUM` + `REINDEX`.  On larger
+/// `rebuild_database_family` chokepoint used by auto recovery) it did not run a post-import `VACUUM` + `REINDEX`.  On larger
 /// imports this left partial-index rows missing and B-tree freeblock
 /// accounting anomalies that only surfaced when a later write transaction
 /// looked up an issue by id (issues #237, #245, #246 covered the adjacent

@@ -6,7 +6,7 @@
 use crate::cli::{DEFAULT_WITNESS_PARALLELISM, SyncArgs};
 use crate::config;
 use crate::error::{BeadsError, Result};
-use crate::health::{AnomalyClass, ReliabilityAuditRecord, WorkspaceClassification};
+use crate::health::{Anomaly, AnomalyClass};
 use crate::output::OutputContext;
 use crate::sync::history::HistoryConfig;
 use crate::sync::path::symlink_escape_for_existing_ancestor;
@@ -80,12 +80,12 @@ pub struct SyncStatus {
     /// Workspace health classification (`healthy` / `degraded` /
     /// `recoverable` / `unsafe`) computed from the cheap signals this
     /// command already evaluates: file-state probes plus the
-    /// DB↔JSONL drift booleans above. Same write-gate vocabulary as
-    /// `br doctor --json` (beads#334; docs/reliability/HEALTH_CONTRACT.md).
+    /// DB↔JSONL drift booleans above. The vocabulary is `AnomalyClass` and
+    /// `WorkspaceHealth` in `src/health.rs` (beads#334).
     pub workspace_health: String,
-    /// Anomaly evidence backing `workspace_health`, in the same shape
-    /// doctor emits (`anomalies[].code` / `severity` / `message`).
-    pub reliability_audit: ReliabilityAuditRecord,
+    /// Evidence backing `workspace_health`: `code` / `severity` / `message`
+    /// per anomaly, empty when the workspace is healthy.
+    pub anomalies: Vec<Anomaly>,
     /// Read-only git visibility for the canonical JSONL export
     /// (beads#338). `{available:false}` when git or a repo is
     /// absent; never fails the command.
@@ -889,27 +889,19 @@ fn contains_git_dir(path: &Path) -> bool {
     })
 }
 
-/// Classify workspace health from the cheap signals available in
-/// sync-status context (beads#334): the file-state probes shared
-/// with doctor (`classify_file_state`: DB header, sidecars, conflict
-/// markers, orphaned locks) plus the DB↔JSONL drift booleans the
-/// command already computed. This intentionally does NOT run the full
-/// doctor checklist — only anomaly codes actually evaluated here are
-/// emitted, so the audit record stays honest.
-fn classify_sync_status_workspace(
-    db_path: &Path,
-    jsonl_path: &Path,
-    jsonl_newer: bool,
-    db_newer: bool,
-) -> WorkspaceClassification {
-    let mut anomalies = crate::health::classify_file_state(db_path, jsonl_path);
-    if jsonl_newer {
-        anomalies.push(AnomalyClass::JsonlNewer);
-    }
-    if db_newer {
-        anomalies.push(AnomalyClass::DbNewer);
-    }
-    WorkspaceClassification::from_anomalies(anomalies)
+/// The on-disk conditions worth reporting from sync-status context
+/// (beads#334): the file-state probes in `classify_file_state` -- DB header,
+/// sidecars, conflict markers, orphaned locks.
+///
+/// Deliberately *not* including DB↔JSONL staleness. It used to push
+/// `JsonlNewer` / `DbNewer` here, which meant a workspace with nothing worse
+/// than unflushed changes reported `workspace_health: "degraded"` -- the
+/// ordinary state of a workspace mid-session, described as a problem. The
+/// same payload already carries `jsonl_newer` and `db_newer` as booleans, so
+/// nothing is lost and `workspace_health` now moves only for conditions that
+/// genuinely need attention.
+fn classify_sync_status_workspace(db_path: &Path, jsonl_path: &Path) -> Vec<AnomalyClass> {
+    crate::health::classify_file_state(db_path, jsonl_path)
 }
 
 /// Run a read-only git command in `dir`, returning trimmed stdout on
@@ -1017,21 +1009,9 @@ fn execute_status(
         "Computed sync status inputs"
     );
 
-    let classification = classify_sync_status_workspace(
-        db_path,
-        jsonl_path,
-        staleness.jsonl_newer,
-        staleness.db_newer,
-    );
-    let reliability_audit = classification.audit_record("sync.status");
-    reliability_audit.emit_tracing(
-        "status",
-        if classification.anomalies.is_empty() {
-            "ok"
-        } else {
-            "findings"
-        },
-    );
+    let detected = classify_sync_status_workspace(db_path, jsonl_path);
+    let workspace_health = crate::health::worst_severity(&detected);
+    let anomalies: Vec<Anomaly> = detected.iter().map(Anomaly::from).collect();
 
     let status = SyncStatus {
         dirty_count,
@@ -1041,8 +1021,8 @@ fn execute_status(
         jsonl_exists,
         jsonl_newer: staleness.jsonl_newer,
         db_newer: staleness.db_newer,
-        workspace_health: classification.health.to_string(),
-        reliability_audit,
+        workspace_health: workspace_health.to_string(),
+        anomalies,
         git_export: git_export_status(jsonl_path),
     };
     debug!(
@@ -1484,8 +1464,8 @@ fn execute_flush(
         // from the clean JSONL (issue #378). The guards above already proved
         // the JSONL is conflict-marker-free and not stale relative to the DB,
         // so it is exactly the state the anchor should capture. This makes
-        // `br sync --flush-only` an idempotent recovery command for the
-        // doctor's `base_jsonl.missing_post_flush` finding. Best-effort: a
+        // `br sync --flush-only` an idempotent way to restore a missing
+        // anchor. Best-effort: a
         // failed anchor write must not fail an otherwise successful no-op
         // flush.
         if fs::symlink_metadata(path_policy.beads_dir.join("beads.base.jsonl")).is_err()
@@ -1561,9 +1541,8 @@ fn execute_flush(
     // is the new common state future 3-way merges should diff against.
     // Refresh the merge anchor to match (issue #378): historically only the
     // merge path wrote `beads.base.jsonl`, leaving flush-only workspaces
-    // permanently anchor-less and tripping the doctor's
-    // `base_jsonl.missing_post_flush` warning while `br sync --status`
-    // reported "In sync". Skip when the export had per-record errors — a
+    // permanently anchor-less while `br sync --status` reported "In sync".
+    // Skip when the export had per-record errors — a
     // partial export must not become the merge base. Best-effort: a failed
     // anchor write must not fail an otherwise durable flush.
     if !report.has_errors()
@@ -1572,7 +1551,8 @@ fn execute_flush(
     {
         warn!(
             error = %error,
-            "Failed to refresh merge anchor after flush; `br doctor` may report base_jsonl findings"
+            "Failed to refresh merge anchor after flush; the next 3-way merge will \
+             diff against a stale base"
         );
     }
 
@@ -2461,9 +2441,8 @@ fn execute_import(
 
     // Post-import VACUUM + REINDEX to eliminate B-tree/index corruption
     // artifacts that the previous engine's bulk-insert and metadata-update paths
-    // can leave behind.  This mirrors what `rebuild_database_family` (used
-    // by `br doctor --repair` and auto recovery) does at the equivalent
-    // chokepoint.
+    // can leave behind.  This mirrors what `rebuild_database_family` (used by
+    // auto recovery) does at the equivalent chokepoint.
     //
     // Without this, large `br sync --import-only` runs can produce a DB
     // where C sqlite3's `PRAGMA integrity_check` reports free-space or
@@ -3561,7 +3540,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_sync_status_workspace_maps_drift_to_anomaly_codes() {
+    fn classify_sync_status_workspace_ignores_ordinary_staleness() {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path().join("beads.db");
         let jsonl_path = temp.path().join("issues.jsonl");
@@ -3570,26 +3549,21 @@ mod tests {
         drop(storage);
         fs::write(&jsonl_path, "{\"id\":\"bd-x\"}\n").unwrap();
 
-        let healthy = classify_sync_status_workspace(&db_path, &jsonl_path, false, false);
-        assert_eq!(healthy.health.as_str(), "healthy", "{healthy:?}");
-        assert!(healthy.anomalies.is_empty(), "{healthy:?}");
-
-        let pending_export = classify_sync_status_workspace(&db_path, &jsonl_path, false, true);
-        assert_eq!(pending_export.health.as_str(), "degraded");
-        let audit = pending_export.audit_record("sync.status");
-        assert_eq!(audit.source, "sync.status");
-        assert_eq!(audit.anomaly_codes_csv(), "db_newer");
-
-        let diverged = classify_sync_status_workspace(&db_path, &jsonl_path, true, true);
-        assert_eq!(diverged.health.as_str(), "degraded");
+        // A clean workspace with pending drift in either direction is still
+        // healthy. This used to report `degraded` and list `jsonl_newer` /
+        // `db_newer` as anomalies -- describing the ordinary mid-session state
+        // of a workspace as a problem, and duplicating two booleans the same
+        // JSON payload already carries.
+        let detected = classify_sync_status_workspace(&db_path, &jsonl_path);
+        assert!(detected.is_empty(), "{detected:?}");
         assert_eq!(
-            diverged.audit_record("sync.status").anomaly_codes_csv(),
-            "jsonl_newer,db_newer"
+            crate::health::worst_severity(&detected),
+            crate::health::WorkspaceHealth::Healthy
         );
     }
 
     #[test]
-    fn test_classify_sync_status_workspace_conflict_markers_are_unsafe() {
+    fn classify_sync_status_workspace_reports_conflict_markers_as_unsafe() {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path().join("beads.db");
         let jsonl_path = temp.path().join("issues.jsonl");
@@ -3601,18 +3575,17 @@ mod tests {
         )
         .unwrap();
 
-        let classification = classify_sync_status_workspace(&db_path, &jsonl_path, false, false);
+        let detected = classify_sync_status_workspace(&db_path, &jsonl_path);
         assert_eq!(
-            classification.health.as_str(),
-            "unsafe",
-            "{classification:?}"
+            crate::health::worst_severity(&detected),
+            crate::health::WorkspaceHealth::Unsafe,
+            "{detected:?}"
         );
         assert!(
-            classification
-                .audit_record("sync.status")
-                .anomaly_codes_csv()
-                .contains("jsonl_conflict_markers"),
-            "{classification:?}"
+            detected
+                .iter()
+                .any(|anomaly| anomaly.code() == "jsonl_conflict_markers"),
+            "{detected:?}"
         );
     }
 

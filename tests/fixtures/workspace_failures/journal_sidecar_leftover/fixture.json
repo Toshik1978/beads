@@ -20,6 +20,6 @@
   "source_hint": "Covers the interrupted atomic write / external filesystem interference branch from rsei.3.3.",
   "notes": [
     "The database and JSONL content are otherwise healthy so the fixture isolates the stale rollback journal signal.",
-    "Per the post-#292 contract any non-OK doctor check causes `ok=false` and a non-zero exit; the leftover journal trips WARN-level sidecar and db-newer checks so doctor surfaces a degraded workspace_health."
+    "The leftover journal trips the sidecar and db-newer checks, so the workspace classifies as degraded."
   ]
 }

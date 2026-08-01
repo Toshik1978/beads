@@ -2,8 +2,8 @@
 //!
 //! - beads#338: read-only `git_export` block (tracked/dirty JSONL
 //!   visibility; `{available:false}` outside a git repo).
-//! - beads#334: `workspace_health` + `reliability_audit` fields in
-//!   the same write-gate vocabulary as `br doctor --json`.
+//! - beads#334: `workspace_health` + `anomalies` fields, using the
+//!   vocabulary in `src/health.rs`.
 
 // `common` is now the `test-support` crate; aliased so that the 753
 // `common::` paths in this suite keep working unchanged.
@@ -203,8 +203,8 @@ fn e2e_sync_status_git_export_unavailable_outside_repo() {
 }
 
 #[test]
-fn e2e_sync_status_reports_workspace_health_and_reliability_audit() {
-    let _log = common::test_log("e2e_sync_status_reports_workspace_health_and_reliability_audit");
+fn e2e_sync_status_reports_workspace_health_and_anomalies() {
+    let _log = common::test_log("e2e_sync_status_reports_workspace_health_and_anomalies");
     let workspace = BrWorkspace::new();
 
     let init = run_br(&workspace, ["init"], "init");
@@ -225,22 +225,16 @@ fn e2e_sync_status_reports_workspace_health_and_reliability_audit() {
         "clean synced workspace must be healthy: {healthy}"
     );
     assert_eq!(
-        healthy["reliability_audit"]["source"], "sync.status",
-        "{healthy}"
-    );
-    assert_eq!(
-        healthy["reliability_audit"]["anomaly_count"], 0,
-        "{healthy}"
-    );
-    assert_eq!(
-        healthy["reliability_audit"]["health"], "healthy",
-        "{healthy}"
+        healthy["anomalies"],
+        serde_json::json!([]),
+        "a healthy workspace reports no anomalies: {healthy}"
     );
 
-    // Drive a deterministic drift: append an external record to the JSONL
-    // so it is now newer than the DB (pending import). This is the same
-    // jsonl_newer → degraded mapping doctor uses; only codes we actually
-    // evaluate may appear.
+    // Append an external record to the JSONL so it is newer than the DB.
+    // Staleness is reported by the `jsonl_newer` boolean and deliberately does
+    // NOT move `workspace_health`: a workspace with an import pending is in an
+    // ordinary mid-session state, not a damaged one. It used to report
+    // `degraded` here, which cried wolf on the commonest situation there is.
     let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
     {
         use std::io::Write as _;
@@ -262,19 +256,36 @@ fn e2e_sync_status_reports_workspace_health_and_reliability_audit() {
         pending["jsonl_newer"], true,
         "external JSONL edit must read as jsonl_newer: {pending}"
     );
-    assert_eq!(pending["workspace_health"], "degraded", "{pending}");
-    let audit = &pending["reliability_audit"];
-    assert_eq!(audit["source"], "sync.status", "{pending}");
-    assert_eq!(audit["health"], "degraded", "{pending}");
-    let codes: Vec<&str> = audit["anomalies"]
+    assert_eq!(
+        pending["workspace_health"], "healthy",
+        "pending import is not a health problem: {pending}"
+    );
+    assert_eq!(pending["anomalies"], serde_json::json!([]), "{pending}");
+
+    // A genuine on-disk problem does move it. Conflict markers in the one
+    // file that is committed to git is the case this exists for.
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl_path)
+            .expect("open jsonl for append");
+        writeln!(f, "<<<<<<< HEAD").expect("append conflict marker");
+    }
+    let conflicted = sync_status_json_no_auto_import(&workspace, "status_conflicted");
+    assert_eq!(
+        conflicted["workspace_health"], "unsafe",
+        "conflict markers must be unsafe: {conflicted}"
+    );
+    let codes: Vec<&str> = conflicted["anomalies"]
         .as_array()
         .expect("anomalies array")
         .iter()
-        .filter_map(|a| a["code"].as_str())
+        .filter_map(|anomaly| anomaly["code"].as_str())
         .collect();
     assert!(
-        codes.contains(&"jsonl_newer"),
-        "expected jsonl_newer anomaly code, got {codes:?}: {pending}"
+        codes.contains(&"jsonl_conflict_markers"),
+        "expected jsonl_conflict_markers, got {codes:?}: {conflicted}"
     );
 }
 

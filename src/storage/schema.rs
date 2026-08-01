@@ -178,7 +178,7 @@ pub const SCHEMA_SQL: &str = r"
     -- Metadata
     -- Same rationale as config: keep it as key-value with an explicit index.
     -- Storage code reads the newest duplicate row and harmonizes duplicate
-    -- rows on write; doctor still reports duplicates as recoverable anomalies.
+    -- rows on write; existing duplicates are repaired on open.
     CREATE TABLE IF NOT EXISTS metadata (
         key TEXT NOT NULL,
         value TEXT NOT NULL
@@ -414,7 +414,7 @@ pub fn apply_schema(conn: &Connection) -> Result<()> {
     // On a fresh DB, SCHEMA_SQL creates everything at the current version,
     // so running migrations is unnecessary and harmful — e.g. the v3/v4
     // migrations DROP+CREATE idx_issues_ready which orphans a page and
-    // causes doctor integrity warnings.
+    // leaves the table inconsistent.
     let is_fresh = !table_exists(conn, "issues");
 
     // Run pre-schema migrations first to fix any incompatible old tables
@@ -468,7 +468,7 @@ pub fn apply_schema(conn: &Connection) -> Result<()> {
     //
     // Note: page-level anomalies from subsequent writes (e.g., "free space
     // corruption" — issue #237) are addressed via VACUUM in the rebuild
-    // path and `br doctor --repair`, not here.  Running VACUUM here would
+    // path, not here.  Running VACUUM here would
     // conflict with connections opened immediately after init.
     if is_fresh && let Err(e) = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)") {
         tracing::debug!(

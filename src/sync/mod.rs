@@ -5153,14 +5153,15 @@ pub fn save_base_snapshot_from_jsonl(jsonl_path: &Path, jsonl_dir: &Path) -> Res
 /// the JSONL that just reached disk IS the new common state future 3-way
 /// merges should diff against. Historically only the merge path wrote the
 /// anchor, which left flush-only workspaces (the common agent workflow)
-/// permanently anchor-less: `br doctor` warned `base_jsonl.missing_post_flush`
-/// forever while `br sync --status` reported "In sync".
+/// permanently anchor-less, which upstream's `br doctor` reported as
+/// `base_jsonl.missing_post_flush` forever while `br sync --status` said
+/// "In sync". This fork has no `doctor`, so the inconsistency would now be
+/// silent -- which is a reason to keep the anchor correct, not to stop.
 ///
 /// This is a byte copy (not a parse + re-serialize) so the anchor matches the
 /// on-disk export exactly. The write goes through the same validated
 /// temp-file + durable-rename machinery as [`save_base_snapshot`], and a
-/// symlinked anchor is refused rather than followed (same attacker shape the
-/// doctor's `base_jsonl` check rejects).
+/// symlinked anchor is refused rather than followed.
 ///
 /// # Errors
 ///

@@ -21,7 +21,7 @@
       "outcome": "success_with_auto_recovery"
     }
   ],
-  "source_hint": "Matches the duplicate-key anomaly checks in src/storage/sqlite.rs and src/cli/commands/doctor.rs.",
+  "source_hint": "Matches the duplicate-key repair path in SqliteStorage::detect_recoverable_open_anomaly.",
   "notes": [
     "This preserves a queryable database that still violates higher-level invariants.",
     "It exercises legacy-schema repair without needing a fully corrupt SQLite file."

@@ -2373,28 +2373,6 @@ impl OpenStorageResult {
         )
     }
 
-    /// Classify the workspace using the canonical health module.
-    ///
-    /// Combines file-level checks with storage-level anomaly detection
-    /// to produce a single [`WorkspaceClassification`] regardless of
-    /// which command triggers the evaluation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if storage probing fails.
-    pub fn classify(&self) -> Result<crate::health::WorkspaceClassification> {
-        use crate::health::{WorkspaceClassification, classify_file_state};
-
-        let mut anomalies = classify_file_state(&self.paths.db_path, &self.paths.jsonl_path);
-
-        if !self.no_db {
-            let storage_anomalies = self.storage.detect_anomalies()?;
-            anomalies.extend(storage_anomalies);
-        }
-
-        Ok(WorkspaceClassification::from_anomalies(anomalies))
-    }
-
     #[must_use]
     pub(crate) fn should_attempt_jsonl_recovery(&self, err: &BeadsError) -> bool {
         !self.no_db

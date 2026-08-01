@@ -140,7 +140,7 @@ impl ClosePolicy {
 pub struct Workflow {
     /// When `true` *and* `statuses` is non-empty, a status outside the
     /// configured set is rejected on `create`/`update` and flagged by
-    /// `br doctor`. When `false`, `statuses` is advisory only (no
+    /// reporting. When `false`, `statuses` is advisory only (no
     /// enforcement). The same flag gates transition enforcement (see
     /// `transitions`).
     pub strict: bool,
@@ -615,8 +615,8 @@ pub const TRANSITION_INITIAL: &str = "initial";
 
 impl Workflow {
     /// True when strict enforcement is configured: `strict` is on *and* at
-    /// least one allowed status is listed. Enforcement and the doctor
-    /// detector short-circuit on `false`.
+    /// least one allowed status is listed. Enforcement short-circuits on
+    /// `false`.
     #[must_use]
     pub fn is_enforced(&self) -> bool {
         self.strict && !self.statuses.is_empty()

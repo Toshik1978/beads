@@ -23,21 +23,6 @@ impl WorkspaceHealth {
             Self::Unsafe => "unsafe",
         }
     }
-
-    #[must_use]
-    pub fn is_operable(self) -> bool {
-        matches!(self, Self::Healthy | Self::Degraded)
-    }
-
-    #[must_use]
-    pub fn needs_recovery(self) -> bool {
-        matches!(self, Self::Recoverable)
-    }
-
-    #[must_use]
-    pub fn is_fatal(self) -> bool {
-        matches!(self, Self::Unsafe)
-    }
 }
 
 impl fmt::Display for WorkspaceHealth {
@@ -46,79 +31,28 @@ impl fmt::Display for WorkspaceHealth {
     }
 }
 
+/// A condition `br` actually detects and reports.
+///
+/// This enum used to be the vocabulary of the `doctor` subsystem, which this
+/// fork does not have (see `NOTICE.md`). It carried 26 variants; 17 of them
+/// were never constructed by anything that ships, and describing conditions
+/// nobody looks for made the list read as a checklist `br` runs. These nine
+/// are the ones `classify_file_state` and `br sync --status` genuinely
+/// produce.
+///
+/// Most of what went described drift between the SQLite database and
+/// `issues.jsonl` -- stale caches, mismatched projections, dirty-flag and
+/// child-count drift. That taxonomy is not worth rebuilding here: the
+/// database is a derived, gitignored cache of the JSONL, and the remedy for
+/// any disagreement is already to rebuild it from the JSONL rather than to
+/// classify the disagreement.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AnomalyClass {
     DatabaseMissing,
     DatabaseNotSqlite,
-    DatabaseCorrupt {
-        detail: String,
-    },
-    WalCorrupt,
-    SidecarMismatch {
-        has_wal: bool,
-        has_shm: bool,
-    },
+    SidecarMismatch { has_wal: bool, has_shm: bool },
     TruncatedWal,
-    DuplicateSchemaRows {
-        name: String,
-        count: i64,
-    },
-    DuplicateConfigKeys {
-        key: String,
-        count: i64,
-    },
-    DuplicateMetadataKeys {
-        key: String,
-        count: i64,
-    },
-    JsonlParseError {
-        detail: String,
-    },
     JsonlConflictMarkers,
-    DbJsonlCountMismatch {
-        db_count: usize,
-        jsonl_count: usize,
-    },
-    /// Issue ID set differs between DB and JSONL. Emitted in addition to
-    /// (or instead of) `DbJsonlCountMismatch` when we have enough
-    /// information to enumerate which ids live on which side. Both
-    /// stores can have equal cardinality while still disagreeing on
-    /// which specific issues exist — the count-only check passes in
-    /// that case, the set check does not. See beads#286.
-    DbJsonlIdSetMismatch {
-        only_db_count: usize,
-        only_jsonl_count: usize,
-        only_db: Vec<String>,
-        only_jsonl: Vec<String>,
-        both_count: usize,
-    },
-    JsonlNewer,
-    DbNewer,
-    StaleRecoveryArtifacts,
-    BlockedCacheStale,
-    NullInNotNullColumn {
-        table: String,
-        column: String,
-    },
-    DirtyFlagMismatch {
-        flag: String,
-        expected: bool,
-        actual: bool,
-    },
-    BlockedCacheContentMismatch,
-    ReadyProjectionContentMismatch,
-    ExportHashMismatch {
-        db_hash: String,
-        jsonl_hash: String,
-    },
-    ChildCountDrift {
-        issue_id: String,
-        stored: i64,
-        actual: i64,
-    },
-    WriteProbeFailed {
-        detail: String,
-    },
     JournalSidecarPresent,
     OrphanedLockFile,
 }
@@ -129,28 +63,9 @@ impl AnomalyClass {
         match self {
             Self::DatabaseMissing => "database_missing",
             Self::DatabaseNotSqlite => "database_not_sqlite",
-            Self::DatabaseCorrupt { .. } => "database_corrupt",
-            Self::WalCorrupt => "wal_corrupt",
             Self::SidecarMismatch { .. } => "sidecar_mismatch",
             Self::TruncatedWal => "truncated_wal",
-            Self::DuplicateSchemaRows { .. } => "duplicate_schema_rows",
-            Self::DuplicateConfigKeys { .. } => "duplicate_config_keys",
-            Self::DuplicateMetadataKeys { .. } => "duplicate_metadata_keys",
-            Self::JsonlParseError { .. } => "jsonl_parse_error",
             Self::JsonlConflictMarkers => "jsonl_conflict_markers",
-            Self::DbJsonlCountMismatch { .. } => "db_jsonl_count_mismatch",
-            Self::DbJsonlIdSetMismatch { .. } => "db_jsonl_id_set_mismatch",
-            Self::JsonlNewer => "jsonl_newer",
-            Self::DbNewer => "db_newer",
-            Self::StaleRecoveryArtifacts => "stale_recovery_artifacts",
-            Self::BlockedCacheStale => "blocked_cache_stale",
-            Self::NullInNotNullColumn { .. } => "null_in_not_null_column",
-            Self::DirtyFlagMismatch { .. } => "dirty_flag_mismatch",
-            Self::BlockedCacheContentMismatch => "blocked_cache_content_mismatch",
-            Self::ReadyProjectionContentMismatch => "ready_projection_content_mismatch",
-            Self::ExportHashMismatch { .. } => "export_hash_mismatch",
-            Self::ChildCountDrift { .. } => "child_count_drift",
-            Self::WriteProbeFailed { .. } => "write_probe_failed",
             Self::JournalSidecarPresent => "journal_sidecar_present",
             Self::OrphanedLockFile => "orphaned_lock_file",
         }
@@ -159,42 +74,15 @@ impl AnomalyClass {
     #[must_use]
     pub fn severity(&self) -> WorkspaceHealth {
         match self {
-            Self::DatabaseNotSqlite
-            | Self::DatabaseCorrupt { .. }
-            | Self::WalCorrupt
-            | Self::DatabaseMissing
-            | Self::DuplicateSchemaRows { .. }
-            | Self::DuplicateConfigKeys { .. }
-            | Self::DuplicateMetadataKeys { .. }
-            | Self::TruncatedWal
-            | Self::WriteProbeFailed { .. } => WorkspaceHealth::Recoverable,
+            Self::DatabaseNotSqlite | Self::DatabaseMissing | Self::TruncatedWal => {
+                WorkspaceHealth::Recoverable
+            }
 
-            Self::JsonlConflictMarkers | Self::JsonlParseError { .. } => WorkspaceHealth::Unsafe,
+            Self::JsonlConflictMarkers => WorkspaceHealth::Unsafe,
 
-            Self::SidecarMismatch { .. }
-            | Self::DbJsonlCountMismatch { .. }
-            | Self::DbJsonlIdSetMismatch { .. }
-            | Self::JsonlNewer
-            | Self::DbNewer
-            | Self::StaleRecoveryArtifacts
-            | Self::BlockedCacheStale
-            | Self::NullInNotNullColumn { .. }
-            | Self::DirtyFlagMismatch { .. }
-            | Self::BlockedCacheContentMismatch
-            | Self::ReadyProjectionContentMismatch
-            | Self::ExportHashMismatch { .. }
-            | Self::ChildCountDrift { .. }
-            | Self::JournalSidecarPresent
-            | Self::OrphanedLockFile => WorkspaceHealth::Degraded,
-        }
-    }
-
-    #[must_use]
-    pub fn audit_entry(&self) -> AnomalyAuditEntry {
-        AnomalyAuditEntry {
-            code: self.code().to_string(),
-            severity: self.severity().as_str().to_string(),
-            message: self.to_string(),
+            Self::SidecarMismatch { .. } | Self::JournalSidecarPresent | Self::OrphanedLockFile => {
+                WorkspaceHealth::Degraded
+            }
         }
     }
 }
@@ -204,89 +92,11 @@ impl fmt::Display for AnomalyClass {
         match self {
             Self::DatabaseMissing => f.write_str("database file missing"),
             Self::DatabaseNotSqlite => f.write_str("database file is not SQLite"),
-            Self::DatabaseCorrupt { detail } => write!(f, "database corrupt: {detail}"),
-            Self::WalCorrupt => f.write_str("WAL file corrupt"),
             Self::SidecarMismatch { has_wal, has_shm } => {
                 write!(f, "sidecar mismatch (WAL={has_wal}, SHM={has_shm})")
             }
             Self::TruncatedWal => f.write_str("truncated WAL sidecar (<32 bytes)"),
-            Self::DuplicateSchemaRows { name, count } => {
-                write!(
-                    f,
-                    "duplicate sqlite_master entries for '{name}' ({count} rows)"
-                )
-            }
-            Self::DuplicateConfigKeys { key, count } => {
-                write!(f, "duplicate config rows for key '{key}' ({count} rows)")
-            }
-            Self::DuplicateMetadataKeys { key, count } => {
-                write!(f, "duplicate metadata rows for key '{key}' ({count} rows)")
-            }
-            Self::JsonlParseError { detail } => write!(f, "JSONL parse error: {detail}"),
             Self::JsonlConflictMarkers => f.write_str("JSONL contains merge conflict markers"),
-            Self::DbJsonlCountMismatch {
-                db_count,
-                jsonl_count,
-            } => {
-                write!(
-                    f,
-                    "DB/JSONL count mismatch (db={db_count}, jsonl={jsonl_count})"
-                )
-            }
-            Self::DbJsonlIdSetMismatch {
-                only_db_count,
-                only_jsonl_count,
-                only_db,
-                only_jsonl,
-                both_count,
-            } => fmt_db_jsonl_id_set_mismatch(
-                f,
-                *only_db_count,
-                *only_jsonl_count,
-                only_db,
-                only_jsonl,
-                *both_count,
-            ),
-            Self::JsonlNewer => f.write_str("JSONL has newer data than database"),
-            Self::DbNewer => f.write_str("database has newer data than JSONL"),
-            Self::StaleRecoveryArtifacts => f.write_str("stale recovery artifacts present"),
-            Self::BlockedCacheStale => f.write_str("blocked_issues_cache marked stale"),
-            Self::NullInNotNullColumn { table, column } => {
-                write!(f, "NULL in NOT NULL column {table}.{column}")
-            }
-            Self::DirtyFlagMismatch {
-                flag,
-                expected,
-                actual,
-            } => {
-                write!(
-                    f,
-                    "dirty flag '{flag}' mismatch (expected={expected}, actual={actual})"
-                )
-            }
-            Self::BlockedCacheContentMismatch => {
-                f.write_str("blocked_issues_cache content differs from dependency graph")
-            }
-            Self::ReadyProjectionContentMismatch => {
-                f.write_str("ready projection content differs from direct dependency graph")
-            }
-            Self::ExportHashMismatch {
-                db_hash,
-                jsonl_hash,
-            } => {
-                write!(f, "export hash mismatch (db={db_hash}, jsonl={jsonl_hash})")
-            }
-            Self::ChildCountDrift {
-                issue_id,
-                stored,
-                actual,
-            } => {
-                write!(
-                    f,
-                    "child_count drift for '{issue_id}' (stored={stored}, actual={actual})"
-                )
-            }
-            Self::WriteProbeFailed { detail } => write!(f, "write probe failed: {detail}"),
             Self::JournalSidecarPresent => {
                 f.write_str("journal sidecar present (incomplete transaction)")
             }
@@ -295,141 +105,38 @@ impl fmt::Display for AnomalyClass {
     }
 }
 
-fn fmt_db_jsonl_id_set_mismatch(
-    f: &mut fmt::Formatter<'_>,
-    only_db_count: usize,
-    only_jsonl_count: usize,
-    only_db: &[String],
-    only_jsonl: &[String],
-    both_count: usize,
-) -> fmt::Result {
-    write!(
-        f,
-        "DB/JSONL id-set mismatch (only_db={}: [{}]; only_jsonl={}: [{}]; both={both_count})",
-        only_db_count,
-        preview_anomaly_ids(only_db),
-        only_jsonl_count,
-        preview_anomaly_ids(only_jsonl),
-    )
-}
-
-fn preview_anomaly_ids(ids: &[String]) -> String {
-    const LIMIT: usize = 3;
-    if ids.len() <= LIMIT {
-        ids.join(", ")
-    } else {
-        format!(
-            "{}, … (+{} more)",
-            ids[..LIMIT].join(", "),
-            ids.len() - LIMIT
-        )
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct WorkspaceClassification {
-    pub health: WorkspaceHealth,
-    pub anomalies: Vec<AnomalyClass>,
-}
-
+/// One anomaly, in the shape `br sync --status --json` publishes.
+///
+/// This replaced a three-struct arrangement -- a classification, an audit
+/// record and an entry -- that carried the same `(code, severity, message)`
+/// triple plus two values derivable from it: a `health` that duplicated the
+/// payload's own `workspace_health` field, and an `anomaly_count` that
+/// duplicated the array length.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AnomalyAuditEntry {
+pub struct Anomaly {
     pub code: String,
     pub severity: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct ReliabilityAuditRecord {
-    pub source: String,
-    pub health: String,
-    pub anomaly_count: usize,
-    pub anomalies: Vec<AnomalyAuditEntry>,
-}
-
-impl ReliabilityAuditRecord {
-    #[must_use]
-    pub fn anomaly_codes_csv(&self) -> String {
-        self.anomalies
-            .iter()
-            .map(|entry| entry.code.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
-    pub fn emit_tracing(&self, phase: &str, outcome: &str) {
-        let anomaly_codes = self.anomaly_codes_csv();
-        tracing::info!(
-            target: "br::reliability",
-            source = %self.source,
-            phase,
-            outcome,
-            workspace_health = %self.health,
-            anomaly_count = self.anomaly_count,
-            anomaly_codes = %anomaly_codes,
-            "reliability audit record"
-        );
-    }
-}
-
-impl WorkspaceClassification {
-    #[must_use]
-    pub fn healthy() -> Self {
+impl From<&AnomalyClass> for Anomaly {
+    fn from(anomaly: &AnomalyClass) -> Self {
         Self {
-            health: WorkspaceHealth::Healthy,
-            anomalies: Vec::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn from_anomalies(anomalies: Vec<AnomalyClass>) -> Self {
-        let health = anomalies
-            .iter()
-            .map(AnomalyClass::severity)
-            .max()
-            .unwrap_or(WorkspaceHealth::Healthy);
-        Self { health, anomalies }
-    }
-
-    #[must_use]
-    pub fn is_operable(&self) -> bool {
-        self.health.is_operable()
-    }
-
-    #[must_use]
-    pub fn needs_recovery(&self) -> bool {
-        self.health.needs_recovery()
-    }
-
-    #[must_use]
-    pub fn recovery_possible(&self) -> bool {
-        !matches!(self.health, WorkspaceHealth::Unsafe)
-    }
-
-    #[must_use]
-    pub fn audit_record(&self, source: impl Into<String>) -> ReliabilityAuditRecord {
-        let anomalies = self
-            .anomalies
-            .iter()
-            .map(AnomalyClass::audit_entry)
-            .collect::<Vec<_>>();
-        ReliabilityAuditRecord {
-            source: source.into(),
-            health: self.health.as_str().to_string(),
-            anomaly_count: anomalies.len(),
-            anomalies,
+            code: anomaly.code().to_string(),
+            severity: anomaly.severity().as_str().to_string(),
+            message: anomaly.to_string(),
         }
     }
 }
 
-impl fmt::Display for WorkspaceClassification {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.health)?;
-        if !self.anomalies.is_empty() {
-            write!(f, " ({} anomalies)", self.anomalies.len())?;
-        }
-        Ok(())
-    }
+/// The worst severity present, or `Healthy` when there is nothing to report.
+#[must_use]
+pub fn worst_severity(anomalies: &[AnomalyClass]) -> WorkspaceHealth {
+    anomalies
+        .iter()
+        .map(AnomalyClass::severity)
+        .max()
+        .unwrap_or(WorkspaceHealth::Healthy)
 }
 
 #[must_use]
@@ -506,7 +213,7 @@ pub fn classify_file_state(db_path: &Path, jsonl_path: &Path) -> Vec<AnomalyClas
 /// open/read failure conservatively reports `false` (absence of
 /// evidence, not evidence of corruption).
 #[must_use]
-pub fn jsonl_has_conflict_markers(path: &Path) -> bool {
+fn jsonl_has_conflict_markers(path: &Path) -> bool {
     use std::io::BufRead as _;
 
     let Ok(file) = std::fs::File::open(path) else {
@@ -591,9 +298,7 @@ mod tests {
 
         let anomalies = classify_file_state(&db_path, &jsonl_path);
         assert!(anomalies.is_empty());
-        let classification = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(classification.health, WorkspaceHealth::Healthy);
-        assert!(classification.is_operable());
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Healthy);
     }
 
     #[test]
@@ -604,9 +309,7 @@ mod tests {
         let anomalies = classify_file_state(&db_path, &jsonl_path);
         assert_eq!(anomalies.len(), 1);
         assert!(matches!(anomalies[0], AnomalyClass::DatabaseMissing));
-        let classification = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(classification.health, WorkspaceHealth::Recoverable);
-        assert!(classification.recovery_possible());
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Recoverable);
     }
 
     #[test]
@@ -621,8 +324,7 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, AnomalyClass::DatabaseNotSqlite))
         );
-        let classification = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(classification.health, WorkspaceHealth::Recoverable);
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Recoverable);
     }
 
     #[test]
@@ -643,9 +345,7 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, AnomalyClass::JsonlConflictMarkers))
         );
-        let classification = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(classification.health, WorkspaceHealth::Unsafe);
-        assert!(!classification.recovery_possible());
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Unsafe);
     }
 
     #[test]
@@ -745,9 +445,7 @@ mod tests {
              locking_mode = EXCLUSIVE, and is recoverable after a crash, so it \
              must not be reported as a sidecar mismatch: {anomalies:?}"
         );
-        let classification = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(classification.health, WorkspaceHealth::Healthy);
-        assert!(classification.is_operable());
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Healthy);
     }
 
     /// The same state, built by the engine rather than by hand.
@@ -817,10 +515,7 @@ mod tests {
                 .any(|a| matches!(a, AnomalyClass::SidecarMismatch { .. })),
             "an engine-produced -wal without -shm must not be a sidecar mismatch: {anomalies:?}"
         );
-        assert_eq!(
-            WorkspaceClassification::from_anomalies(anomalies).health,
-            WorkspaceHealth::Healthy
-        );
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Healthy);
     }
 
     #[test]
@@ -846,9 +541,7 @@ mod tests {
             }),
             "SHM-without-WAL should be a sidecar mismatch: {anomalies:?}"
         );
-        let classification = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(classification.health, WorkspaceHealth::Degraded);
-        assert!(classification.is_operable());
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Degraded);
     }
 
     #[test]
@@ -922,10 +615,7 @@ mod tests {
                 .any(|a| matches!(a, AnomalyClass::TruncatedWal)),
             "0-byte WAL is the clean post-checkpoint state, not corruption: {anomalies:?}"
         );
-        assert_eq!(
-            WorkspaceClassification::from_anomalies(anomalies).health,
-            WorkspaceHealth::Healthy
-        );
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Healthy);
     }
 
     #[test]
@@ -958,40 +648,47 @@ mod tests {
             },
             AnomalyClass::JsonlConflictMarkers,
         ];
-        let classification = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(classification.health, WorkspaceHealth::Unsafe);
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Unsafe);
     }
 
     #[test]
-    fn anomaly_audit_entry_has_stable_code_and_severity() {
-        let anomaly = AnomalyClass::WriteProbeFailed {
-            detail: "database disk image is malformed".to_string(),
-        };
-        let entry = anomaly.audit_entry();
+    fn anomaly_serializes_with_stable_code_and_severity() {
+        let entry = Anomaly::from(&AnomalyClass::SidecarMismatch {
+            has_wal: true,
+            has_shm: false,
+        });
 
-        assert_eq!(entry.code, "write_probe_failed");
-        assert_eq!(entry.severity, "recoverable");
-        assert!(entry.message.contains("database disk image is malformed"));
+        assert_eq!(entry.code, "sidecar_mismatch");
+        assert_eq!(entry.severity, "degraded");
+        assert!(entry.message.contains("WAL=true"));
     }
 
     #[test]
-    fn workspace_classification_builds_reliability_audit_record() {
-        let classification = WorkspaceClassification::from_anomalies(vec![
-            AnomalyClass::DbJsonlCountMismatch {
-                db_count: 3,
-                jsonl_count: 2,
+    fn anomalies_serialize_in_the_shape_sync_status_publishes() {
+        let detected = vec![
+            AnomalyClass::SidecarMismatch {
+                has_wal: true,
+                has_shm: false,
             },
-            AnomalyClass::JsonlNewer,
-        ]);
+            AnomalyClass::OrphanedLockFile,
+        ];
 
-        let record = classification.audit_record("doctor.inspect");
-
-        assert_eq!(record.source, "doctor.inspect");
-        assert_eq!(record.health, "degraded");
-        assert_eq!(record.anomaly_count, 2);
+        assert_eq!(worst_severity(&detected), WorkspaceHealth::Degraded);
+        let published: Vec<Anomaly> = detected.iter().map(Anomaly::from).collect();
         assert_eq!(
-            record.anomaly_codes_csv(),
-            "db_jsonl_count_mismatch,jsonl_newer"
+            serde_json::to_value(&published).unwrap(),
+            serde_json::json!([
+                {
+                    "code": "sidecar_mismatch",
+                    "severity": "degraded",
+                    "message": "sidecar mismatch (WAL=true, SHM=false)"
+                },
+                {
+                    "code": "orphaned_lock_file",
+                    "severity": "degraded",
+                    "message": "orphaned lock file (.beads.lock) present"
+                }
+            ])
         );
     }
 
@@ -1018,8 +715,7 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, AnomalyClass::JournalSidecarPresent))
         );
-        let c = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(c.health, WorkspaceHealth::Degraded);
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Degraded);
     }
 
     #[test]
@@ -1038,8 +734,7 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, AnomalyClass::OrphanedLockFile))
         );
-        let c = WorkspaceClassification::from_anomalies(anomalies);
-        assert_eq!(c.health, WorkspaceHealth::Healthy);
+        assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Healthy);
     }
 
     #[test]
@@ -1057,48 +752,43 @@ mod tests {
         assert!(!lock_modified_time_is_stale(future_modified, now));
     }
 
+    /// Every variant, its code and its severity, in one place.
+    ///
+    /// Exhaustive on purpose: adding a variant without deciding how bad it is
+    /// should not compile, and the codes are what `br sync --status --json`
+    /// publishes in `reliability_audit`, so changing one silently is a change
+    /// to a machine-readable output.
     #[test]
-    fn new_anomaly_classes_have_correct_severity() {
+    fn every_anomaly_has_a_stable_code_and_a_decided_severity() {
+        let all = [
+            AnomalyClass::DatabaseMissing,
+            AnomalyClass::DatabaseNotSqlite,
+            AnomalyClass::SidecarMismatch {
+                has_wal: true,
+                has_shm: false,
+            },
+            AnomalyClass::TruncatedWal,
+            AnomalyClass::JsonlConflictMarkers,
+            AnomalyClass::JournalSidecarPresent,
+            AnomalyClass::OrphanedLockFile,
+        ];
+
+        let observed: Vec<(&str, WorkspaceHealth)> = all
+            .iter()
+            .map(|anomaly| (anomaly.code(), anomaly.severity()))
+            .collect();
+
         assert_eq!(
-            AnomalyClass::DirtyFlagMismatch {
-                flag: "needs_flush".to_string(),
-                expected: true,
-                actual: false,
-            }
-            .severity(),
-            WorkspaceHealth::Degraded
-        );
-        assert_eq!(
-            AnomalyClass::ExportHashMismatch {
-                db_hash: "abc".to_string(),
-                jsonl_hash: "def".to_string(),
-            }
-            .severity(),
-            WorkspaceHealth::Degraded
-        );
-        assert_eq!(
-            AnomalyClass::ChildCountDrift {
-                issue_id: "x-1".to_string(),
-                stored: 3,
-                actual: 2,
-            }
-            .severity(),
-            WorkspaceHealth::Degraded
-        );
-        assert_eq!(
-            AnomalyClass::JournalSidecarPresent.severity(),
-            WorkspaceHealth::Degraded
-        );
-        assert_eq!(
-            AnomalyClass::WriteProbeFailed {
-                detail: "write failed".to_string(),
-            }
-            .severity(),
-            WorkspaceHealth::Recoverable
-        );
-        assert_eq!(
-            AnomalyClass::OrphanedLockFile.severity(),
-            WorkspaceHealth::Degraded
+            observed,
+            vec![
+                ("database_missing", WorkspaceHealth::Recoverable),
+                ("database_not_sqlite", WorkspaceHealth::Recoverable),
+                ("sidecar_mismatch", WorkspaceHealth::Degraded),
+                ("truncated_wal", WorkspaceHealth::Recoverable),
+                ("jsonl_conflict_markers", WorkspaceHealth::Unsafe),
+                ("journal_sidecar_present", WorkspaceHealth::Degraded),
+                ("orphaned_lock_file", WorkspaceHealth::Degraded),
+            ]
         );
     }
 }

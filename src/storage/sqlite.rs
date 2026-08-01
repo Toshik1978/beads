@@ -1208,50 +1208,6 @@ impl SqliteStorage {
         Ok(())
     }
 
-    /// Detect recoverable on-disk anomalies that should trigger JSONL rebuild.
-    ///
-    /// These checks run after the database opens successfully because some
-    /// malformed states remain queryable enough to reach startup, then fail on
-    /// the next single-row lookup.
-    ///
-    /// Detect structured anomalies suitable for the canonical health classifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if probing the database fails.
-    pub fn detect_anomalies(&self) -> Result<Vec<crate::health::AnomalyClass>> {
-        use crate::health::AnomalyClass;
-        let mut anomalies = Vec::new();
-
-        let duplicate_schema_rows = self.conn.query(
-            "SELECT type, name, COUNT(*) AS row_count
-             FROM sqlite_master
-             WHERE name IN ('blocked_issues_cache', 'idx_blocked_cache_blocked_at')
-             GROUP BY type, name
-             HAVING COUNT(*) > 1
-             ORDER BY row_count DESC, name ASC",
-        )?;
-        for row in &duplicate_schema_rows {
-            let name = row
-                .get(1)
-                .and_then(SqliteValue::as_text)
-                .unwrap_or("unknown")
-                .to_string();
-            let count = row.get(2).and_then(SqliteValue::as_integer).unwrap_or(2);
-            anomalies.push(AnomalyClass::DuplicateSchemaRows { name, count });
-        }
-
-        if let Some((key, count)) = self.first_duplicate_kv_key("config")? {
-            anomalies.push(AnomalyClass::DuplicateConfigKeys { key, count });
-        }
-
-        if let Some((key, count)) = self.first_duplicate_kv_key("metadata")? {
-            anomalies.push(AnomalyClass::DuplicateMetadataKeys { key, count });
-        }
-
-        Ok(anomalies)
-    }
-
     /// # Errors
     ///
     /// Returns an error if probing the database fails.
@@ -3221,7 +3177,8 @@ impl SqliteStorage {
             tracing::warn!(
                 id = %id,
                 "update_issue: row not found inside write transaction \
-                 (possible DB corruption — run `br doctor --repair`)"
+                 (possible DB corruption — delete .beads/beads.db and let it \
+                 rebuild from issues.jsonl)"
             );
             BeadsError::IssueNotFound { id: id.to_string() }
         })?;
