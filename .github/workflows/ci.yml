@@ -1,10 +1,59 @@
 name: Continuous integration
 
+# MOST MARKDOWN IN THIS REPOSITORY IS A CI INPUT, NOT DOCUMENTATION.
+#
+# The obvious rule here would be `paths-ignore: ['**.md']`. It would be wrong,
+# because this project deliberately wires prose into the test suite, and six
+# separate mechanisms read a tracked `.md` file:
+#
+# * `src/cli/mod.rs` pulls `docs/CLI_REFERENCE.md`, `docs/AGENT_INTEGRATION.md`
+#   and `skills/using-br/SKILL.md` in with `include_str!` and asserts every
+#   top-level command appears in each. Editing one of those files can fail the
+#   suite — that is the entire point of the drift guard.
+# * `tests/licensing.rs` sweeps EVERY git-tracked file for the disallowed
+#   patterns, so no tracked file is inert to it, `.md` included.
+# * It also asserts `NOTICE.md` still names the lineage and the rider.
+# * The `release-config` job below reads `CHANGELOG.md` and fails when the
+#   version in `Cargo.toml` has no section.
+# * `tests/fixtures/workspace_failures/README.md` is fixture data.
+#
+# So the list below is an allow-list of files that genuinely cannot affect any
+# job, enumerated one by one rather than globbed. It is deliberately explicit:
+# a new `docs/WHATEVER.md` is not covered until someone adds it, which spends a
+# CI run rather than skipping one that should have happened. That is the safe
+# direction to fail in.
+#
+# The licensing sweep still applies to every file here, so docs.yml runs it on
+# exactly these paths. THE TWO LISTS ARE COMPLEMENTS AND MUST BE EDITED
+# TOGETHER — a path added here and not there is a path nothing checks.
+#
+# Note also that commit-lint.yml has no path filter and must not gain one: it
+# checks commit subjects, which a docs-only change still has, and `.cliff.toml`
+# builds the CHANGELOG from them.
+#
+# If `main` ever gains branch protection, revisit this. A required status check
+# that never runs leaves a docs-only PR stuck on "Expected — waiting for status"
+# forever; the fix is a skipped-but-required companion job, not removing the
+# filter. `main` is unprotected today, so this does not bite yet.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'CLAUDE.md'
+      - 'docs/ARCHITECTURE.md'
+      - 'docs/RELEASING.md'
+      - 'docs/TESTING.md'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'CLAUDE.md'
+      - 'docs/ARCHITECTURE.md'
+      - 'docs/RELEASING.md'
+      - 'docs/TESTING.md'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

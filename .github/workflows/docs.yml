@@ -1,0 +1,70 @@
+name: Docs
+
+# The licensing backstop for changes that skip ci.yml.
+#
+# ci.yml ignores a short list of prose files that cannot affect any build or
+# test (see the long comment on its `on:` block). One check still applies to
+# them: `tests/licensing.rs` enumerates every git-tracked file and fails if any
+# of them names an upstream project or a path on someone else's machine. Prose
+# is exactly where that gets written, so dropping the check for prose-only
+# changes would remove it precisely where it earns its keep.
+#
+# THE `paths` LIST BELOW IS THE COMPLEMENT OF ci.yml's `paths-ignore` AND MUST
+# BE EDITED WITH IT. A file ignored there and absent here is a file nothing
+# checks.
+#
+# This cannot be replaced by a grep step in YAML. The forbidden substrings are
+# the `DISALLOWED_PATTERNS` constant in tests/licensing.rs, and that test
+# exempts exactly two files — itself and NOTICE.md. A workflow file spelling
+# those strings out would be a third tracked file containing them, so the sweep
+# would fail on the guard written to enforce it. Running the test is the only
+# way to check the rule without duplicating it.
+#
+# Deliberately a separate workflow rather than a job in ci.yml, following
+# commit-lint.yml: `paths-ignore` skips a whole workflow, never a single job,
+# so a check that must survive the filter cannot live in the file that carries
+# it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'CLAUDE.md'
+      - 'docs/ARCHITECTURE.md'
+      - 'docs/RELEASING.md'
+      - 'docs/TESTING.md'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'CLAUDE.md'
+      - 'docs/ARCHITECTURE.md'
+      - 'docs/RELEASING.md'
+      - 'docs/TESTING.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  licensing:
+    name: Licensing guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: go-task/setup-task@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
+      - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
+      # The test shells out to `git ls-files`, so it needs the checkout above
+      # to be a real repository — which actions/checkout gives it.
+      - run: env -u RUSTUP_TOOLCHAIN cargo test --test licensing
