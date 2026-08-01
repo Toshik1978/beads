@@ -8,9 +8,9 @@ use super::{
 use crate::cli::{CommentAddArgs, CommentCommands, CommentsArgs};
 use crate::config;
 use crate::error::{BeadsError, Result};
-use crate::format::{sanitize_terminal_inline, sanitize_terminal_text};
+use crate::format::{render_markdown_text, sanitize_terminal_inline, sanitize_terminal_text};
 use crate::model::Comment;
-use crate::output::{OutputContext, OutputMode};
+use crate::output::{OutputContext, OutputMode, Theme};
 use crate::storage::SqliteStorage;
 use crate::util::id::{IdResolver, ResolverConfig};
 use crate::util::time::format_relative_time;
@@ -301,35 +301,7 @@ fn render_comments_list_rich(
         return;
     }
 
-    let mut content = Text::new("");
-    let now = Utc::now();
-
-    for (i, comment) in comments.iter().enumerate() {
-        if i > 0 {
-            // Separator between comments
-            content.append_styled(
-                &"\u{2500}".repeat(40.min(width.saturating_sub(4))),
-                theme.dimmed.clone(),
-            );
-            content.append("\n\n");
-        }
-
-        // Author and timestamp
-        content.append_styled(
-            &format!("@{}", sanitize_terminal_inline(&comment.author)),
-            theme.username.clone(),
-        );
-        content.append_styled(" \u{2022} ", theme.dimmed.clone());
-        content.append_styled(
-            &format_relative_time(comment.created_at, now),
-            theme.timestamp.clone(),
-        );
-        content.append("\n");
-
-        // Comment body
-        content.append(sanitize_terminal_text(comment.body.trim_end_matches('\n')).as_ref());
-        content.append("\n\n");
-    }
+    let content = build_comments_content(comments, theme, width.saturating_sub(4).max(1));
 
     let title = comments_panel_title(issue_id, comments.len());
     let content = if wrap {
@@ -342,6 +314,40 @@ fn render_comments_list_rich(
         .box_style(theme.box_style);
 
     console.print_renderable(&panel);
+}
+
+fn build_comments_content(comments: &[Comment], theme: &Theme, content_width: usize) -> Text {
+    let mut content = Text::new("");
+    let now = Utc::now();
+
+    for (i, comment) in comments.iter().enumerate() {
+        if i > 0 {
+            content.append_styled(
+                &"\u{2500}".repeat(40.min(content_width)),
+                theme.dimmed.clone(),
+            );
+            content.append("\n\n");
+        }
+
+        content.append_styled(
+            &format!("@{}", sanitize_terminal_inline(&comment.author)),
+            theme.username.clone(),
+        );
+        content.append_styled(" \u{2022} ", theme.dimmed.clone());
+        content.append_styled(
+            &format_relative_time(comment.created_at, now),
+            theme.timestamp.clone(),
+        );
+        content.append("\n");
+
+        content.append_text(&render_markdown_text(
+            sanitize_terminal_text(comment.body.trim_end_matches('\n')).as_ref(),
+            content_width,
+        ));
+        content.append("\n\n");
+    }
+
+    content
 }
 
 fn wrap_rich_text(text: &Text, panel_width: usize) -> Text {
@@ -374,6 +380,11 @@ fn render_comment_added_rich(issue_id: &str, comment: &Comment, ctx: &OutputCont
     console.print("");
 
     // Show the comment that was added
+    let comment_text = build_comment_added_content(comment, theme, ctx.width());
+    console.print_renderable(&comment_text);
+}
+
+fn build_comment_added_content(comment: &Comment, theme: &Theme, content_width: usize) -> Text {
     let mut comment_text = Text::new("");
     comment_text.append_styled(
         &format!("@{}", sanitize_terminal_inline(&comment.author)),
@@ -381,8 +392,11 @@ fn render_comment_added_rich(issue_id: &str, comment: &Comment, ctx: &OutputCont
     );
     comment_text.append_styled(" \u{2022} just now", theme.timestamp.clone());
     comment_text.append("\n");
-    comment_text.append(sanitize_terminal_text(comment.body.trim_end_matches('\n')).as_ref());
-    console.print_renderable(&comment_text);
+    comment_text.append_text(&render_markdown_text(
+        sanitize_terminal_text(comment.body.trim_end_matches('\n')).as_ref(),
+        content_width,
+    ));
+    comment_text
 }
 
 fn comment_added_message(issue_id: &str) -> String {
@@ -724,5 +738,44 @@ mod tests {
         assert!(!rendered.contains('\r'));
         assert!(rendered.contains("bd-1\\u{1b}]52;c;bad\\u{7}\\rreset"));
         info!("comment_human_messages_sanitize_issue_id: assertions passed");
+    }
+
+    fn test_comment(body: &str) -> Comment {
+        Comment {
+            id: 1,
+            issue_id: "bd-1".to_string(),
+            author: "someone".to_string(),
+            body: body.to_string(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn rich_comment_bodies_render_as_markdown() {
+        let theme = Theme::default();
+        let comments = vec![test_comment("## Note\n\nSome **bold** text.")];
+
+        let content = build_comments_content(&comments, &theme, 60);
+        let plain = content.plain();
+
+        assert!(plain.contains("Note"));
+        assert!(!plain.contains("##"), "got {plain:?}");
+        assert!(!plain.contains("**"), "got {plain:?}");
+    }
+
+    #[test]
+    fn rich_comment_bodies_are_sanitized_before_rendering() {
+        let theme = Theme::default();
+        let comment = test_comment("danger \x1b[2J here");
+
+        let listed = build_comments_content(std::slice::from_ref(&comment), &theme, 60);
+        let added = build_comment_added_content(&comment, &theme, 60);
+
+        for rendered in [listed.plain(), added.plain()] {
+            assert!(
+                !rendered.contains('\x1b'),
+                "raw escape survived: {rendered:?}"
+            );
+        }
     }
 }

@@ -1,6 +1,6 @@
 use crate::format::{
     IssueDetails, IssueWithDependencyMetadata, format_status_label, format_type_label,
-    sanitize_terminal_inline, sanitize_terminal_text, show_fields,
+    render_markdown_text, sanitize_terminal_inline, sanitize_terminal_text, show_fields,
 };
 use crate::model::{Comment, Dependency, Issue};
 use crate::output::{OutputContext, Theme};
@@ -61,6 +61,33 @@ impl<'a> IssuePanel<'a> {
     }
 
     pub fn print(&self, ctx: &OutputContext, wrap: bool) {
+        // Always use terminal width so descriptions are never silently
+        // truncated (issue #91).
+        let panel_width = ctx.width();
+        let content = self.build_content(panel_width.saturating_sub(4).max(1));
+        let content = if wrap {
+            wrap_rich_text(&content, panel_width)
+        } else {
+            content
+        };
+
+        let issue_id = sanitize_terminal_inline(&self.issue.id);
+        let panel = Panel::from_rich_text(&content, panel_width)
+            .title(Text::styled(
+                issue_id.into_owned(),
+                self.theme.panel_title.clone(),
+            ))
+            .box_style(self.theme.box_style)
+            .border_style(self.theme.panel_border.clone());
+
+        ctx.render(&panel);
+    }
+
+    /// Build the panel body at `content_width` — the panel's inner width.
+    ///
+    /// Split out from `print` so the rendered content can be asserted on
+    /// without a terminal.
+    fn build_content(&self, content_width: usize) -> Text {
         let mut content = Text::new("");
         let issue_id = sanitize_terminal_inline(&self.issue.id);
 
@@ -92,10 +119,10 @@ impl<'a> IssuePanel<'a> {
         // Description
         if let Some(ref desc) = self.issue.description {
             content.append("\n");
-            content.append_styled(
+            content.append_text(&render_markdown_text(
                 sanitize_terminal_text(desc).as_ref(),
-                self.theme.issue_description.clone(),
-            );
+                content_width,
+            ));
             content.append("\n");
         }
 
@@ -152,7 +179,7 @@ impl<'a> IssuePanel<'a> {
         );
 
         self.append_shared_metadata(&mut content);
-        self.append_prose_sections(&mut content);
+        self.append_prose_sections(&mut content, content_width);
 
         self.append_relationships(&mut content);
 
@@ -160,25 +187,9 @@ impl<'a> IssuePanel<'a> {
         let comments: &[Comment] = self
             .details
             .map_or(self.issue.comments.as_slice(), |d| d.comments.as_slice());
-        self.append_comments(&mut content, comments);
+        self.append_comments(&mut content, comments, content_width);
 
-        // Build and print panel — always use terminal width so descriptions
-        // are never silently truncated (issue #91).
-        let panel_width = ctx.width();
-        let content = if wrap {
-            wrap_rich_text(&content, panel_width)
-        } else {
-            content
-        };
-        let panel = Panel::from_rich_text(&content, panel_width)
-            .title(Text::styled(
-                issue_id.into_owned(),
-                self.theme.panel_title.clone(),
-            ))
-            .box_style(self.theme.box_style)
-            .border_style(self.theme.panel_border.clone());
-
-        ctx.render(&panel);
+        content
     }
 
     /// Owner / Ref / Due / Deferred until / Estimate / Closed.
@@ -202,17 +213,17 @@ impl<'a> IssuePanel<'a> {
     /// Where a planned issue's content actually lives. The Rich panel used to
     /// end before reaching any of them, so the human-facing renderer was the
     /// lossy one while the piped renderer was complete.
-    fn append_prose_sections(&self, content: &mut Text) {
+    fn append_prose_sections(&self, content: &mut Text, content_width: usize) {
         for section in show_fields::prose_sections(self.issue) {
             content.append("\n");
             content.append_styled(
                 &format!("{}:\n", section.heading),
                 self.theme.dimmed.clone(),
             );
-            content.append_styled(
+            content.append_text(&render_markdown_text(
                 sanitize_terminal_text(section.body).as_ref(),
-                self.theme.issue_description.clone(),
-            );
+                content_width,
+            ));
             content.append("\n");
         }
     }
@@ -239,7 +250,7 @@ impl<'a> IssuePanel<'a> {
         }
     }
 
-    fn append_comments(&self, content: &mut Text, comments: &[Comment]) {
+    fn append_comments(&self, content: &mut Text, comments: &[Comment], content_width: usize) {
         if !self.show_comments || comments.is_empty() {
             return;
         }
@@ -259,10 +270,10 @@ impl<'a> IssuePanel<'a> {
                 self.theme.username.clone(),
             );
             content.append_styled(": ", self.theme.dimmed.clone());
-            content.append_styled(
+            content.append_text(&render_markdown_text(
                 sanitize_terminal_text(&comment.body).as_ref(),
-                self.theme.comment.clone(),
-            );
+                content_width,
+            ));
             content.append("\n");
         }
     }
@@ -353,8 +364,10 @@ fn render_dependency_refs(deps: &[Dependency], content: &mut Text, theme: &Theme
 
 #[cfg(test)]
 mod tests {
+    use super::IssuePanel;
     use super::{dependency_arrow, render_dependency_list, render_dependency_refs};
     use crate::format::IssueWithDependencyMetadata;
+    use crate::model::Issue;
     use crate::model::{Dependency, DependencyType, Priority, Status};
     use crate::output::Theme;
     use chrono::Utc;
@@ -410,5 +423,67 @@ mod tests {
                 .contains("bd-target\\u{1b}]52;c;bad\\u{7}")
         );
         assert!(raw_content.plain().contains("custom\\u{8}type"));
+    }
+
+    #[test]
+    fn panel_renders_the_description_as_markdown() {
+        let theme = Theme::default();
+        let issue = Issue {
+            id: "bd-md".to_string(),
+            title: "Markdown".to_string(),
+            description: Some("## Heading two\n\nSome **bold** text.".to_string()),
+            ..Issue::default()
+        };
+
+        let content = IssuePanel::new(&issue, &theme).build_content(60);
+
+        assert!(content.plain().contains("Heading two"));
+        assert!(!content.plain().contains("##"), "got {:?}", content.plain());
+        assert!(!content.plain().contains("**"), "got {:?}", content.plain());
+        assert!(!content.spans().is_empty(), "nothing was styled");
+    }
+
+    #[test]
+    fn panel_renders_every_prose_section_as_markdown() {
+        let theme = Theme::default();
+        let issue = Issue {
+            id: "bd-prose".to_string(),
+            title: "Prose".to_string(),
+            design: Some("### Design head\n".to_string()),
+            acceptance_criteria: Some("- [ ] one\n- [x] two\n".to_string()),
+            notes: Some("Some *emphasis* here.\n".to_string()),
+            ..Issue::default()
+        };
+
+        let content = IssuePanel::new(&issue, &theme).build_content(60);
+        let plain = content.plain();
+
+        assert!(plain.contains("Design head"));
+        assert!(!plain.contains("###"), "design kept its markers: {plain:?}");
+        assert!(
+            !plain.contains("- [ ]"),
+            "criteria kept their markers: {plain:?}"
+        );
+        assert!(!plain.contains('*'), "notes kept their markers: {plain:?}");
+    }
+
+    #[test]
+    fn panel_sanitizes_before_rendering_markdown() {
+        let theme = Theme::default();
+        let issue = Issue {
+            id: "bd-esc".to_string(),
+            title: "Escape".to_string(),
+            description: Some("before \x1b[31m red \x1b[0m after".to_string()),
+            design: Some("design \x1b[2J".to_string()),
+            ..Issue::default()
+        };
+
+        let content = IssuePanel::new(&issue, &theme).build_content(60);
+
+        assert!(
+            !content.plain().contains('\x1b'),
+            "a raw escape survived into the panel: {:?}",
+            content.plain()
+        );
     }
 }
