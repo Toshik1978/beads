@@ -331,7 +331,7 @@ jobs:
 
       - name: Publish badge endpoints to the gist
         if: env.GIST_ID != ''
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           COVERAGE: ${{ env.COVERAGE }}
           COVERAGE_COLOR: ${{ env.COVERAGE_COLOR }}
