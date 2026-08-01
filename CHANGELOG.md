@@ -9,6 +9,86 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.1.1 — 2026-08-01
+
+One fix, worth the detail: `br` no longer writes the absolute path of your
+workspace into every issue it creates.
+
+### Highlights
+
+- **Issues no longer name the machine they were created on.** `br create` and
+  the markdown import stamped `source_repo_path` — the canonicalized path of
+  the directory containing `.beads/` — onto each new issue, and that value
+  reached `.beads/issues.jsonl`, which projects commit. Every issue therefore
+  published the author's directory layout. Nothing read the field back, and
+  because `sync_equals` compared it, two clones of one repository at different
+  paths also disagreed on every record and produced diffs saying nothing.
+- **`source_repo` is unchanged.** The repository *basename* is still stamped on
+  new issues. It identifies the repository without naming the machine, and it
+  is the value cross-repo tooling was reading anyway.
+- **The field still exists and can still be set.** `br update <id>
+  --source-repo-path <path>` writes it explicitly and it round-trips through
+  the JSONL, so the cross-clone disambiguation it was added for stays available
+  to anyone who wants it. There is no schema migration — the column remains,
+  nullable, and every existing database keeps working.
+
+### Upgrading a repository that already has paths in it
+
+Nothing is cleaned up for you. Issues created before this release keep their
+stored path, and `br` keeps re-exporting it.
+
+Clearing it per issue is supported and does what you would expect:
+
+```sh
+br update <id> --source-repo-path ''
+```
+
+For a whole tracker, strip the key from every record and rebuild:
+
+```sh
+python3 - <<'EOF'
+import json
+path = '.beads/issues.jsonl'
+records = [json.loads(line) for line in open(path) if line.strip()]
+for record in records:
+    record.pop('source_repo_path', None)
+with open(path, 'w') as out:
+    for record in records:
+        out.write(json.dumps(record, separators=(',', ':'), ensure_ascii=False) + '\n')
+EOF
+br sync --import-only --rebuild
+```
+
+**The `--rebuild` is the part that matters.** A plain `br sync --import-only`
+treats a field missing from a record as "leave the stored value alone", reports
+the record as up-to-date, and the next write to that issue exports the old path
+straight back into the file. `--rebuild` reconstructs the database from the
+JSONL instead, so an omitted field really is cleared; dependencies, comments,
+tombstones and every other field are preserved, and it writes a verified backup
+under `.beads/.br_recovery/` first. Flushing the other way (database to JSONL)
+is not a fix at all — the stored paths are exactly what it would write back.
+
+That `--import-only` behaviour is a separate bug and is not changed by this
+release.
+
+Note that this cleans the working tree only. Paths already committed remain in
+the repository's history.
+
+### Why this is a patch release
+
+`source_repo_path` disappears from `br --json` and from newly written JSONL
+records, which is a visible change to a machine-readable surface. It is still a
+patch: the field is optional and omitted when unset, and `Issue`'s own
+documentation has always recorded that databases and hand-edited records
+lacking it are valid. A consumer that required the key was already broken
+against every issue predating the field.
+
+### Bug Fixes
+
+- [3b6fcba](https://github.com/Toshik1978/beads/commit/3b6fcbaf817f7fc12fee3a77b8e2194f10d4b029) fix(cli): stop stamping an absolute workspace path onto every issue
+
+---
+
 ## v1.1.0 — 2026-08-01
 
 Issue bodies now render as markdown when `br` writes to a terminal, a hang

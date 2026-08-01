@@ -1,6 +1,6 @@
 [package]
 name = "beads"
-version = "1.1.0"
+version = "1.1.1"
 publish = false
 edition = "2024"
 # MEASURED, not inherited. The `1.88` that stood here came from upstream and had
