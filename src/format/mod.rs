@@ -35,7 +35,6 @@
 pub mod csv;
 pub mod markdown;
 mod output;
-pub mod rich;
 pub mod show_fields;
 pub mod syntax;
 mod text;
