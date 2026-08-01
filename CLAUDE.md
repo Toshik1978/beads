@@ -228,12 +228,33 @@ Three details follow from the layout:
 
 ## Toolchain floor
 
-`rust-version = "1.95"` in `Cargo.toml` is measured (by bisection against
-this crate's dependency graph), not inherited from upstream. It is a
-property of the pinned `Cargo.lock`, not of this crate's own source, and can
-move if a dependency's requirements change. Building needs a C compiler in
-addition to Rust: `rusqlite`'s `bundled` feature compiles SQLite from C
-source.
+`rust-version = "1.97.1"` in `Cargo.toml` is a **support decision**: it is the
+toolchain this project is built and tested on, and anything older is refused
+up front rather than allowed to fail deeper in.
+
+That is deliberately higher than the **measured minimum**, which is `1.95` —
+the lowest release the pinned `Cargo.lock` has actually been built with, fixed
+by `libsqlite3-sys`'s use of `cfg_select!` and bisected in the comment above
+the key. Keep the two apart when reading that comment: 1.95 and 1.96 compile,
+and are excluded anyway. The measured minimum is a property of the lock, not of
+this crate's source, and can move in either direction when a dependency
+changes. Building also needs a C compiler in addition to Rust: `rusqlite`'s
+`bundled` feature compiles SQLite from C source.
+
+Both numbers appear in three tracked places — the manifest key, the bisection
+comment above it, and this paragraph — and `tests/toolchain_floor.rs` fails if
+they drift apart or if the declared floor ever falls below the measured
+minimum. They *did* drift once, silently, and the only thing that noticed was a
+human reading the file. If you re-bisect, pass `--ignore-rust-version`: without
+it cargo rejects every toolchain below the declared floor before compiling
+anything, so the value under test validates itself.
+
+The number appears in three tracked places — the manifest, the bisection
+comment above it, and this paragraph — and `tests/toolchain_floor.rs` fails if
+they disagree. They did disagree once, silently, for exactly as long as it took
+someone to notice by reading. If you re-bisect, pass `--ignore-rust-version`:
+without it cargo rejects every toolchain below the declared floor before
+compiling anything, so the value under test validates itself.
 
 ## No plain-MIT prose, ever
 

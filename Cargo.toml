@@ -3,29 +3,55 @@ name = "beads"
 version = "1.1.1"
 publish = false
 edition = "2024"
-# MEASURED, not inherited. The `1.88` that stood here came from upstream and had
-# never been tested in this fork; it is wrong by seven releases. The binding
-# constraint is not `edition = "2024"` (1.85) and not any declared MSRV in the
-# graph (the highest is `time`'s 1.88) — it is `libsqlite3-sys 0.38.1`, which
-# declares no `rust-version` at all and whose build script calls the
-# `cfg_select!` macro, stabilized in Rust 1.95. Because it declares nothing,
-# cargo cannot detect the conflict and the failure is a build-script compile
-# error, not a resolver message.
+# Two different facts live here, and conflating them is what made this section
+# read as self-contradictory before: the *declared floor* below is 1.97.1, a
+# support decision; the *measured minimum* is 1.95, a property of the lock.
+# Both are recorded on purpose.
+#
+# --- The measured minimum -------------------------------------------------
+#
+# The binding constraint is not `edition = "2024"` (1.85) and not any declared
+# MSRV in the graph (the highest is `time`'s 1.88) — it is `libsqlite3-sys
+# 0.38.1`, which declares no `rust-version` at all and whose build script calls
+# the `cfg_select!` macro, stabilized in Rust 1.95. Because it declares
+# nothing, cargo cannot detect the conflict and the failure is a build-script
+# compile error, not a resolver message.
 #
 # Bisected on this host with `cargo build --locked`, each toolchain installed
-# and run:
+# and run. Re-measured 2026-08-01 against the then-current `Cargo.lock`, which
+# reproduced the original result exactly:
 #
 #   1.88.0  error: cannot find macro `cfg_select` in this scope
 #   1.91.0  error[E0658]: use of unstable library feature `cfg_select`
 #   1.93.0  error[E0658]: use of unstable library feature `cfg_select`
 #   1.94.0  error[E0658]: use of unstable library feature `cfg_select`
 #   1.95.0  ok — and `cargo build --locked --all-targets` also ok
-#   1.96.0  ok — the full suite is run on this
+#   1.96.0  ok
 #
-# So 1.95 is the floor, and it is a floor someone has actually built with
-# rather than a number nobody has tested. Note what it is a property of: the
-# pinned `Cargo.lock`, not this crate's source. A future `libsqlite3-sys` may
-# move it again, in either direction, with no change here.
+# So 1.95 is the technical minimum: the lowest release this lock has actually
+# been built with. Note what it is a property of — the pinned `Cargo.lock`, not
+# this crate's source. A future `libsqlite3-sys` may move it again, in either
+# direction, with no change here.
+#
+# --- The declared floor ---------------------------------------------------
+#
+# 1.97.1 regardless, and deliberately. That is a support decision rather than a
+# measurement: it is the toolchain this project is built and tested on, and
+# declaring it means an older toolchain fails immediately with a cargo message
+# naming the requirement instead of failing deeper in with a build-script
+# error. It excludes 1.95 and 1.96 knowingly, even though the table above says
+# they compile.
+#
+# To re-bisect, pass `--ignore-rust-version`. Without it the key below is
+# self-fulfilling: cargo refuses with "rustc X is not supported by the
+# following packages" before the compiler is ever invoked, so every toolchain
+# under the declared floor looks broken whether or not it is. With the floor
+# two releases above the measured minimum, that flag is now required to
+# reproduce any row in the table at all.
+#
+# `tests/toolchain_floor.rs` holds this comment, the key below and CLAUDE.md to
+# the same two numbers, and fails if the declared floor ever drops below the
+# measured minimum.
 rust-version = "1.97.1"
 description = "Agent-first issue tracker (SQLite + JSONL)"
 # Not plain MIT: LICENSE carries a binding OpenAI/Anthropic rider that must
