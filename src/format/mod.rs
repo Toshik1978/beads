@@ -64,4 +64,4 @@ pub use syntax::{
 };
 
 // Markdown rendering
-pub use markdown::{contains_markdown, escape_markdown, render_markdown};
+pub use markdown::render_markdown_text;

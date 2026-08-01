@@ -96,6 +96,13 @@ crossterm = "0.29"
 # crates.
 rich_rust = { version = "0.2.1", features = ["markdown", "json", "backtrace"] }
 
+# Block-level markdown parsing for `format::markdown`. Already compiled as a
+# transitive dependency of `rich_rust`'s `markdown` feature; declared here so
+# `format::markdown` can classify top-level blocks before rendering them.
+# Used ONLY to identify block kinds and source ranges — rendering stays with
+# rich_rust's `Markdown` renderable.
+pulldown-cmark = { version = "0.13.3", default-features = false }
+
 # Path normalization (strips \\?\ prefix on Windows)
 dunce = "1.0.5"
 

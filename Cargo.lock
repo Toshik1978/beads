@@ -150,6 +150,7 @@ dependencies = [
  "once_cell",
  "predicates",
  "proptest",
+ "pulldown-cmark",
  "rand 0.10.2",
  "regex",
  "rich_rust",
