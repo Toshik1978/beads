@@ -259,6 +259,11 @@ br list [OPTIONS]
 `-` forces descending and `+` forces ascending. `--reverse` flips every key.
 Every sort ends with an implicit `id` tiebreaker, so output is deterministic.
 
+Because `created_at` and `updated_at` are already descending by default,
+`-created`/`-updated` change nothing — they force the same direction the
+field already sorts in. Use `+created`/`+updated` for oldest-first, or
+`--reverse` to invert every resolved key at once.
+
 A key that *begins* with `-` (a leading key with no other key before it, e.g.
 `-updated`) must be attached to `--sort` with `=`: `--sort=-updated`, not
 `--sort -updated`. Written as two arguments, the shell hands `-updated` to
@@ -271,7 +276,7 @@ longer begins the argument.
 ```bash
 br list --sort priority,updated     # critical first, most recent within each band
 br list --sort status,priority      # group by workflow state, then priority
-br list --sort=-updated             # oldest first
+br list --sort=+updated             # oldest first
 ```
 
 `--sort priority` on its own keeps its historical tiebreaker and is
