@@ -4,9 +4,11 @@
 //! into a SQL `ORDER BY` clause, and into an in-memory comparator. Both read
 //! `resolved()`, so the two engines cannot disagree about the effective order.
 
+use std::fmt::Write as _;
 use std::str::FromStr;
 
 use crate::error::{BeadsError, Result};
+use crate::model::{IssueType, Status};
 
 /// A column the result set can be ordered by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,6 +48,49 @@ impl SortField {
             _ => return None,
         })
     }
+
+    /// The SQL fragments this field orders by, in order.
+    ///
+    /// `status` and `type` emit a `CASE` plus the raw column: the raw column
+    /// only ever breaks ties inside the custom bucket, since every known value
+    /// has a distinct rank, so it cannot disturb the documented order.
+    fn sql_fragments(self) -> Vec<(String, FragmentDirection)> {
+        match self {
+            Self::Priority => vec![("priority".to_string(), FragmentDirection::Follow)],
+            Self::Status => vec![
+                (
+                    case_expression("status", Status::SORT_RANKS, Status::CUSTOM_SORT_RANK),
+                    FragmentDirection::Follow,
+                ),
+                ("status".to_string(), FragmentDirection::Follow),
+            ],
+            Self::Type => vec![
+                (
+                    case_expression(
+                        "issue_type",
+                        IssueType::SORT_RANKS,
+                        IssueType::CUSTOM_SORT_RANK,
+                    ),
+                    FragmentDirection::Follow,
+                ),
+                ("issue_type".to_string(), FragmentDirection::Follow),
+            ],
+            Self::Assignee => vec![
+                (
+                    "CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END".to_string(),
+                    FragmentDirection::ForceAsc,
+                ),
+                ("NULLIF(assignee,'')".to_string(), FragmentDirection::Follow),
+            ],
+            Self::CreatedAt => vec![("created_at".to_string(), FragmentDirection::Follow)],
+            Self::UpdatedAt => vec![("updated_at".to_string(), FragmentDirection::Follow)],
+            Self::Title => vec![(
+                "title COLLATE NOCASE".to_string(),
+                FragmentDirection::Follow,
+            )],
+            Self::Id => vec![("id".to_string(), FragmentDirection::Follow)],
+        }
+    }
 }
 
 /// Ascending or descending.
@@ -71,6 +116,26 @@ impl SortDirection {
             Self::Desc => "DESC",
         }
     }
+}
+
+/// How a rendered fragment takes its direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FragmentDirection {
+    /// Use the key's direction.
+    Follow,
+    /// Always ascending, whatever the key says. Used for the assignee
+    /// null-rank so unassigned sorts last in both directions.
+    ForceAsc,
+}
+
+/// Build `CASE <column> WHEN 'a' THEN 0 … ELSE <custom> END` from a rank table.
+fn case_expression(column: &str, ranks: &[(&str, u8)], custom_rank: u8) -> String {
+    let mut sql = format!("CASE {column}");
+    for (name, rank) in ranks {
+        let _ = write!(sql, " WHEN '{name}' THEN {rank}");
+    }
+    let _ = write!(sql, " ELSE {custom_rank} END");
+    sql
 }
 
 /// A field paired with a concrete direction. Produced by resolution; never
@@ -161,6 +226,40 @@ impl SortSpec {
                 direction: None
             }]
         )
+    }
+
+    /// The ordering applied when no `--sort` was given. Identical to a bare
+    /// `priority` spec, so the default and `--sort priority` cannot drift.
+    #[must_use]
+    pub fn default_order() -> Self {
+        Self {
+            keys: vec![ParsedKey {
+                field: SortField::Priority,
+                direction: None,
+            }],
+        }
+    }
+
+    /// Render the effective ordering as a SQL `ORDER BY` clause, with a leading
+    /// space so it concatenates onto a partially built statement.
+    #[must_use]
+    pub fn order_by_sql(&self, reverse: bool) -> String {
+        let mut sql = String::from(" ORDER BY ");
+        let mut first = true;
+        for key in self.resolved(reverse) {
+            for (expression, mode) in key.field.sql_fragments() {
+                if !first {
+                    sql.push_str(", ");
+                }
+                first = false;
+                let direction = match mode {
+                    FragmentDirection::ForceAsc => SortDirection::Asc,
+                    FragmentDirection::Follow => key.direction,
+                };
+                let _ = write!(sql, "{expression} {}", direction.sql());
+            }
+        }
+        sql
     }
 }
 
@@ -359,5 +458,98 @@ mod tests {
             rendered.contains("nonsense"),
             "error should quote the input: {rendered}"
         );
+    }
+
+    #[test]
+    fn renders_a_single_key_with_the_id_terminator() {
+        assert_eq!(
+            spec("title").order_by_sql(false),
+            " ORDER BY title COLLATE NOCASE ASC, id ASC"
+        );
+    }
+
+    #[test]
+    fn renders_the_legacy_priority_ordering_exactly_as_today() {
+        // Byte-identical to the hand-written clause at sqlite.rs:4058.
+        assert_eq!(
+            spec("priority").order_by_sql(false),
+            " ORDER BY priority ASC, created_at DESC, id ASC"
+        );
+        assert_eq!(
+            spec("priority").order_by_sql(true),
+            " ORDER BY priority DESC, created_at ASC, id ASC"
+        );
+    }
+
+    #[test]
+    fn the_no_sort_default_renders_the_same_clause_as_bare_priority() {
+        assert_eq!(
+            SortSpec::default_order().order_by_sql(false),
+            " ORDER BY priority ASC, created_at DESC, id ASC"
+        );
+        assert_eq!(
+            SortSpec::default_order().order_by_sql(true),
+            " ORDER BY priority DESC, created_at ASC, id ASC"
+        );
+    }
+
+    #[test]
+    fn renders_multiple_keys_in_order() {
+        assert_eq!(
+            spec("priority,updated").order_by_sql(false),
+            " ORDER BY priority ASC, updated_at DESC, id ASC"
+        );
+    }
+
+    #[test]
+    fn status_renders_a_case_expression_then_the_raw_column() {
+        let sql = spec("status").order_by_sql(false);
+        assert_eq!(
+            sql,
+            " ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'in_progress' THEN 1 \
+             WHEN 'blocked' THEN 2 WHEN 'deferred' THEN 3 WHEN 'draft' THEN 4 \
+             WHEN 'closed' THEN 5 WHEN 'tombstone' THEN 6 WHEN 'pinned' THEN 7 \
+             ELSE 99 END ASC, status ASC, id ASC"
+        );
+    }
+
+    #[test]
+    fn type_renders_against_the_issue_type_column() {
+        let sql = spec("type").order_by_sql(false);
+        assert!(sql.contains("CASE issue_type WHEN 'task' THEN 0"), "{sql}");
+        assert!(
+            sql.contains("ELSE 99 END ASC, issue_type ASC, id ASC"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn assignee_keeps_unassigned_last_in_both_directions() {
+        assert_eq!(
+            spec("assignee").order_by_sql(false),
+            " ORDER BY CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END ASC, \
+             NULLIF(assignee,'') ASC, id ASC"
+        );
+        // The null-rank fragment stays ASC; only the name flips.
+        assert_eq!(
+            spec("-assignee").order_by_sql(false),
+            " ORDER BY CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END ASC, \
+             NULLIF(assignee,'') DESC, id ASC"
+        );
+        assert_eq!(
+            spec("assignee").order_by_sql(true),
+            " ORDER BY CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END ASC, \
+             NULLIF(assignee,'') DESC, id ASC"
+        );
+    }
+
+    #[test]
+    fn the_id_terminator_never_flips() {
+        for input in ["priority,updated", "status", "assignee", "title"] {
+            assert!(
+                spec(input).order_by_sql(true).ends_with(", id ASC"),
+                "{input} should still end with id ASC under reverse"
+            );
+        }
     }
 }
