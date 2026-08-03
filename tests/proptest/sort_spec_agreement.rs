@@ -58,14 +58,25 @@ fn timestamp_pool() -> [DateTime<Utc>; 4] {
     ]
 }
 
+/// Every known `Status` except `Tombstone`, plus two customs.
+///
+/// `Tombstone` is the one deliberate omission, and for a reason that is not
+/// about sorting: `sqlite.rs` filters tombstones out of `list_issues` even
+/// under `include_closed`, so generating one would make the SQL side return a
+/// *different set* of issues than the in-memory side sorted. The test would
+/// fail on membership and tell us nothing about ordering. Every other variant
+/// belongs here — leaving `Deferred` and `Pinned` out left half the rank table
+/// unexercised by the differential.
 fn status_strategy() -> impl Strategy<Value = Status> {
     prop_oneof![
         3 => prop_oneof![
             Just(Status::Open),
             Just(Status::InProgress),
             Just(Status::Blocked),
+            Just(Status::Deferred),
             Just(Status::Draft),
             Just(Status::Closed),
+            Just(Status::Pinned),
         ],
         1 => prop_oneof![
             Just(Status::Custom("triage".to_string())),
@@ -74,13 +85,18 @@ fn status_strategy() -> impl Strategy<Value = Status> {
     ]
 }
 
+/// Every known `IssueType`, plus a custom. Nothing is excluded here — unlike
+/// `Status`, no type variant is filtered out of `list_issues`.
 fn issue_type_strategy() -> impl Strategy<Value = IssueType> {
     prop_oneof![
         4 => prop_oneof![
             Just(IssueType::Task),
             Just(IssueType::Bug),
             Just(IssueType::Feature),
+            Just(IssueType::Epic),
             Just(IssueType::Chore),
+            Just(IssueType::Docs),
+            Just(IssueType::Question),
         ],
         1 => Just(IssueType::Custom("spike".to_string())),
     ]
@@ -173,7 +189,12 @@ proptest! {
     #[test]
     fn sql_and_in_memory_orderings_agree(
         issues in prop::collection::vec(arb_issue(), 1..12).prop_map(assign_unique_ids),
-        picks in prop::collection::vec((0usize..7, 0u8..3), 1..4),
+        // Up to 8 draws, not 3: duplicate fields collapse in `spec_string`,
+        // so a cap of 3 could never generate a spec chaining more than three
+        // keys — and `FIELDS` has seven. The upper bound exceeds that length
+        // on purpose, so specs using every field are reachable despite the
+        // collapse.
+        picks in prop::collection::vec((0usize..7, 0u8..3), 1..8),
         reverse in any::<bool>(),
     ) {
         let Some(spec_text) = spec_string(&picks) else {
