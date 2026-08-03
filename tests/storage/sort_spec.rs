@@ -19,15 +19,10 @@ fn at(month: u32, day: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, month, day, 0, 0, 0).unwrap()
 }
 
-/// Build an issue with the sort-relevant fields pinned, then persist it.
+/// Build an issue with the sort-relevant fields pinned.
 ///
 /// `IssueBuilder` has no timestamp setters, so those are assigned on the
-/// struct before `create_issue`.
-fn seed(storage: &mut SqliteStorage, id: &str, issue: Issue) -> String {
-    storage.create_issue(&issue, "tester").expect("create");
-    id.to_string()
-}
-
+/// struct after `build()`; the caller persists it with `create_issue`.
 fn built(id: &str, priority: Priority, updated: DateTime<Utc>) -> Issue {
     let mut issue = fixtures::IssueBuilder::new(id)
         .with_id(id)
@@ -52,21 +47,15 @@ fn priority_then_updated_orders_within_the_priority_band() {
     // "test-zzz-newer" and this assertion would fail — that's what makes
     // this test discriminate against a spec that parses but doesn't apply
     // its second key.
-    seed(
-        &mut storage,
-        "test-aaa-older",
-        built("test-aaa-older", Priority(1), at(1, 1)),
-    );
-    seed(
-        &mut storage,
-        "test-zzz-newer",
-        built("test-zzz-newer", Priority(1), at(6, 1)),
-    );
-    seed(
-        &mut storage,
-        "test-crit",
-        built("test-crit", Priority(0), at(1, 1)),
-    );
+    storage
+        .create_issue(&built("test-aaa-older", Priority(1), at(1, 1)), "tester")
+        .expect("create");
+    storage
+        .create_issue(&built("test-zzz-newer", Priority(1), at(6, 1)), "tester")
+        .expect("create");
+    storage
+        .create_issue(&built("test-crit", Priority(0), at(1, 1)), "tester")
+        .expect("create");
 
     let issues = storage
         .list_issues(&filters_sorted("priority,updated"))
@@ -138,23 +127,17 @@ fn seed_stale_trio(storage: &mut SqliteStorage) {
     // Tied on updated_at (Jan 1): id-ASC says "test-aaa" first, but
     // priority-DESC (after --reverse flips priority's natural ASC) says
     // "test-zzz" (LOW = 3) first instead.
-    seed(
-        storage,
-        "test-aaa",
-        built("test-aaa", Priority::CRITICAL, at(1, 1)),
-    );
-    seed(
-        storage,
-        "test-zzz",
-        built("test-zzz", Priority::LOW, at(1, 1)),
-    );
+    storage
+        .create_issue(&built("test-aaa", Priority::CRITICAL, at(1, 1)), "tester")
+        .expect("create");
+    storage
+        .create_issue(&built("test-zzz", Priority::LOW, at(1, 1)), "tester")
+        .expect("create");
     // Strictly later updated_at: sorts last under `updated_at ASC` no matter
     // which secondary key is in play.
-    seed(
-        storage,
-        "test-mmm",
-        built("test-mmm", Priority::MEDIUM, at(2, 1)),
-    );
+    storage
+        .create_issue(&built("test-mmm", Priority::MEDIUM, at(2, 1)), "tester")
+        .expect("create");
 }
 
 #[test]
@@ -210,16 +193,12 @@ fn stale_fast_path_rejects_a_multi_key_spec_and_honors_the_full_ordering() {
 #[test]
 fn bare_priority_still_breaks_ties_by_created_at_descending() {
     let mut storage = test_db();
-    seed(
-        &mut storage,
-        "test-first",
-        built("test-first", Priority(1), at(1, 1)),
-    );
-    seed(
-        &mut storage,
-        "test-second",
-        built("test-second", Priority(1), at(6, 1)),
-    );
+    storage
+        .create_issue(&built("test-first", Priority(1), at(1, 1)), "tester")
+        .expect("create");
+    storage
+        .create_issue(&built("test-second", Priority(1), at(6, 1)), "tester")
+        .expect("create");
 
     let issues = storage
         .list_issues(&filters_sorted("priority"))
