@@ -111,8 +111,11 @@ cannot take its neighbours' results down with it, so there is nothing left to
 reconcile: read the exit status and the single `Summary` line.
 
 ```
-Summary [  91.399s] 3162 tests run: 3162 passed (1 leaky), 4 skipped
+Summary [  81.569s] 3144 tests run: 3144 passed (1 leaky), 4 skipped
 ```
+
+That is the shape, not a transcript: the `(1 leaky)` is shown because it is
+the annotation worth recognising, and a clean run simply omits it.
 
 `task test:report` parses exactly that line and writes any `FAIL`, `SIGSEGV`,
 `SIGABRT`, `TIMEOUT` or `LEAK` names to a file. It is a diagnostic, never a
@@ -154,8 +157,23 @@ piping through `tail`, too: a pipeline reports the *last* command's status, so
 (`set: [pipefail]` covers this inside the Taskfile; an ad-hoc shell command is
 on its own.)
 
-A full run at the time of writing: **3162 tests, 0 failed, 4 skipped**, in 91s
-under nextest against ~174s of `cargo test` execution, plus 10s of doctests.
+A full run at the time of writing: **3144 tests, 0 failed, 4 skipped**, in 82s
+under nextest, plus the doctest pass. The `cargo test` runner it replaced took
+roughly twice as long on a suite of comparable size; that figure has not been
+re-measured since, and is here only to say why the switch was worth making.
+
+**Treat that number as perishable, and never as a floor.** It read 3162 for a
+while after it stopped being true, which is the worse direction to be wrong
+in: a documented total *above* reality invites the reader to go hunting for
+the missing eighteen tests and the silent skip that swallowed them. There was
+no such skip. The refactor sweeps that removed unreachable code removed its
+tests with it, taking the total down to roughly 3093, and the multi-key
+`--sort` work then added it back to 3144. Both moves were real work with
+nothing hidden in them.
+
+The rule this exists to serve is the one at the end of this section: verify a
+change in the total by diffing `cargo nextest list --workspace`, never by
+arithmetic against a number written in a file.
 
 **The test total was once 14166, and almost none of that drop was coverage.**
 Two separate things happened, and it is worth keeping them apart.
