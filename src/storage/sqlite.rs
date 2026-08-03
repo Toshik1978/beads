@@ -492,6 +492,37 @@ enum SearchIssueProjection {
     CommandText,
 }
 
+/// The text-match predicate every search query is built around.
+///
+/// It lives here alone so that the row query, the fast default-visible page,
+/// and the `COUNT(*)` backing `search --json`'s `total` cannot drift apart:
+/// a count that matched a different set of rows than the query would report a
+/// truthful-looking total for the wrong question. Callers must follow it with
+/// [`push_search_needle_params`] to bind its three placeholders.
+const SEARCH_TEXT_MATCH_SQL: &str =
+    "(instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0)";
+
+/// Bind the three placeholders of [`SEARCH_TEXT_MATCH_SQL`] to one needle.
+///
+/// The needle must already be lowercased — the predicate lowercases only the
+/// column side.
+fn push_search_needle_params(params: &mut Vec<SqliteValue>, needle: &str) {
+    params.push(SqliteValue::from(needle));
+    params.push(SqliteValue::from(needle));
+    params.push(SqliteValue::from(needle));
+}
+
+/// The `WHERE` fragment shared by a search query and its count.
+enum SearchWhereClause {
+    /// The filters provably match nothing; skip the query entirely.
+    NoMatches,
+    /// SQL to append after `WHERE 1=1`, with its bound parameters.
+    Clause {
+        sql: String,
+        params: Vec<SqliteValue>,
+    },
+}
+
 #[derive(Clone, Copy)]
 enum BlockedIssueProjection {
     Full,
@@ -4658,7 +4689,6 @@ impl SqliteStorage {
         self.search_issues_with_projection(query, filters, SearchIssueProjection::CommandText)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn search_issues_with_projection(
         &self,
         query: &str,
@@ -4679,7 +4709,77 @@ impl SqliteStorage {
             );
         }
 
+        let (where_sql, params) = match self.build_search_where_clause(trimmed, filters)? {
+            SearchWhereClause::NoMatches => return Ok(Vec::new()),
+            SearchWhereClause::Clause { sql, params } => (sql, params),
+        };
+
         let mut sql = String::from(projection.select_clause());
+        sql.push_str(&where_sql);
+
+        let spec = filters.sort.clone().unwrap_or_else(SortSpec::default_order);
+        sql.push_str(&spec.order_by_sql(filters.reverse));
+
+        match (filters.limit, filters.offset) {
+            (Some(limit), offset) if limit > 0 => {
+                let _ = write!(sql, " LIMIT {limit}");
+                if let Some(offset) = offset
+                    && offset > 0
+                {
+                    let _ = write!(sql, " OFFSET {offset}");
+                }
+            }
+            (_, Some(offset)) if offset > 0 => {
+                let _ = write!(sql, " LIMIT -1 OFFSET {offset}");
+            }
+            _ => {}
+        }
+
+        let rows = self.conn.query_with_params(&sql, &params)?;
+        let mut issues = Vec::with_capacity(rows.len());
+        for row in &rows {
+            issues.push(projection.parse_issue(row)?);
+        }
+
+        Ok(issues)
+    }
+
+    /// Count the issues a search matches, ignoring `LIMIT`/`OFFSET`.
+    ///
+    /// Shares [`build_search_where_clause`](Self::build_search_where_clause)
+    /// with the row query, so the `total` reported alongside a capped page
+    /// counts exactly the rows that page was drawn from.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn count_search_issues(&self, query: &str, filters: &ListFilters) -> Result<usize> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(0);
+        }
+
+        let (where_sql, params) = match self.build_search_where_clause(trimmed, filters)? {
+            SearchWhereClause::NoMatches => return Ok(0),
+            SearchWhereClause::Clause { sql, params } => (sql, params),
+        };
+
+        let sql = format!("SELECT COUNT(*) FROM issues WHERE 1=1{where_sql}");
+        let row = self.conn.query_row_with_params(&sql, &params)?;
+        let count = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Build the `WHERE` fragment (everything after `WHERE 1=1`) for a search.
+    ///
+    /// `query` must already be trimmed and non-empty.
+    #[allow(clippy::too_many_lines)]
+    fn build_search_where_clause(
+        &self,
+        trimmed: &str,
+        filters: &ListFilters,
+    ) -> Result<SearchWhereClause> {
+        let mut sql = String::new();
         let mut params: Vec<SqliteValue> = Vec::new();
 
         let labels_and = filters.labels.as_deref().unwrap_or(&[]);
@@ -4690,7 +4790,7 @@ impl SqliteStorage {
             self.label_filter_candidate_ids(labels_and, labels_or)?
         };
         if label_candidate_ids.as_ref().is_some_and(Vec::is_empty) {
-            return Ok(Vec::new());
+            return Ok(SearchWhereClause::NoMatches);
         }
         if self.redundant_default_visible_single_label_filter(
             filters,
@@ -4698,11 +4798,7 @@ impl SqliteStorage {
         )? {
             let mut filters_without_redundant_label = filters.clone();
             filters_without_redundant_label.labels = None;
-            return self.search_issues_with_projection(
-                trimmed,
-                &filters_without_redundant_label,
-                projection,
-            );
+            return self.build_search_where_clause(trimmed, &filters_without_redundant_label);
         }
         if let Some(ref issue_ids) = label_candidate_ids {
             append_issue_id_membership_filter(&mut sql, &mut params, issue_ids);
@@ -4779,39 +4875,10 @@ impl SqliteStorage {
             params.push(SqliteValue::from(ts.to_rfc3339()));
         }
 
-        sql.push_str(
-            " AND (instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0)",
-        );
-        let needle = trimmed.to_ascii_lowercase();
-        params.push(SqliteValue::from(needle.as_str()));
-        params.push(SqliteValue::from(needle.as_str()));
-        params.push(SqliteValue::from(needle));
+        let _ = write!(sql, " AND {SEARCH_TEXT_MATCH_SQL}");
+        push_search_needle_params(&mut params, &trimmed.to_ascii_lowercase());
 
-        let spec = filters.sort.clone().unwrap_or_else(SortSpec::default_order);
-        sql.push_str(&spec.order_by_sql(filters.reverse));
-
-        match (filters.limit, filters.offset) {
-            (Some(limit), offset) if limit > 0 => {
-                let _ = write!(sql, " LIMIT {limit}");
-                if let Some(offset) = offset
-                    && offset > 0
-                {
-                    let _ = write!(sql, " OFFSET {offset}");
-                }
-            }
-            (_, Some(offset)) if offset > 0 => {
-                let _ = write!(sql, " LIMIT -1 OFFSET {offset}");
-            }
-            _ => {}
-        }
-
-        let rows = self.conn.query_with_params(&sql, &params)?;
-        let mut issues = Vec::with_capacity(rows.len());
-        for row in &rows {
-            issues.push(projection.parse_issue(row)?);
-        }
-
-        Ok(issues)
+        Ok(SearchWhereClause::Clause { sql, params })
     }
 
     fn search_default_visible_limited_page(
@@ -4862,17 +4929,12 @@ impl SqliteStorage {
             "SELECT 1 FROM issues
              WHERE {status_filter}
                AND is_template = 0
-               AND (instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0)
+               AND {SEARCH_TEXT_MATCH_SQL}
              LIMIT 1"
         );
-        let rows = self.conn.query_with_params(
-            &sql,
-            &[
-                SqliteValue::from(needle),
-                SqliteValue::from(needle),
-                SqliteValue::from(needle),
-            ],
-        )?;
+        let mut params = Vec::with_capacity(3);
+        push_search_needle_params(&mut params, needle);
+        let rows = self.conn.query_with_params(&sql, &params)?;
         Ok(!rows.is_empty())
     }
 
@@ -4892,20 +4954,14 @@ impl SqliteStorage {
               AND {status_filter}
               AND is_template = 0
               AND {priority_predicate}
-              AND (instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0)
+              AND {SEARCH_TEXT_MATCH_SQL}
               ORDER BY {order_by}
               LIMIT {limit}",
             projection.select_clause()
         );
-        let rows = self.conn.query_with_params(
-            &sql,
-            &[
-                SqliteValue::from(i64::from(priority_value)),
-                SqliteValue::from(needle),
-                SqliteValue::from(needle),
-                SqliteValue::from(needle),
-            ],
-        )?;
+        let mut params = vec![SqliteValue::from(i64::from(priority_value))];
+        push_search_needle_params(&mut params, needle);
+        let rows = self.conn.query_with_params(&sql, &params)?;
         let mut issues = Vec::with_capacity(rows.len());
         for row in &rows {
             issues.push(projection.parse_issue(row)?);
@@ -20688,6 +20744,122 @@ mod tests {
 
         assert_eq!(fast_no_match, generic_no_match);
         assert!(fast_no_match.is_empty());
+    }
+
+    /// A corpus spanning every dimension the search `WHERE` clause filters on,
+    /// so [`test_count_search_issues_matches_unlimited_search_length`] can vary
+    /// one filter at a time and still have rows on both sides of it.
+    fn count_search_fixture() -> SqliteStorage {
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let base = Utc.with_ymd_and_hms(2025, 9, 4, 0, 0, 0).unwrap();
+        let issue = |id: &str, title: &str, status, priority, assignee| {
+            make_issue(id, title, status, priority, assignee, base, None)
+        };
+
+        let mut closed = issue("bd-count-closed", "needle closed", Status::Closed, 0, None);
+        closed.closed_at = Some(base);
+        let mut template = issue(
+            "bd-count-template",
+            "needle template",
+            Status::Open,
+            0,
+            None,
+        );
+        template.is_template = true;
+        let mut feature = issue(
+            "bd-count-feature",
+            "needle feature",
+            Status::Open,
+            1,
+            Some("alice"),
+        );
+        feature.issue_type = IssueType::Feature;
+        feature.description = Some("needle in the description".to_string());
+
+        for issue in [
+            issue("bd-count-open-1", "needle one", Status::Open, 2, None),
+            issue(
+                "bd-count-open-2",
+                "needle two",
+                Status::Open,
+                2,
+                Some("alice"),
+            ),
+            issue(
+                "bd-count-deferred",
+                "needle deferred",
+                Status::Deferred,
+                0,
+                None,
+            ),
+            issue("bd-count-other", "unrelated", Status::Open, 2, None),
+            closed,
+            template,
+            feature,
+        ] {
+            storage.create_issue(&issue, "tester").unwrap();
+        }
+        storage.add_label("bd-count-open-1", "core").unwrap();
+        storage.add_label("bd-count-feature", "core").unwrap();
+        storage
+    }
+
+    /// The count backing `search --json`'s `total` must agree with an
+    /// unlimited search across every filter shape — the two renderings of the
+    /// same WHERE clause are the drift hazard this pins.
+    #[test]
+    fn test_count_search_issues_matches_unlimited_search_length() {
+        let storage = count_search_fixture();
+
+        let shapes: [(&str, fn(&mut ListFilters)); 11] = [
+            ("default", |_| {}),
+            ("deferred", |f| f.include_deferred = true),
+            ("closed", |f| f.include_closed = true),
+            ("templates", |f| f.include_templates = true),
+            ("assignee", |f| f.assignee = Some("alice".to_string())),
+            ("unassigned", |f| f.unassigned = true),
+            ("type", |f| f.types = Some(vec![IssueType::Feature])),
+            ("priority", |f| f.priorities = Some(vec![Priority(2)])),
+            ("status", |f| f.statuses = Some(vec![Status::Open])),
+            ("label", |f| f.labels = Some(vec!["core".to_string()])),
+            ("title_contains", |f| {
+                f.title_contains = Some("one".to_string());
+            }),
+        ];
+
+        for (name, apply_shape) in shapes {
+            let mut filters = ListFilters::default();
+            apply_shape(&mut filters);
+            let unlimited = storage.search_issues("needle", &filters).unwrap().len();
+            let counted = storage.count_search_issues("needle", &filters).unwrap();
+            assert_eq!(counted, unlimited, "count disagrees with search for {name}");
+
+            // The count must ignore LIMIT/OFFSET: that is the whole point of
+            // reporting a `total` alongside a capped page.
+            let capped = ListFilters {
+                limit: Some(1),
+                offset: Some(1),
+                ..filters
+            };
+            assert_eq!(
+                storage.count_search_issues("needle", &capped).unwrap(),
+                unlimited,
+                "count must ignore limit/offset for {name}"
+            );
+        }
+
+        assert_eq!(
+            storage
+                .count_search_issues("absent", &ListFilters::default())
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            storage
+                .count_search_issues("   ", &ListFilters::default())
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
