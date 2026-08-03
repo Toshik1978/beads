@@ -9,6 +9,126 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.3.0 — 2026-08-03
+
+`--sort` grows from a single field into a chained specification, and three
+`--json` commands stop misreporting how much they returned. The sort work is
+the bulk of it: seven sortable fields instead of four, a direction marker per
+key, and one parsed spec driving both the SQL `ORDER BY` and the in-memory
+comparator so the two orderings cannot disagree. The truncation fix is small
+and breaking — see below.
+
+### Why this is 1.3.0 and not 2.0.0
+
+The same reasoning as v1.1.0: the major version tracks the shape of the tool,
+and the **Breaking Changes** list is the contract. This release leans on that
+harder than the last one did, because what changes here is a machine-readable
+shape rather than a redundant spelling, so the blast radius is worth stating
+plainly.
+
+Three commands' `--json` output goes from a bare array to an object. Anything
+piping them through `jq` breaks, and breaks loudly rather than silently:
+
+```sh
+br search widget --json | jq -r '.[].id'        # before
+br search widget --json | jq -r '.issues[].id'  # after
+```
+
+`br list --json` has emitted that object since 1.0.0, so a script already
+handling `list` needs no new shape for the other three. `br stale` and
+`br show` still return bare arrays and are not changing: neither takes a
+`--limit`, so neither can drop a row without saying so.
+
+### Highlights
+
+- **`--sort` takes more than one key.** `--sort priority,status,-updated`
+  orders by each key in turn, with `-` forcing descending and `+` forcing
+  ascending per key. `status`, `type` and `assignee` are newly sortable,
+  joining `priority`, `created_at`, `updated_at` and `title`. `status` and
+  `type` order by workflow rank rather than alphabetically — open before
+  blocked before closed, not blocked before closed before open — and
+  `assignee` puts unassigned last in both directions. Every sort ends with an
+  implicit `id` tiebreaker, so a page is deterministic even when every named
+  key ties. Bare `--sort priority` still means `priority,created`, exactly as
+  it did before.
+- **The two orderings are rendered from one spec.** `br list` sorts in SQL, or
+  in memory when a client-side filter has already run, and those used to be
+  independent implementations of the same intent. Both now read one
+  `SortSpec::resolved`, and a property test asserts they produce the same
+  sequence for the same spec across generated issues — which is the only
+  reason a seven-field grammar with per-key directions is safe to offer at
+  all.
+- **`search`, `blocked` and `ready` `--json` now report truncation.** All three
+  could return fewer issues than matched and say nothing about it: `search` and
+  `blocked` cap at 50 by default, and `ready --limit N` truncates on request.
+  A consumer could not tell 50 matches from 50 of 500. They now emit the
+  envelope `list` already used — `{"issues": […], "total", "limit",
+  "offset", "has_more"}` — with a truthful `total` counted before the cap
+  applied. The caps themselves are unchanged; only the reporting is. Read
+  `has_more`, not the array length: a full page is not evidence that the result
+  set ended there.
+- **A guessable bad `--priority` now names the value it inferred.**
+  `br create x --priority high` answers `Did you mean --priority 1?` instead of
+  reciting the valid range and leaving you to map "high" onto it. The
+  detection already existed and its answer was being computed and discarded,
+  because the static per-error suggestion was consulted first; specific
+  answers now win, with the static text as the fallback when nothing can be
+  inferred.
+- **Sorting a large result set is roughly 2.5× faster.** `sort_by` calls its
+  comparator O(n log n) times, and the old one re-derived the resolved key
+  list and allocated a `Vec` per field — plus a `String` per side for
+  `title` and `assignee` — on every call. Sorting 5000 issues turned about
+  5000 allocations into about 250000. The resolved spec is now walked once per
+  sort: 5000 issues by `priority,status,assignee,title` went from 10.2ms to
+  4.0ms.
+
+### One documentation fix worth calling out
+
+`--sort -updated` never worked as the reference wrote it. A leading `-` is
+read by clap as the start of another flag rather than as `--sort`'s value, so
+the documented example failed for everyone who copied it; the attached form
+`--sort=-updated` is required whenever a key beginning with `-` leads the
+argument. Later keys (`priority,-updated`) are unaffected.
+
+
+### ⚠ Breaking Changes
+
+- [6954b4d](https://github.com/Toshik1978/beads/commit/6954b4d6304f555d5cf06f961a54ea88b63c8984) search --json and blocked --json emit an object with an issues field instead of a bare array.
+- [1c83e65](https://github.com/Toshik1978/beads/commit/1c83e65d760004cd195688895b315efc715b085a) ready --json emits an object with an issues field instead of a bare array.
+
+### Features
+
+- [4deee93](https://github.com/Toshik1978/beads/commit/4deee931d466a8ed20a570c8c8c6ecee36f92bef) feat(model): rank Status and IssueType for sorting
+- [23d7c67](https://github.com/Toshik1978/beads/commit/23d7c6741f223820f165dd069ef2d7a1e18da327) feat(model): add SortSpec parsing and resolution
+- [1e57974](https://github.com/Toshik1978/beads/commit/1e57974aac7c219fe9c93d11bfce40373085902e) feat(model): render SortSpec as a SQL ORDER BY clause
+- [8b0bd19](https://github.com/Toshik1978/beads/commit/8b0bd195139f20a678c259ad0294f904055b40be) feat(model): add the in-memory SortSpec comparator
+- [7b4425a](https://github.com/Toshik1978/beads/commit/7b4425a3ea9712c94dea97eaccd3bbeab6c49fa4) feat(storage): order queries by a parsed multi-key sort spec
+- [6954b4d](https://github.com/Toshik1978/beads/commit/6954b4d6304f555d5cf06f961a54ea88b63c8984) feat(cli)!: report truncation in search and blocked --json
+- [1c83e65](https://github.com/Toshik1978/beads/commit/1c83e65d760004cd195688895b315efc715b085a) feat(ready)!: report truncation in the --json envelope
+
+### Bug Fixes
+
+- [62cce85](https://github.com/Toshik1978/beads/commit/62cce852ad8c5c80e1f7fb7e86524ea9daf383e5) fix(cli): fix a broken --sort example and close a parse/ALL drift hole
+- [7de347d](https://github.com/Toshik1978/beads/commit/7de347df076917ba065e843d69f6ecf30d158c88) fix(errors): prefer the detected value over the static suggestion
+
+### Performance
+
+- [bd9ef45](https://github.com/Toshik1978/beads/commit/bd9ef45b7f03915dbaf60760b0965143ef37fcd9) perf(sort): resolve the sort spec once per sort, not per comparison
+
+### Documentation
+
+- [be3f246](https://github.com/Toshik1978/beads/commit/be3f246383a128ce859e396168d0481ba33479a8) docs(cli): document the multi-key sort grammar
+- [76783f9](https://github.com/Toshik1978/beads/commit/76783f9677f51090f1198facba944a8e98d2aeae) docs(cli): fix --sort=-updated example claiming oldest-first
+- [9d5d593](https://github.com/Toshik1978/beads/commit/9d5d593ec62acb31f689ba03576a368f42ac7eec) docs: correct the stale full-suite test count in CLAUDE.md
+- [926257d](https://github.com/Toshik1978/beads/commit/926257da764b139ace1fc5e2ed8b1983d1a2800b) docs(sort): stop claiming --reverse flips every key
+
+### Others
+
+- [38fe37d](https://github.com/Toshik1978/beads/commit/38fe37d51b1da7e99054812f4b8739d1e25bef4e) refactor(cli): sort in memory through the shared sort spec
+- [6a40779](https://github.com/Toshik1978/beads/commit/6a40779101f93418c8a18183bf2b782643d3d387) refactor(storage): share the search WHERE clause between query and count
+
+---
+
 ## v1.2.0 — 2026-08-01
 
 Mostly a subtraction release: about 8,400 lines net leave the tree, and almost
