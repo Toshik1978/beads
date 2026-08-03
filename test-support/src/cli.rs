@@ -65,7 +65,8 @@ pub struct BrRun {
     pub stdout: String,
     /// What the child wrote to stderr -- except when it failed having written
     /// nothing at all, in which case this carries a synthetic
-    /// `<no stderr; ...>` diagnosis instead (see `describe_exit`). See
+    /// `<no stderr; ...>` diagnosis instead, including the stdout tail when
+    /// there is one (see `describe_exit` and `failure_diagnostic`). See
     /// bds-nld: essentially every assertion in the e2e suite reports a failure
     /// as `"... failed: {}", run.stderr`, so a child killed by a signal
     /// produced a panic message that ended at the colon and said nothing.
@@ -103,6 +104,37 @@ pub fn describe_exit(status: std::process::ExitStatus) -> String {
         }
     }
     format!("child ended without an exit code and wrote nothing to stderr: {status}")
+}
+
+/// The `stderr` substituted into a failed run that wrote none.
+///
+/// `exit_description` comes from [`describe_exit`]; `stdout` is the run's
+/// stdout, which is where a `--json` command puts its error envelope — by
+/// design, so a scripted caller reads one parseable stream. That design is
+/// what leaves stderr empty on exactly the failures a `--json` test is
+/// asserting about, so the stdout tail is folded in here rather than being
+/// left in the log file for someone to go and find (bds-r2z).
+///
+/// Only the tail: an error envelope is short, but a command that printed a
+/// page of results before failing should not paste all of it into a panic
+/// message.
+fn failure_diagnostic(exit_description: &str, stdout: &str) -> String {
+    const MAX_STDOUT: usize = 600;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return format!("<no stderr; {exit_description}>");
+    }
+    let tail = if trimmed.len() <= MAX_STDOUT {
+        trimmed.to_string()
+    } else {
+        let start = trimmed.len() - MAX_STDOUT;
+        // Never split a UTF-8 character; walk forward to a boundary.
+        let start = (start..trimmed.len())
+            .find(|index| trimmed.is_char_boundary(*index))
+            .unwrap_or(trimmed.len());
+        format!("...{}", &trimmed[start..])
+    };
+    format!("<no stderr; {exit_description}; stdout was: {tail}>")
 }
 
 pub struct BrWorkspace {
@@ -302,7 +334,7 @@ where
     let stderr = if output.status.success() || !stderr.is_empty() {
         stderr
     } else {
-        format!("<no stderr; {}>", describe_exit(output.status))
+        failure_diagnostic(&describe_exit(output.status), &stdout)
     };
 
     BrRun {
@@ -396,8 +428,34 @@ pub fn parse_list_issues(stdout: &str) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_clear_inherited_br_env, should_preserve_smoke_env};
+    use super::{failure_diagnostic, should_clear_inherited_br_env, should_preserve_smoke_env};
     use std::ffi::OsStr;
+
+    /// bds-r2z: a `--json` command writes its error envelope to *stdout* by
+    /// design, so a failure leaves stderr empty and every assertion in the
+    /// tree — all of which print stderr — reports nothing useful. The
+    /// substituted diagnosis has to reach for stdout in that case.
+    #[test]
+    fn a_json_failure_diagnostic_carries_the_stdout_error() {
+        let diagnostic = failure_diagnostic(
+            "child exited with code 3 and wrote nothing to stderr",
+            r#"{"error":{"code":"AMBIGUOUS_ID","matches":["ext-lal","ext-law"]}}"#,
+        );
+        assert!(
+            diagnostic.contains("AMBIGUOUS_ID"),
+            "diagnostic must surface the stdout error: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("code 3"),
+            "diagnostic must keep the exit description: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn a_silent_failure_diagnostic_is_unchanged_when_stdout_is_empty_too() {
+        let diagnostic = failure_diagnostic("child was killed by signal 9", "   \n");
+        assert_eq!(diagnostic, "<no stderr; child was killed by signal 9>");
+    }
 
     #[test]
     fn inherited_beads_and_toon_env_are_cleared() {
