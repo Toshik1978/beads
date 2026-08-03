@@ -79,6 +79,8 @@ mod routing;
 mod search_scenarios;
 #[path = "e2e/show_inherited_context.rs"]
 mod show_inherited_context;
+#[path = "e2e/sort_multi_key.rs"]
+mod sort_multi_key;
 #[path = "e2e/stale.rs"]
 mod stale;
 #[path = "e2e/stats.rs"]
