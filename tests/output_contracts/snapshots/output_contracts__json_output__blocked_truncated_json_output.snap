@@ -15,12 +15,12 @@ expression: normalize_json(&json)
       "issue_type": "task",
       "priority": 2,
       "status": "open",
-      "title": "Blocked issue",
+      "title": "Blocked issue 1",
       "updated_at": "TIMESTAMP"
     }
   ],
-  "total": 1,
-  "limit": 50,
+  "total": 2,
+  "limit": 1,
   "offset": 0,
-  "has_more": false
+  "has_more": true
 }

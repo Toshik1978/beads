@@ -553,7 +553,11 @@ fn e2e_dep_add_list_blocked_remove() {
         blocked_view.stderr
     );
     let blocked_payload = extract_json_payload(&blocked_view.stdout);
-    let blocked_json: Vec<Value> = serde_json::from_str(&blocked_payload).expect("blocked json");
+    let blocked_json: Value = serde_json::from_str(&blocked_payload).expect("blocked json");
+    let blocked_json = blocked_json["issues"]
+        .as_array()
+        .expect("blocked envelope")
+        .clone();
     assert!(
         blocked_json.iter().any(|item| item["id"] == blocked_id),
         "blocked issue missing from blocked list"
@@ -577,12 +581,105 @@ fn e2e_dep_add_list_blocked_remove() {
         blocked_view.stderr
     );
     let blocked_payload = extract_json_payload(&blocked_view.stdout);
-    let blocked_json: Vec<Value> = serde_json::from_str(&blocked_payload).expect("blocked json");
+    let blocked_json: Value = serde_json::from_str(&blocked_payload).expect("blocked json");
+    let blocked_json = blocked_json["issues"]
+        .as_array()
+        .expect("blocked envelope")
+        .clone();
     assert!(
         !blocked_json.iter().any(|item| item["id"] == blocked_id),
         "blocked issue still present after dep remove"
     );
     info!("e2e_dep_add_list_blocked_remove: assertions passed");
+}
+
+#[test]
+fn e2e_blocked_json_reports_truncation_in_envelope() {
+    common::init_test_logging();
+    let workspace = BrWorkspace::new();
+
+    let init = run_br(&workspace, ["init"], "init");
+    assert!(init.status.success(), "init failed: {}", init.stderr);
+
+    let blocker = run_br(&workspace, ["create", "Blocker issue"], "create_blocker");
+    assert!(
+        blocker.status.success(),
+        "create failed: {}",
+        blocker.stderr
+    );
+    let blocker_id = parse_created_id(&blocker.stdout);
+
+    for n in 0..3 {
+        let issue = run_br(
+            &workspace,
+            ["create", &format!("Blocked issue {n}")],
+            "create_blocked",
+        );
+        assert!(issue.status.success(), "create failed: {}", issue.stderr);
+        let id = parse_created_id(&issue.stdout);
+        let dep = run_br(&workspace, ["dep", "add", &id, &blocker_id], "dep_add");
+        assert!(dep.status.success(), "dep add failed: {}", dep.stderr);
+    }
+
+    let blocked_view = run_br(
+        &workspace,
+        ["blocked", "--json", "--limit", "2"],
+        "blocked_limited",
+    );
+    assert!(
+        blocked_view.status.success(),
+        "blocked failed: {}",
+        blocked_view.stderr
+    );
+    let payload = extract_json_payload(&blocked_view.stdout);
+    let json: Value = serde_json::from_str(&payload).expect("blocked json");
+
+    assert_eq!(
+        json["issues"].as_array().map(Vec::len),
+        Some(2),
+        "capped page should hold exactly the limit: {json}"
+    );
+    assert_eq!(json["total"], 3, "total must count matches before the cap");
+    assert_eq!(json["limit"], 2);
+    assert_eq!(json["offset"], 0);
+    assert_eq!(json["has_more"], true, "truncation must be reported");
+}
+
+#[test]
+fn e2e_blocked_json_envelope_reports_default_cap() {
+    common::init_test_logging();
+    let workspace = BrWorkspace::new();
+
+    let init = run_br(&workspace, ["init"], "init");
+    assert!(init.status.success(), "init failed: {}", init.stderr);
+
+    let blocker = run_br(&workspace, ["create", "Blocker issue"], "create_blocker");
+    assert!(
+        blocker.status.success(),
+        "create failed: {}",
+        blocker.stderr
+    );
+    let blocker_id = parse_created_id(&blocker.stdout);
+
+    let issue = run_br(&workspace, ["create", "Blocked issue"], "create_blocked");
+    assert!(issue.status.success(), "create failed: {}", issue.stderr);
+    let id = parse_created_id(&issue.stdout);
+    let dep = run_br(&workspace, ["dep", "add", &id, &blocker_id], "dep_add");
+    assert!(dep.status.success(), "dep add failed: {}", dep.stderr);
+
+    let blocked_view = run_br(&workspace, ["blocked", "--json"], "blocked_default");
+    assert!(
+        blocked_view.status.success(),
+        "blocked failed: {}",
+        blocked_view.stderr
+    );
+    let payload = extract_json_payload(&blocked_view.stdout);
+    let json: Value = serde_json::from_str(&payload).expect("blocked json");
+
+    assert_eq!(json["limit"], 50, "the default cap stays 50: {json}");
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["offset"], 0);
+    assert_eq!(json["has_more"], false);
 }
 
 #[test]

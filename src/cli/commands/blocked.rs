@@ -11,7 +11,7 @@ use crate::config::{
 use crate::error::Result;
 use crate::format::{BlockedIssue, BlockedIssueOutput, sanitize_terminal_inline};
 use crate::model::{IssueType, Priority};
-use crate::output::{OutputContext, OutputMode};
+use crate::output::{JsonArrayPageMeta, OutputContext, OutputMode};
 use crate::storage::SqliteStorage;
 use std::path::Path;
 use std::str::FromStr;
@@ -83,7 +83,12 @@ fn execute_inner(
     let fast_ctx = OutputContext::from_output_format(output_format, quiet, true);
     if matches!(output_format, OutputFormat::Json) && !storage.may_have_blocked_command_results()? {
         let blocked_issues = Vec::new();
-        output_structured_blocked(output_format, &fast_ctx, &blocked_issues);
+        output_structured_blocked(
+            output_format,
+            &fast_ctx,
+            &blocked_issues,
+            page_meta(args, 0),
+        );
         return Ok(());
     }
 
@@ -188,7 +193,9 @@ fn execute_inner(
     // Sort by priority (ascending), then by blocker count (descending)
     sort_blocked_issues(&mut blocked_issues);
 
-    // Apply limit
+    // Apply limit. The pre-truncation length is the only chance to learn how
+    // many matches there were, so capture it before the cap discards them.
+    let total = blocked_issues.len();
     if args.limit > 0 && blocked_issues.len() > args.limit {
         blocked_issues.truncate(args.limit);
     }
@@ -210,7 +217,7 @@ fn execute_inner(
 
     match output_format {
         OutputFormat::Json => {
-            output_structured_blocked(output_format, &ctx, &blocked_issues);
+            output_structured_blocked(output_format, &ctx, &blocked_issues, page_meta(args, total));
         }
         OutputFormat::Text | OutputFormat::Csv => {
             let max_width = if args.wrap { ctx.width() } else { 0 };
@@ -233,10 +240,28 @@ fn output_structured_blocked(
     output_format: OutputFormat,
     ctx: &OutputContext,
     blocked_issues: &[BlockedIssue],
+    meta: JsonArrayPageMeta,
 ) {
     match output_format {
-        OutputFormat::Json => ctx.json_array(blocked_issues.iter().map(blocked_issue_output)),
+        OutputFormat::Json => ctx.json_array_page(
+            "issues",
+            blocked_issues.iter().map(blocked_issue_output),
+            meta,
+        ),
         OutputFormat::Text | OutputFormat::Csv => {}
+    }
+}
+
+/// Describe the page `--json` is about to emit.
+///
+/// `blocked` caps at 50 by default and has no `--offset`, so the envelope's
+/// job here is narrow: say how many blocked issues the cap hid.
+fn page_meta(args: &BlockedArgs, total: usize) -> JsonArrayPageMeta {
+    JsonArrayPageMeta {
+        total,
+        limit: args.limit,
+        offset: 0,
+        has_more: args.limit != 0 && total > args.limit,
     }
 }
 

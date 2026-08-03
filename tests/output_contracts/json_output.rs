@@ -169,6 +169,40 @@ fn snapshot_blocked_json() {
     assert_json_snapshot!("blocked_json_output", normalize_json(&json));
 }
 
+/// `blocked` caps at 50 too; this pins what a capped page looks like.
+#[test]
+#[allow(clippy::similar_names)]
+fn snapshot_blocked_truncated_json() {
+    let workspace = init_workspace();
+
+    let blocker = create_issue(&workspace, "Blocker issue", "create_blocker_trunc");
+    for (n, label) in ["create_blocked_trunc_1", "create_blocked_trunc_2"]
+        .into_iter()
+        .enumerate()
+    {
+        let blocked = create_issue(&workspace, &format!("Blocked issue {n}"), label);
+        let _ = run_br(
+            &workspace,
+            ["dep", "add", &blocked, &blocker],
+            "dep_add_trunc",
+        );
+    }
+
+    let output = run_br(
+        &workspace,
+        ["blocked", "--json", "--limit", "1"],
+        "blocked_truncated_json",
+    );
+    assert!(
+        output.status.success(),
+        "blocked truncated json failed: {}",
+        output.stderr
+    );
+
+    let json: Value = serde_json::from_str(&output.stdout).expect("parse json");
+    assert_json_snapshot!("blocked_truncated_json_output", normalize_json(&json));
+}
+
 #[test]
 fn snapshot_list_with_filters_json() {
     let workspace = init_workspace();
@@ -318,6 +352,31 @@ fn snapshot_search_json() {
 
     let json: Value = serde_json::from_str(&output.stdout).expect("parse json");
     assert_json_snapshot!("search_json_output", normalize_json(&json));
+}
+
+/// The shape a consumer must handle when `search` drops rows: `total` counts
+/// the matches, `has_more` says the page is short. A bare array here would be
+/// indistinguishable from a complete result set.
+#[test]
+fn snapshot_search_truncated_json() {
+    let workspace = init_workspace();
+    create_issue(&workspace, "Target one", "create_search_trunc_1");
+    create_issue(&workspace, "Target two", "create_search_trunc_2");
+    create_issue(&workspace, "Target three", "create_search_trunc_3");
+
+    let output = run_br(
+        &workspace,
+        ["search", "target", "--json", "--limit", "1"],
+        "search_truncated_json",
+    );
+    assert!(
+        output.status.success(),
+        "search truncated json failed: {}",
+        output.stderr
+    );
+
+    let json: Value = serde_json::from_str(&output.stdout).expect("parse json");
+    assert_json_snapshot!("search_truncated_json_output", normalize_json(&json));
 }
 
 #[test]

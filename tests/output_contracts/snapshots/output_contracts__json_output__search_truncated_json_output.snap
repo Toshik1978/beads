@@ -6,7 +6,7 @@ expression: normalize_json(&json)
   "issues": [
     {
       "id": "ISSUE_ID",
-      "title": "Search target",
+      "title": "Target three",
       "status": "open",
       "priority": 2,
       "issue_type": "task",
@@ -20,8 +20,8 @@ expression: normalize_json(&json)
       "dependent_count": 0
     }
   ],
-  "total": 1,
-  "limit": 50,
+  "total": 3,
+  "limit": 1,
   "offset": 0,
-  "has_more": false
+  "has_more": true
 }

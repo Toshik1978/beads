@@ -362,25 +362,36 @@ pub fn extract_issues_array(stdout: &str) -> Vec<Value> {
     );
 }
 
-pub fn parse_list_page(stdout: &str) -> Value {
+/// Parse the paginated envelope every truncating command emits.
+///
+/// `list`, `search` and `blocked` can all return fewer issues than matched, so
+/// each wraps its array as
+/// `{"issues": [...], "total", "limit", "offset", "has_more"}`. Prefer this
+/// over [`extract_issues_array`], which also accepts a bare array and would
+/// therefore let a regression to the untruthful shape pass.
+pub fn parse_issue_page(stdout: &str) -> Value {
     let json = parse_json_value(stdout);
     assert!(
         json.is_object(),
-        "list JSON should be an object with pagination metadata"
+        "a truncating command's JSON should be an object with pagination metadata"
     );
     assert!(
         json.get("issues").is_some(),
-        "list JSON should contain an issues field"
+        "a truncating command's JSON should contain an issues field"
     );
     json
 }
 
+/// The `issues` array out of [`parse_issue_page`], envelope asserted.
+pub fn parse_issue_page_issues(stdout: &str) -> Vec<Value> {
+    parse_issue_page(stdout)["issues"]
+        .as_array()
+        .expect("issues must be an array")
+        .clone()
+}
+
 pub fn parse_list_issues(stdout: &str) -> Vec<Value> {
-    parse_list_page(stdout)
-        .get("issues")
-        .and_then(Value::as_array)
-        .cloned()
-        .expect("list JSON should contain an issues array")
+    parse_issue_page_issues(stdout)
 }
 
 #[cfg(test)]

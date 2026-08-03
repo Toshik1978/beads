@@ -2369,7 +2369,7 @@ mod tests {
 
     /// `### ` headings that intentionally do not name a single registered
     /// subcommand: two combined headers that document real behaviour spread
-    /// across more than one clap symbol, and four JSON data-shape sections.
+    /// across more than one clap symbol, and five JSON data-shape sections.
     /// This is a name allowlist, not a pattern, by design: a pattern (e.g.
     /// "any heading containing 'Object'") would silently re-admit a future
     /// phantom instead of forcing a human to add its exact heading text
@@ -2377,6 +2377,7 @@ mod tests {
     const NON_COMMAND_HEADINGS: &[&str] = &[
         "stats / status",
         "defer / undefer",
+        "Paginated envelope (list, search, blocked)",
         "Issue Object (list, show, ready)",
         "Dependency Object",
         "Sync Status Object",

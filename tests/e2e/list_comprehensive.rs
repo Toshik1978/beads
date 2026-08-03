@@ -17,7 +17,7 @@
 // `common::` paths in this suite keep working unchanged.
 use crate::common;
 
-use common::cli::{BrWorkspace, parse_list_issues, parse_list_page, run_br};
+use common::cli::{BrWorkspace, parse_issue_page, parse_list_issues, run_br};
 
 fn parse_created_id(stdout: &str) -> String {
     let line = stdout.lines().next().unwrap_or("");
@@ -843,7 +843,7 @@ fn e2e_list_limit_zero_with_offset_reports_unpaginated_total() {
     );
     assert!(list.status.success(), "list failed: {}", list.stderr);
 
-    let page = parse_list_page(&list.stdout);
+    let page = parse_issue_page(&list.stdout);
     let issues = page["issues"].as_array().expect("issues array");
 
     assert_eq!(issues.len(), 3);

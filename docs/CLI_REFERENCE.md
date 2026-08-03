@@ -609,6 +609,10 @@ Shows issues that are blocked by other open issues.
 | `-l, --label <LABEL>` | Filter by label |
 | `--format <FMT>` | Output format: text, json |
 
+Because it can truncate, `--json` emits the [paginated
+envelope](#paginated-envelope-list-search-blocked): check `has_more` to learn
+whether blocked issues were dropped by the cap.
+
 ---
 
 ### search
@@ -623,6 +627,10 @@ Supports all filter options from `list`. Unlike `list`/`ready` (which are
 complete by default), `search` results are **capped at 50 by default**
 (`--limit <N>`, `0`=unlimited) — a broad text query can match a large fraction
 of the corpus, so a bounded, relevance-ordered result set is the default.
+
+Because it can truncate, `--json` emits the [paginated
+envelope](#paginated-envelope-list-search-blocked): check `has_more` to learn
+whether matches were dropped.
 
 **Examples:**
 ```bash
@@ -1040,6 +1048,42 @@ This keeps successful commands readable by suppressing low-level dependency logs
 ---
 
 ## JSON Output Schemas
+
+### Paginated envelope (list, search, blocked)
+
+**A command that can return fewer issues than matched wraps its array in an
+envelope; a command that always returns everything emits a bare array.** That
+is the rule, and it is the whole reason the two shapes coexist.
+
+```json
+{
+  "issues": [ /* … issue objects … */ ],
+  "total": 500,
+  "limit": 50,
+  "offset": 0,
+  "has_more": true
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `issues` | The page. Never null; `[]` when nothing matched. |
+| `total` | Matches **before** `--limit`/`--offset` applied. |
+| `limit` | The cap in effect. `0` means unlimited, and then `has_more` is always `false`. |
+| `offset` | Rows skipped before this page. |
+| `has_more` | `true` when `offset + limit < total` — i.e. rows were dropped. |
+
+`list` (default `--limit 0`), `search` (default 50) and `blocked` (default 50)
+use it. `stale` and `show` return bare arrays and always return everything —
+neither takes a `--limit`.
+
+Read `has_more`, not `issues.length`: a full page is not evidence that the
+result set ended there.
+
+**One known exception:** `ready` is unlimited by default and emits a bare
+array, but `br ready --json --limit N` does truncate — and, being a bare
+array, says nothing about it. Do not rely on that shape; it is a bug, not a
+deliberate carve-out from the rule above.
 
 ### Issue Object (list, show, ready)
 

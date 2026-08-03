@@ -158,8 +158,11 @@ fn e2e_json_flag_blocked() {
 
     let payload = extract_json_payload(&blocked.stdout);
     let json: Value = serde_json::from_str(&payload).expect("valid JSON");
-    // Should be valid JSON (empty array when no blocked issues)
-    assert!(json.is_array());
+    // `blocked` truncates at 50, so it emits the paginated envelope even when
+    // the page is empty.
+    assert_eq!(json["issues"].as_array().map(Vec::len), Some(0));
+    assert_eq!(json["total"], 0);
+    assert_eq!(json["has_more"], false);
 }
 
 #[test]

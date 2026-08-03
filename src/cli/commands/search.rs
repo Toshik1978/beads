@@ -14,7 +14,7 @@ use crate::format::{
 };
 use crate::model::sort::SortSpec;
 use crate::model::{Issue, IssueType, Priority, Status};
-use crate::output::{IssueTable, IssueTableColumns, OutputContext, OutputMode};
+use crate::output::{IssueTable, IssueTableColumns, JsonArrayPageMeta, OutputContext, OutputMode};
 use crate::storage::{ListFilters, SqliteStorage};
 use chrono::Utc;
 use regex::{Regex, RegexBuilder};
@@ -66,10 +66,10 @@ pub fn execute_with_storage_ctx(
         args.filters.format,
         outer_ctx.inherited_output_mode(),
     );
-    let issues = collect_search_results_for_output(storage, query, &args.filters, output_format)?;
+    let page = collect_search_results_for_output(storage, query, &args.filters, output_format)?;
     render_search_results(
         storage,
-        issues,
+        page,
         query,
         &args.filters,
         output_format,
@@ -89,13 +89,38 @@ fn validate_query(args: &SearchArgs) -> Result<&str> {
     Ok(query)
 }
 
+/// Describe the page the user asked for, so `--json` can report truncation.
+///
+/// `search` caps its result set by default (see the `#349` note in
+/// [`build_filters`]), which makes the envelope mandatory: a bare array of 50
+/// cannot say whether it is 50 of 50 or 50 of 500.
+fn search_page_meta(list_args: &ListArgs, total: usize) -> JsonArrayPageMeta {
+    let limit = list_args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+    let offset = list_args.offset.unwrap_or(DEFAULT_LIST_OFFSET);
+    JsonArrayPageMeta {
+        total,
+        limit,
+        offset,
+        has_more: limit != 0 && total > offset.saturating_add(limit),
+    }
+}
+
+/// One page of search results, plus how many matches it was drawn from.
+///
+/// `total` counts every match before `--limit`/`--offset` applied, so a
+/// consumer can tell a complete result set from a truncated one.
+struct SearchPage {
+    issues: Vec<Issue>,
+    total: usize,
+}
+
 #[cfg(test)]
 fn collect_search_results(
     storage: &SqliteStorage,
     query: &str,
     list_args: &ListArgs,
 ) -> Result<Vec<Issue>> {
-    collect_search_results_with_projection(storage, query, list_args, false)
+    Ok(collect_search_results_with_projection(storage, query, list_args, false, false)?.issues)
 }
 
 fn collect_search_results_for_output(
@@ -103,12 +128,13 @@ fn collect_search_results_for_output(
     query: &str,
     list_args: &ListArgs,
     output_format: OutputFormat,
-) -> Result<Vec<Issue>> {
+) -> Result<SearchPage> {
     collect_search_results_with_projection(
         storage,
         query,
         list_args,
         matches!(output_format, OutputFormat::Text),
+        matches!(output_format, OutputFormat::Json),
     )
 }
 
@@ -117,7 +143,8 @@ fn collect_search_results_with_projection(
     query: &str,
     list_args: &ListArgs,
     use_text_projection: bool,
-) -> Result<Vec<Issue>> {
+    needs_total: bool,
+) -> Result<SearchPage> {
     let mut filters = build_filters(list_args)?;
     let sort_spec = filters.sort.clone();
     let client_filters = needs_client_filters(list_args);
@@ -143,6 +170,19 @@ fn collect_search_results_with_projection(
         issues
     };
 
+    // The client-filter path fetches unlimited and pages in Rust, so the
+    // post-filter length *is* the total. The SQL path pushed LIMIT down and
+    // has to ask the database how much it left behind — but only when a cap
+    // or an offset could have hidden something.
+    let sql_page_is_complete = !client_filters
+        && filters.limit.is_none_or(|limit| limit == 0)
+        && filters.offset.is_none_or(|offset| offset == 0);
+    let total = if client_filters || sql_page_is_complete || !needs_total {
+        issues.len()
+    } else {
+        storage.count_search_issues(query, &filters)?
+    };
+
     if needs_post_query_ordering {
         apply_issue_sort(&mut issues, sort_spec.as_ref(), list_args.reverse)?;
         if let Some(offset) = offset
@@ -162,19 +202,20 @@ fn collect_search_results_with_projection(
         }
     }
 
-    Ok(issues)
+    Ok(SearchPage { issues, total })
 }
 
 #[allow(clippy::too_many_lines)]
 fn render_search_results(
     storage: &SqliteStorage,
-    issues: Vec<Issue>,
+    page: SearchPage,
     query: &str,
     list_args: &ListArgs,
     output_format: OutputFormat,
     cli: &config::CliOverrides,
     storage_ctx: &config::OpenStorageResult,
 ) -> Result<()> {
+    let SearchPage { issues, total } = page;
     let quiet = cli.quiet.unwrap_or(false);
     let early_ctx = OutputContext::from_output_format(output_format, quiet, true);
     if matches!(early_ctx.mode(), OutputMode::Quiet) {
@@ -184,10 +225,12 @@ fn render_search_results(
     match output_format {
         OutputFormat::Json => {
             let mut relation_metadata = load_search_relation_metadata(storage, &issues)?;
-            early_ctx.json_array(
+            early_ctx.json_array_page(
+                "issues",
                 issues
                     .into_iter()
                     .map(|issue| issue_with_counts(issue, &mut relation_metadata)),
+                search_page_meta(list_args, total),
             );
             return Ok(());
         }
