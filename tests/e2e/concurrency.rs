@@ -29,7 +29,31 @@ use tempfile::TempDir;
 const WRITE_LOCK_WAIT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
 const WRITE_LOCK_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const CONTENTION_SUCCESS_LOCK_TIMEOUT_MS: &str = "1000";
+/// The lock-wait budget for contention tests that are supposed to *succeed*.
+///
+/// It matches `sync::default_write_lock_timeout_ms` deliberately: these tests
+/// assert that concurrent commands all complete, and nothing about that claim
+/// needs a budget tighter than production's. Tests that assert a *failure* set
+/// their own `--lock-timeout 1` and are unaffected.
+///
+/// It was 1000ms, and that was too tight to be about beads. The budget has to
+/// cover queueing behind every other holder, so with four writers it really
+/// asserted "each one finishes in under ~250ms" — a claim about machine load.
+/// Measured with four concurrent writers against one workspace: 218ms worst
+/// invocation on an idle machine, but 1011-1088ms with the full suite running
+/// alongside, which timed out in five of six trials. The sibling read-only
+/// test had already been seen failing this way on the gate; these had not yet
+/// been caught, which is luck rather than a difference in kind.
+///
+/// A genuine deadlock is still bounded: `.config/nextest.toml` terminates any
+/// test after four 60s slow periods.
+const CONTENTION_SUCCESS_LOCK_TIMEOUT_MS: &str = "30000";
+
+/// Puts read-only DB-family commands on the conservative locked path without
+/// touching the lock-wait budget, which is what `--lock-timeout` would also do
+/// as a side effect (see `build_cli_overrides` in `src/main.rs`). Spelled the
+/// same way as `read_only_fast_open.rs`'s `DISABLE_FAST_OPEN_ENV`.
+const DISABLE_READ_ONLY_FAST_OPEN_ENV: (&str, &str) = ("BR_DISABLE_READ_ONLY_FAST_OPEN", "1");
 
 /// Result of running a br command.
 #[derive(Debug)]
@@ -948,6 +972,27 @@ fn e2e_concurrent_reads_succeed() {
 /// This guards against the failure mode we actually care about: hidden
 /// write-like teardown work surfacing as `database is busy` or corrupting the
 /// workspace under concurrent read traffic.
+///
+/// **Do not reintroduce `--lock-timeout` here.** It looks like it only sets a
+/// budget, but `build_cli_overrides` (`src/main.rs`) clears
+/// `read_only_fast_open` whenever `--lock-timeout` is present — so the flag was
+/// silently doing two jobs: putting these commands on the locked path (which is
+/// the point of the test) and capping the wait at one second (which is not).
+///
+/// That cap is what made this test flaky. The budget has to cover queueing
+/// behind up to five other holders, so a one-second cap really asserts "every
+/// holder finishes in under ~200ms" — a claim about how loaded the machine is,
+/// not about beads. Measured on this test's own workload: 112ms worst
+/// invocation on an idle machine, 786ms with the full suite running alongside.
+/// The gate failed on exactly that.
+///
+/// `BR_DISABLE_READ_ONLY_FAST_OPEN` asks for the locked path and nothing else,
+/// leaving the 30s default from `sync::default_write_lock_timeout_ms`. That is
+/// far too long to fire from queueing 36 short reads, and still short enough to
+/// fail a genuine deadlock rather than hang the suite. The env var's effect is
+/// pinned by `cli_read_only_fast_open_matrix_bypasses_held_write_lock` in
+/// `read_only_fast_open.rs`, which is what keeps this test from quietly
+/// degrading into an uncontended one.
 #[test]
 fn e2e_parallel_read_only_commands_serialize_without_busy_on_drop() {
     let _log = common::test_log("e2e_parallel_read_only_commands_serialize_without_busy_on_drop");
@@ -989,29 +1034,22 @@ fn e2e_parallel_read_only_commands_serialize_without_busy_on_drop() {
             let mut failures = Vec::new();
             for iteration in 0..6 {
                 let result = if worker % 2 == 0 {
-                    run_br_in_dir(
+                    run_br_in_dir_with_env(
                         &root_clone,
-                        [
-                            "--lock-timeout",
-                            "1000",
-                            "--no-auto-import",
-                            "--no-auto-flush",
-                            "ready",
-                            "--json",
-                        ],
+                        ["--no-auto-import", "--no-auto-flush", "ready", "--json"],
+                        [DISABLE_READ_ONLY_FAST_OPEN_ENV],
                     )
                 } else {
-                    run_br_in_dir(
+                    run_br_in_dir_with_env(
                         &root_clone,
                         [
-                            "--lock-timeout",
-                            "1000",
                             "--no-auto-import",
                             "--no-auto-flush",
                             "show",
                             &issue_id_clone,
                             "--json",
                         ],
+                        [DISABLE_READ_ONLY_FAST_OPEN_ENV],
                     )
                 };
 
