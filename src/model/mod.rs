@@ -80,7 +80,7 @@ impl<'de> Deserialize<'de> for Status {
 }
 
 impl Status {
-    fn known_value(value: &str) -> Option<Self> {
+    pub(crate) fn known_value(value: &str) -> Option<Self> {
         Some(match value.to_lowercase().as_str() {
             "open" => Self::Open,
             "in_progress" | "inprogress" => Self::InProgress,
@@ -106,6 +106,40 @@ impl Status {
             Self::Tombstone => "tombstone",
             Self::Pinned => "pinned",
             Self::Custom(value) => value,
+        }
+    }
+
+    /// Rank table for sorting, in declaration order. Rendered into a SQL `CASE`
+    /// expression by `SortField::sql_fragments`; kept in step with `sort_rank`
+    /// by `status_sort_rank_matches_the_sql_rank_table`.
+    pub const SORT_RANKS: &'static [(&'static str, u8)] = &[
+        ("open", 0),
+        ("in_progress", 1),
+        ("blocked", 2),
+        ("deferred", 3),
+        ("draft", 4),
+        ("closed", 5),
+        ("tombstone", 6),
+        ("pinned", 7),
+    ];
+
+    /// Rank shared by every `Custom` status, so they sort after all known ones.
+    pub const CUSTOM_SORT_RANK: u8 = 99;
+
+    /// Sort position of this status. Exhaustive by construction: a new variant
+    /// fails to compile until it is ranked here and added to `SORT_RANKS`.
+    #[must_use]
+    pub const fn sort_rank(&self) -> u8 {
+        match self {
+            Self::Open => 0,
+            Self::InProgress => 1,
+            Self::Blocked => 2,
+            Self::Deferred => 3,
+            Self::Draft => 4,
+            Self::Closed => 5,
+            Self::Tombstone => 6,
+            Self::Pinned => 7,
+            Self::Custom(_) => Self::CUSTOM_SORT_RANK,
         }
     }
 
@@ -205,7 +239,7 @@ impl<'de> Deserialize<'de> for IssueType {
 }
 
 impl IssueType {
-    fn known_value(value: &str) -> Option<Self> {
+    pub(crate) fn known_value(value: &str) -> Option<Self> {
         Some(match value.to_lowercase().as_str() {
             "task" => Self::Task,
             "bug" => Self::Bug,
@@ -229,6 +263,35 @@ impl IssueType {
             Self::Docs => "docs",
             Self::Question => "question",
             Self::Custom(value) => value,
+        }
+    }
+
+    /// Rank table for sorting, in declaration order. See `Status::SORT_RANKS`.
+    pub const SORT_RANKS: &'static [(&'static str, u8)] = &[
+        ("task", 0),
+        ("bug", 1),
+        ("feature", 2),
+        ("epic", 3),
+        ("chore", 4),
+        ("docs", 5),
+        ("question", 6),
+    ];
+
+    /// Rank shared by every `Custom` type, so they sort after all known ones.
+    pub const CUSTOM_SORT_RANK: u8 = 99;
+
+    /// Sort position of this type. Exhaustive by construction.
+    #[must_use]
+    pub const fn sort_rank(&self) -> u8 {
+        match self {
+            Self::Task => 0,
+            Self::Bug => 1,
+            Self::Feature => 2,
+            Self::Epic => 3,
+            Self::Chore => 4,
+            Self::Docs => 5,
+            Self::Question => 6,
+            Self::Custom(_) => Self::CUSTOM_SORT_RANK,
         }
     }
 }
@@ -1678,5 +1741,65 @@ mod tests {
         assert!(json.contains("\"total_children\":10"));
         assert!(json.contains("\"closed_children\":7"));
         assert!(json.contains("\"eligible_for_close\":false"));
+    }
+
+    // ========================================================================
+    // SORT RANK TESTS
+    // ========================================================================
+
+    #[test]
+    fn status_sort_rank_follows_declaration_order() {
+        assert_eq!(Status::Open.sort_rank(), 0);
+        assert_eq!(Status::InProgress.sort_rank(), 1);
+        assert_eq!(Status::Blocked.sort_rank(), 2);
+        assert_eq!(Status::Deferred.sort_rank(), 3);
+        assert_eq!(Status::Draft.sort_rank(), 4);
+        assert_eq!(Status::Closed.sort_rank(), 5);
+        assert_eq!(Status::Tombstone.sort_rank(), 6);
+        assert_eq!(Status::Pinned.sort_rank(), 7);
+    }
+
+    #[test]
+    fn status_custom_sorts_last() {
+        assert_eq!(Status::Custom("triage".to_string()).sort_rank(), 99);
+        assert!(Status::Custom("aaa".to_string()).sort_rank() > Status::Pinned.sort_rank());
+    }
+
+    #[test]
+    fn status_sort_rank_matches_the_sql_rank_table() {
+        for (name, rank) in Status::SORT_RANKS {
+            let parsed = Status::known_value(name).expect("table names must be known statuses");
+            assert_eq!(parsed.sort_rank(), *rank, "rank mismatch for {name}");
+        }
+        assert_eq!(
+            Status::SORT_RANKS.len(),
+            8,
+            "every known status must be in the table"
+        );
+    }
+
+    #[test]
+    fn issue_type_sort_rank_follows_declaration_order() {
+        assert_eq!(IssueType::Task.sort_rank(), 0);
+        assert_eq!(IssueType::Bug.sort_rank(), 1);
+        assert_eq!(IssueType::Feature.sort_rank(), 2);
+        assert_eq!(IssueType::Epic.sort_rank(), 3);
+        assert_eq!(IssueType::Chore.sort_rank(), 4);
+        assert_eq!(IssueType::Docs.sort_rank(), 5);
+        assert_eq!(IssueType::Question.sort_rank(), 6);
+        assert_eq!(IssueType::Custom("spike".to_string()).sort_rank(), 99);
+    }
+
+    #[test]
+    fn issue_type_sort_rank_matches_the_sql_rank_table() {
+        for (name, rank) in IssueType::SORT_RANKS {
+            let parsed = IssueType::known_value(name).expect("table names must be known types");
+            assert_eq!(parsed.sort_rank(), *rank, "rank mismatch for {name}");
+        }
+        assert_eq!(
+            IssueType::SORT_RANKS.len(),
+            7,
+            "every known type must be in the table"
+        );
     }
 }
