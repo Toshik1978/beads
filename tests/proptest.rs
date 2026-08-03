@@ -29,6 +29,8 @@ mod merge;
 mod model_roundtrip;
 #[path = "proptest/parent_child.rs"]
 mod parent_child;
+#[path = "proptest/sort_spec_agreement.rs"]
+mod sort_spec_agreement;
 #[path = "proptest/status_partition.rs"]
 mod status_partition;
 #[path = "proptest/sync_path.rs"]
