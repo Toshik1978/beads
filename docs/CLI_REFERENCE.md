@@ -230,13 +230,43 @@ br list [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--limit <N>` | Maximum results (0=unlimited; default: unlimited — the full work surface). Pass `--limit N` to cap. |
-| `--sort <FIELD>` | Sort by: priority, created_at, updated_at, title |
+| `--sort <KEYS>` | Comma-separated sort keys (see Sorting below) |
 | `-r, --reverse` | Reverse sort order |
 | `--long` | Long output format |
 | `--pretty` | Tree/pretty output format |
 | `--wrap` | Wrap long lines instead of truncating in text output |
 | `--format <FMT>` | Output format: text, json, csv |
 | `--fields <FIELDS>` | CSV fields (comma-separated) |
+
+#### Sorting
+
+`--sort` takes one or more keys, applied left to right:
+
+```
+--sort <key>[,<key>...]     key := ['-'|'+'] field
+```
+
+| Field | Bare direction |
+| --- | --- |
+| `priority` | ascending — critical first |
+| `status` | ascending — open, in_progress, blocked, deferred, draft, closed, tombstone, pinned, then custom |
+| `type` | ascending — task, bug, feature, epic, chore, docs, question, then custom |
+| `assignee` | ascending — A-Z, unassigned always last |
+| `title` | ascending — A-Z, case-insensitive |
+| `created_at` (`created`) | descending — newest first |
+| `updated_at` (`updated`) | descending — newest first |
+
+`-` forces descending and `+` forces ascending. `--reverse` flips every key.
+Every sort ends with an implicit `id` tiebreaker, so output is deterministic.
+
+```bash
+br list --sort priority,updated     # critical first, most recent within each band
+br list --sort status,priority      # group by workflow state, then priority
+br list --sort -updated             # oldest first
+```
+
+`--sort priority` on its own keeps its historical tiebreaker and is
+equivalent to `--sort priority,created`.
 
 **Examples:**
 ```bash

@@ -143,10 +143,13 @@ const DEP_TYPE_CANDIDATES: &[(&str, &str)] = &[
 ];
 
 const SORT_KEY_CANDIDATES: &[(&str, &str)] = &[
-    ("priority", "Priority"),
-    ("created_at", "Created at"),
-    ("updated_at", "Updated at"),
-    ("title", "Title"),
+    ("priority", "Priority (critical first)"),
+    ("status", "Status, in workflow order"),
+    ("type", "Issue type"),
+    ("assignee", "Assignee (unassigned last)"),
+    ("created_at", "Created at (newest first)"),
+    ("updated_at", "Updated at (newest first)"),
+    ("title", "Title (A-Z)"),
     ("created", "Alias for created_at"),
     ("updated", "Alias for updated_at"),
 ];
@@ -1257,7 +1260,11 @@ pub struct ListArgs {
     #[arg(long)]
     pub offset: Option<usize>,
 
-    /// Sort field (`priority`, `created_at`, `updated_at`, `title`)
+    /// Sort keys, comma-separated: `priority`, `status`, `type`, `assignee`,
+    /// `created_at`, `updated_at`, `title`. Prefix a key with `-` for
+    /// descending or `+` for ascending; a bare key uses its natural direction
+    /// (timestamps newest first, everything else ascending). Example:
+    /// `--sort priority,-updated`
     #[arg(long, add = ArgValueCompleter::new(sort_key_completer))]
     pub sort: Option<String>,
 
@@ -2088,8 +2095,9 @@ fn collect_value_taking_long_flags(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, InheritedOutputMode, OutputFormat, OutputFormatBasic, hyphen_value_hint,
-        resolve_output_format_basic_with_outer_mode, resolve_output_format_with_outer_mode,
+        Cli, Commands, InheritedOutputMode, OutputFormat, OutputFormatBasic, SORT_KEY_CANDIDATES,
+        hyphen_value_hint, resolve_output_format_basic_with_outer_mode,
+        resolve_output_format_with_outer_mode,
     };
     use clap::{CommandFactory, Parser};
     use std::collections::BTreeSet;
@@ -2269,6 +2277,43 @@ mod tests {
             InheritedOutputMode::Quiet,
         );
         assert_eq!(resolved, OutputFormat::Json);
+    }
+
+    #[test]
+    fn every_sort_field_is_offered_as_a_completion_candidate() {
+        use crate::model::sort::SortField;
+
+        for field in SortField::ALL {
+            let name = field.canonical_name();
+            assert!(
+                SORT_KEY_CANDIDATES
+                    .iter()
+                    .any(|(candidate, _)| *candidate == name),
+                "completion should offer {name}; candidates: {SORT_KEY_CANDIDATES:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_completion_candidate_parses_as_a_sort_spec() {
+        use crate::model::sort::SortSpec;
+
+        for (candidate, _) in SORT_KEY_CANDIDATES {
+            assert!(
+                candidate.parse::<SortSpec>().is_ok(),
+                "candidate {candidate} must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn the_internal_id_terminator_is_never_offered() {
+        assert!(
+            !SORT_KEY_CANDIDATES
+                .iter()
+                .any(|(candidate, _)| *candidate == "id"),
+            "id is the implicit terminator, not a user-facing field"
+        );
     }
 
     #[test]

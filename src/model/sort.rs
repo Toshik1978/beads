@@ -27,6 +27,34 @@ pub enum SortField {
 }
 
 impl SortField {
+    /// Every user-facing field, in the order the documentation lists them.
+    /// `Id` is deliberately absent: it is the implicit terminator, not a key
+    /// anyone can ask for.
+    pub const ALL: &'static [Self] = &[
+        Self::Priority,
+        Self::Status,
+        Self::Type,
+        Self::Assignee,
+        Self::CreatedAt,
+        Self::UpdatedAt,
+        Self::Title,
+    ];
+
+    /// The canonical spelling, i.e. the non-alias name.
+    #[must_use]
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Priority => "priority",
+            Self::Status => "status",
+            Self::Type => "type",
+            Self::Assignee => "assignee",
+            Self::CreatedAt => "created_at",
+            Self::UpdatedAt => "updated_at",
+            Self::Title => "title",
+            Self::Id => "id",
+        }
+    }
+
     /// The direction a bare field takes, matching what that field already did
     /// as a single key before multi-key specs existed.
     #[must_use]
