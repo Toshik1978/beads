@@ -12,12 +12,12 @@ expression: normalize_json(&json)
       "labels": [],
       "priority": 2,
       "status": "open",
-      "title": "Ready issue",
+      "title": "Ready one",
       "updated_at": "TIMESTAMP"
     }
   ],
-  "total": 1,
-  "limit": 0,
+  "total": 3,
+  "limit": 1,
   "offset": 0,
-  "has_more": false
+  "has_more": true
 }

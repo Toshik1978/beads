@@ -2377,7 +2377,7 @@ mod tests {
     const NON_COMMAND_HEADINGS: &[&str] = &[
         "stats / status",
         "defer / undefer",
-        "Paginated envelope (list, search, blocked)",
+        "Paginated envelope (list, ready, search, blocked)",
         "Issue Object (list, show, ready)",
         "Dependency Object",
         "Sync Status Object",

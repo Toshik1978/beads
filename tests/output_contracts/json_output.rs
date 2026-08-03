@@ -143,6 +143,30 @@ fn snapshot_ready_json() {
     assert_json_snapshot!("ready_json_output", normalize_json(&json));
 }
 
+/// `ready` is unlimited by default, so `--limit` is the only way it drops
+/// rows. This pins what that looks like.
+#[test]
+fn snapshot_ready_truncated_json() {
+    let workspace = init_workspace();
+    create_issue(&workspace, "Ready one", "create_ready_trunc_1");
+    create_issue(&workspace, "Ready two", "create_ready_trunc_2");
+    create_issue(&workspace, "Ready three", "create_ready_trunc_3");
+
+    let output = run_br(
+        &workspace,
+        ["ready", "--json", "--limit", "1"],
+        "ready_truncated_json",
+    );
+    assert!(
+        output.status.success(),
+        "ready truncated json failed: {}",
+        output.stderr
+    );
+
+    let json: Value = serde_json::from_str(&output.stdout).expect("parse json");
+    assert_json_snapshot!("ready_truncated_json_output", normalize_json(&json));
+}
+
 #[test]
 #[allow(clippy::similar_names)]
 fn snapshot_blocked_json() {

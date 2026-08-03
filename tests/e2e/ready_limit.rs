@@ -1,7 +1,7 @@
 // `common` is now the `test-support` crate; aliased so that the 753
 // `common::` paths in this suite keep working unchanged.
 use crate::common;
-use common::cli::{BrWorkspace, parse_list_issues, run_br};
+use common::cli::{BrWorkspace, parse_issue_page_issues, parse_list_issues, run_br};
 
 #[test]
 fn test_ready_limit_with_external_blockers() {
@@ -48,7 +48,7 @@ fn test_ready_limit_with_external_blockers() {
     // Run ready with limit 5
     // We expect it to skip the 5 blocked ones and return the next 5.
     let ready = run_br(&workspace, ["ready", "--limit", "5", "--json"], "ready");
-    let ready_issues: Vec<serde_json::Value> = serde_json::from_str(&ready.stdout).unwrap();
+    let ready_issues = parse_issue_page_issues(&ready.stdout);
 
     // If bug exists, this will likely be 0 (or < 5).
     // If fixed, should be 5.

@@ -13,7 +13,7 @@ use crate::format::{
     ReadyIssue, format_priority_badge, format_type_badge, terminal_width, truncate_title,
 };
 use crate::model::{IssueType, Priority};
-use crate::output::{IssueTable, IssueTableColumns, OutputContext, OutputMode};
+use crate::output::{IssueTable, IssueTableColumns, JsonArrayPageMeta, OutputContext, OutputMode};
 use crate::storage::{ReadyFilters, ReadySortPolicy, SqliteStorage};
 use crate::util::id::{IdResolver, ResolverConfig};
 use std::io::IsTerminal;
@@ -186,7 +186,20 @@ fn execute_inner(
     match output_format {
         OutputFormat::Json => {
             hydrate_ready_labels(storage, &mut ready_issues)?;
-            early_ctx.json_array(ready_issues.into_iter().map(ReadyIssue::from));
+            // The text arm below says "Showing N of M" when `--limit` cuts the
+            // set; this is the same fact in the machine-readable shape, so a
+            // consumer is not left reading a full page as "queue drained"
+            // (#91). `ready` takes no `--offset`.
+            early_ctx.json_array_page(
+                "issues",
+                ready_issues.into_iter().map(ReadyIssue::from),
+                JsonArrayPageMeta {
+                    total: total_before_truncation,
+                    limit: args.limit,
+                    offset: 0,
+                    has_more: truncated,
+                },
+            );
         }
         OutputFormat::Text | OutputFormat::Csv => {
             let config_layer = load_config_layer()?;

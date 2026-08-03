@@ -3594,7 +3594,7 @@ mod tests {
 
         let ready_json: Value =
             serde_json::from_str(&extract_json_payload(&ready.stdout)).expect("ready json");
-        let ready_items = ready_json.as_array().expect("ready array");
+        let ready_items = ready_json["issues"].as_array().expect("ready envelope");
         assert!(
             ready_items
                 .iter()

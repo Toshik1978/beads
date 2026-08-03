@@ -36,7 +36,7 @@ Every query and mutating command accepts `--json`. Treat
 as for humans only — parse with `jq`, not by scraping text columns:
 
 ```bash
-br ready --json --unassigned | jq -r '.[].id'
+br ready --json --unassigned | jq -r '.issues[].id'
 br show bd-abc123 --json | jq '{status, assignee}'
 ```
 

@@ -7,7 +7,9 @@
 // `common::` paths in this suite keep working unchanged.
 use crate::common;
 
-use common::cli::{BrWorkspace, extract_json_payload, parse_list_issues, run_br};
+use common::cli::{
+    BrWorkspace, extract_json_payload, parse_issue_page_issues, parse_list_issues, run_br,
+};
 use serde_json::Value;
 use std::fs;
 
@@ -135,9 +137,13 @@ fn e2e_json_flag_ready() {
         ready.stderr
     );
 
-    let payload = extract_json_payload(&ready.stdout);
-    // Should be valid JSON array (may be empty if issue not ready)
-    let _json: Vec<Value> = serde_json::from_str(&payload).expect("valid JSON array");
+    // `ready` takes a --limit, so it emits the paginated envelope even when
+    // the page holds everything.
+    let json: Value =
+        serde_json::from_str(&extract_json_payload(&ready.stdout)).expect("valid JSON");
+    assert!(json["issues"].is_array(), "ready envelope: {json}");
+    assert_eq!(json["total"], json["issues"].as_array().map_or(0, Vec::len));
+    assert_eq!(json["has_more"], false);
 }
 
 #[test]
@@ -561,8 +567,7 @@ fn e2e_no_db_flag_ready() {
     );
 
     // Should output valid JSON
-    let payload = extract_json_payload(&ready.stdout);
-    let _json: Vec<Value> = serde_json::from_str(&payload).expect("valid JSON");
+    let _json = parse_issue_page_issues(&ready.stdout);
 }
 
 #[test]

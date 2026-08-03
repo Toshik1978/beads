@@ -489,6 +489,11 @@ br ready --unassigned -p 0 -p 1
 br ready --json --limit 10
 ```
 
+Because `--limit` can truncate, `--json` emits the [paginated
+envelope](#paginated-envelope-list-ready-search-blocked): with the default
+`--limit 0` it always reports `has_more: false`, and with an explicit cap
+`has_more` tells you whether more ready work was left behind.
+
 **Configurable ready status group (`.beads/policy.yaml`):**
 
 By default, `br ready` treats only `open` issues as actionable. Projects with a
@@ -610,7 +615,7 @@ Shows issues that are blocked by other open issues.
 | `--format <FMT>` | Output format: text, json |
 
 Because it can truncate, `--json` emits the [paginated
-envelope](#paginated-envelope-list-search-blocked): check `has_more` to learn
+envelope](#paginated-envelope-list-ready-search-blocked): check `has_more` to learn
 whether blocked issues were dropped by the cap.
 
 ---
@@ -629,7 +634,7 @@ complete by default), `search` results are **capped at 50 by default**
 of the corpus, so a bounded, relevance-ordered result set is the default.
 
 Because it can truncate, `--json` emits the [paginated
-envelope](#paginated-envelope-list-search-blocked): check `has_more` to learn
+envelope](#paginated-envelope-list-ready-search-blocked): check `has_more` to learn
 whether matches were dropped.
 
 **Examples:**
@@ -1049,7 +1054,7 @@ This keeps successful commands readable by suppressing low-level dependency logs
 
 ## JSON Output Schemas
 
-### Paginated envelope (list, search, blocked)
+### Paginated envelope (list, ready, search, blocked)
 
 **A command that can return fewer issues than matched wraps its array in an
 envelope; a command that always returns everything emits a bare array.** That
@@ -1073,17 +1078,14 @@ is the rule, and it is the whole reason the two shapes coexist.
 | `offset` | Rows skipped before this page. |
 | `has_more` | `true` when `offset + limit < total` — i.e. rows were dropped. |
 
-`list` (default `--limit 0`), `search` (default 50) and `blocked` (default 50)
-use it. `stale` and `show` return bare arrays and always return everything —
-neither takes a `--limit`.
+Every command that takes a `--limit` uses it: `list` and `ready` (both default
+`--limit 0`, unlimited), `search` and `blocked` (both default 50). `stale` and
+`show` return bare arrays and always return everything — neither takes a
+`--limit`, so neither can drop a row without saying so.
 
 Read `has_more`, not `issues.length`: a full page is not evidence that the
-result set ended there.
-
-**One known exception:** `ready` is unlimited by default and emits a bare
-array, but `br ready --json --limit N` does truncate — and, being a bare
-array, says nothing about it. Do not rely on that shape; it is a bug, not a
-deliberate carve-out from the rule above.
+result set ended there. Note that `limit` reflects what you asked for, so an
+unlimited command reports `"limit": 0` and `"has_more": false`.
 
 ### Issue Object (list, show, ready)
 
