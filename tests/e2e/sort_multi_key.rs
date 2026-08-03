@@ -171,8 +171,10 @@ fn reverse_composes_with_a_multi_key_spec() {
     // `priority,updated` -- verified by hand against the built binary,
     // where the two produced an IDENTICAL order on this same-priority
     // fixture. `--reverse` is the mechanism that is guaranteed to invert
-    // every resolved key regardless of each field's natural direction, so
-    // it is what this test composes with the multi-key spec.
+    // every key you sorted by regardless of each field's natural direction
+    // -- every key bar the implicit `id` terminator, which `resolved` pushes
+    // after the flip loop and so never reverses -- which is what this test
+    // composes with the multi-key spec.
     let workspace = BrWorkspace::new();
     let init = run_br(&workspace, ["init", "--prefix", "srt"], "init");
     assert!(init.status.success(), "init failed: {}", init.stderr);
@@ -242,7 +244,7 @@ fn reverse_composes_with_a_multi_key_spec() {
     );
     assert_eq!(
         reversed, expected_reversed,
-        "--reverse should invert every resolved key (here, updated_at), not just the \
+        "--reverse should invert the keys sorted by (here, updated_at), not just the \
          first (priority, which is tied and so cannot itself account for a difference)"
     );
 

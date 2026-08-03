@@ -231,7 +231,7 @@ br list [OPTIONS]
 |--------|-------------|
 | `--limit <N>` | Maximum results (0=unlimited; default: unlimited — the full work surface). Pass `--limit N` to cap. |
 | `--sort <KEYS>` | Comma-separated sort keys (see Sorting below) |
-| `-r, --reverse` | Reverse sort order |
+| `-r, --reverse` | Reverse sort order (the implicit `id` tiebreaker stays ascending) |
 | `--long` | Long output format |
 | `--pretty` | Tree/pretty output format |
 | `--wrap` | Wrap long lines instead of truncating in text output |
@@ -256,13 +256,19 @@ br list [OPTIONS]
 | `created_at` (`created`) | descending — newest first |
 | `updated_at` (`updated`) | descending — newest first |
 
-`-` forces descending and `+` forces ascending. `--reverse` flips every key.
-Every sort ends with an implicit `id` tiebreaker, so output is deterministic.
+`-` forces descending and `+` forces ascending. Every sort ends with an
+implicit `id` tiebreaker, so output is deterministic.
+
+`--reverse` flips every key in the effective ordering **except** that `id`
+tiebreaker, which is always ascending. That exception is what keeps a reversed
+listing deterministic rather than merely mirrored. Note that the effective
+ordering includes keys you did not type: bare `--sort priority` expands to
+`priority,created` (see below), and `--reverse` flips both of them.
 
 Because `created_at` and `updated_at` are already descending by default,
 `-created`/`-updated` change nothing — they force the same direction the
 field already sorts in. Use `+created`/`+updated` for oldest-first, or
-`--reverse` to invert every resolved key at once.
+`--reverse` to invert the whole ordering at once.
 
 A key that *begins* with `-` (a leading key with no other key before it, e.g.
 `-updated`) must be attached to `--sort` with `=`: `--sort=-updated`, not
