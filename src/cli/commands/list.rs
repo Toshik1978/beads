@@ -14,6 +14,7 @@ use crate::format::{
     IssueWithCounts, TextFormatOptions, format_issue_line_with, format_issue_long_with,
     format_issue_pretty_with, terminal_width,
 };
+use crate::model::sort::SortSpec;
 use crate::model::{IssueType, Priority, Status};
 use crate::output::{IssueTable, IssueTableColumns, JsonArrayPageMeta, OutputContext, OutputMode};
 use crate::storage::ListFilters;
@@ -446,7 +447,11 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
         title_contains: args.title_contains.clone(),
         limit: Some(args.limit.unwrap_or(DEFAULT_LIST_LIMIT)),
         offset: Some(args.offset.unwrap_or(DEFAULT_LIST_OFFSET)),
-        sort: args.sort.clone(),
+        sort: args
+            .sort
+            .as_deref()
+            .map(str::parse::<SortSpec>)
+            .transpose()?,
         reverse: args.reverse,
         labels: if args.label.is_empty() {
             None

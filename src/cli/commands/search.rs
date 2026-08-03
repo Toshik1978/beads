@@ -12,6 +12,7 @@ use crate::format::{
     IssueWithCounts, TextFormatOptions, csv, format_issue_line_with, markdown::strip_markdown,
     terminal_width,
 };
+use crate::model::sort::SortSpec;
 use crate::model::{Issue, IssueType, Priority, Status};
 use crate::output::{IssueTable, IssueTableColumns, OutputContext, OutputMode};
 use crate::storage::{ListFilters, SqliteStorage};
@@ -467,7 +468,11 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
         // fraction of the corpus); list/ready are complete by default.
         limit: Some(args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT)),
         offset: Some(args.offset.unwrap_or(DEFAULT_LIST_OFFSET)),
-        sort: args.sort.clone(),
+        sort: args
+            .sort
+            .as_deref()
+            .map(str::parse::<SortSpec>)
+            .transpose()?,
         reverse: args.reverse,
         labels: if args.label.is_empty() {
             None

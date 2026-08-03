@@ -2,6 +2,7 @@
 
 use crate::error::{BeadsError, Result};
 use crate::format::{IssueDetails, IssueWithDependencyMetadata};
+use crate::model::sort::{SortDirection, SortField, SortKey, SortSpec};
 use crate::model::{Comment, Dependency, DependencyType, Issue, IssueType, Priority, Status};
 use crate::storage::conn::compat::{OpenFlags, open_with_flags};
 use crate::storage::conn::{Connection, DbError, Row, SqliteValue};
@@ -4045,41 +4046,8 @@ impl SqliteStorage {
         }
 
         if !sort_default_in_rust {
-            // Apply custom sort if provided
-            if let Some(ref sort_field) = filters.sort {
-                let order = if filters.reverse { "DESC" } else { "ASC" };
-                // Simple validation to prevent injection (though params should handle it,
-                // column names can't be parameterized)
-                match sort_field.as_str() {
-                    "priority" => {
-                        let secondary_order = if filters.reverse { "ASC" } else { "DESC" };
-                        let _ = write!(
-                            sql,
-                            " ORDER BY priority {order}, created_at {secondary_order}, id ASC"
-                        );
-                    }
-                    "created_at" | "created" => {
-                        let order = if filters.reverse { "ASC" } else { "DESC" };
-                        let _ = write!(sql, " ORDER BY created_at {order}, id ASC");
-                    }
-                    "updated_at" | "updated" => {
-                        let order = if filters.reverse { "ASC" } else { "DESC" };
-                        let _ = write!(sql, " ORDER BY updated_at {order}, id ASC");
-                    }
-                    "title" => {
-                        // Case-insensitive sort for title
-                        let _ = write!(sql, " ORDER BY title COLLATE NOCASE {order}, id ASC");
-                    }
-                    _ => {
-                        // Default fallback
-                        sql.push_str(" ORDER BY priority ASC, created_at DESC, id ASC");
-                    }
-                }
-            } else if filters.reverse {
-                sql.push_str(" ORDER BY priority DESC, created_at ASC, id ASC");
-            } else {
-                sql.push_str(" ORDER BY priority ASC, created_at DESC, id ASC");
-            }
+            let spec = filters.sort.clone().unwrap_or_else(SortSpec::default_order);
+            sql.push_str(&spec.order_by_sql(filters.reverse));
         }
 
         match (filters.limit, filters.offset) {
@@ -4349,8 +4317,19 @@ impl SqliteStorage {
             || filters.unassigned
             || filters.title_contains.is_some()
             || filters.updated_after.is_some()
-            || filters.sort.as_deref() != Some("updated_at")
-            || !filters.reverse;
+            || filters.sort.as_ref().is_none_or(|spec| {
+                spec.resolved(filters.reverse)
+                    != [
+                        SortKey {
+                            field: SortField::UpdatedAt,
+                            direction: SortDirection::Asc,
+                        },
+                        SortKey {
+                            field: SortField::Id,
+                            direction: SortDirection::Asc,
+                        },
+                    ]
+            });
         if unsupported_filter {
             return self.list_issues(filters);
         }
@@ -4808,40 +4787,8 @@ impl SqliteStorage {
         params.push(SqliteValue::from(needle.as_str()));
         params.push(SqliteValue::from(needle));
 
-        if let Some(ref sort_field) = filters.sort {
-            let order = if filters.reverse { "DESC" } else { "ASC" };
-            match sort_field.as_str() {
-                "priority" => {
-                    let secondary_order = if filters.reverse { "ASC" } else { "DESC" };
-                    let _ = write!(
-                        sql,
-                        " ORDER BY priority {order}, created_at {secondary_order}, id ASC"
-                    );
-                }
-                "created_at" | "created" => {
-                    let order = if filters.reverse { "ASC" } else { "DESC" };
-                    let _ = write!(sql, " ORDER BY created_at {order}, id ASC");
-                }
-                "updated_at" | "updated" => {
-                    let order = if filters.reverse { "ASC" } else { "DESC" };
-                    let _ = write!(sql, " ORDER BY updated_at {order}, id ASC");
-                }
-                "title" => {
-                    let _ = write!(sql, " ORDER BY title COLLATE NOCASE {order}, id ASC");
-                }
-                _ => {
-                    if filters.reverse {
-                        sql.push_str(" ORDER BY priority DESC, created_at ASC, id ASC");
-                    } else {
-                        sql.push_str(" ORDER BY priority ASC, created_at DESC, id ASC");
-                    }
-                }
-            }
-        } else if filters.reverse {
-            sql.push_str(" ORDER BY priority DESC, created_at ASC, id ASC");
-        } else {
-            sql.push_str(" ORDER BY priority ASC, created_at DESC, id ASC");
-        }
+        let spec = filters.sort.clone().unwrap_or_else(SortSpec::default_order);
+        sql.push_str(&spec.order_by_sql(filters.reverse));
 
         match (filters.limit, filters.offset) {
             (Some(limit), offset) if limit > 0 => {
@@ -10147,8 +10094,8 @@ pub struct ListFilters {
     pub limit: Option<usize>,
     /// Offset for pagination (number of rows to skip before applying LIMIT)
     pub offset: Option<usize>,
-    /// Sort field (priority, `created_at`, `updated_at`, title)
-    pub sort: Option<String>,
+    /// Sort specification; `None` means the default ordering.
+    pub sort: Option<SortSpec>,
     /// Reverse sort order
     pub reverse: bool,
     /// Filter by labels (all specified labels must match)
@@ -18231,7 +18178,7 @@ mod tests {
         let filters = ListFilters {
             include_deferred: true,
             updated_before: Some(now - chrono::Duration::days(30)),
-            sort: Some("updated_at".to_string()),
+            sort: Some("updated_at".parse().expect("valid sort spec")),
             reverse: true,
             ..ListFilters::default()
         };
@@ -18318,7 +18265,7 @@ mod tests {
                 include_deferred: true,
                 limit: Some(5),
                 offset: Some(0),
-                sort: Some("priority".to_string()),
+                sort: Some("priority".parse().expect("valid sort spec")),
                 ..ListFilters::default()
             })
             .unwrap();
@@ -20047,7 +19994,7 @@ mod tests {
 
         let issues = storage
             .list_issues(&ListFilters {
-                sort: Some("created".to_string()),
+                sort: Some("created".parse().expect("valid sort spec")),
                 limit: Some(2),
                 ..ListFilters::default()
             })
@@ -20523,7 +20470,7 @@ mod tests {
             .search_issues(
                 "authentication",
                 &ListFilters {
-                    sort: Some("updated".to_string()),
+                    sort: Some("updated".parse().expect("valid sort spec")),
                     ..ListFilters::default()
                 },
             )
@@ -20723,7 +20670,7 @@ mod tests {
         let generic_filters = ListFilters {
             include_deferred: true,
             limit: Some(3),
-            sort: Some("priority".to_string()),
+            sort: Some("priority".parse().expect("valid sort spec")),
             ..ListFilters::default()
         };
 

@@ -69,7 +69,7 @@ fn execute_inner(args: &StaleArgs, ctx: &OutputContext, storage: &SqliteStorage)
     let threshold = now - Duration::days(args.days);
     filters.updated_before = Some(threshold);
     // Sort by updated_at ASC (oldest first) to show most stale items first
-    filters.sort = Some("updated_at".to_string());
+    filters.sort = Some("updated_at".parse().expect("valid sort spec"));
     filters.reverse = true; // updated_at default is DESC, so reverse gets ASC
 
     let stale = storage.list_stale_issues_for_command_output(&filters)?;
