@@ -157,7 +157,7 @@ piping through `tail`, too: a pipeline reports the *last* command's status, so
 (`set: [pipefail]` covers this inside the Taskfile; an ad-hoc shell command is
 on its own.)
 
-A full run at the time of writing: **3159 tests, 0 failed, 4 skipped**, in 82s
+A full run at the time of writing: **3164 tests, 0 failed, 4 skipped**, in 88s
 under nextest, plus the doctest pass. The `cargo test` runner it replaced took
 roughly twice as long on a suite of comparable size; that figure has not been
 re-measured since, and is here only to say why the switch was worth making.
@@ -170,8 +170,8 @@ no such skip. The refactor sweeps that removed unreachable code removed its
 tests with it, taking the total down to roughly 3093, and the multi-key
 `--sort` work then added it back to 3144. Both moves were real work with
 nothing hidden in them; the paginated-envelope work then added eleven more
-across `search`, `blocked` and `ready`, and the error-hint fix four more, to
-3159.
+across `search`, `blocked` and `ready`, the error-hint fix four more, and the
+routing-abbreviation fix five, to 3164.
 
 The rule this exists to serve is the one at the end of this section: verify a
 change in the total by diffing `cargo nextest list --workspace`, never by

@@ -98,10 +98,125 @@ fn switch_workspace_to_custom_database(workspace: &BrWorkspace, database_name: &
     .expect("write metadata");
 }
 
-fn routed_partial_id(issue_id: &str) -> String {
+/// The shortest abbreviation of `issue_id` that no other id in `all_ids` can
+/// also match, falling back to the full id when none is unique.
+///
+/// This has to consult the siblings, and cannot simply take more characters,
+/// because beads hashes are three characters long: a two-character
+/// abbreviation is already the longest one there is. It also has to consider
+/// the needle appearing *anywhere* in a sibling's hash, not just at the
+/// front, because `find_matching_ids` (`src/util/id.rs`) filters on
+/// `base_hash.contains(needle)`. That is what made the old fixed two-character
+/// helper flaky: `ext-la` matches `ext-hla` (bds-r2z).
+fn shortest_unambiguous_abbreviation(issue_id: &str, all_ids: &[&str]) -> String {
     let (prefix, hash) = issue_id.split_once('-').expect("issue id with prefix");
-    let partial_hash = hash.chars().take(2).collect::<String>();
-    format!("{prefix}-{partial_hash}")
+    let hash_of = |id: &str| {
+        id.split_once('-')
+            .map(|(_, hash)| hash.split('.').next().unwrap_or(hash).to_string())
+            .unwrap_or_default()
+    };
+
+    for length in 1..hash.chars().count() {
+        let candidate: String = hash.chars().take(length).collect();
+        let matches = all_ids
+            .iter()
+            .filter(|id| hash_of(id).contains(&candidate))
+            .count();
+        if matches == 1 {
+            return format!("{prefix}-{candidate}");
+        }
+    }
+    issue_id.to_string()
+}
+
+/// The abbreviation to route with, derived from every id that shares the
+/// workspace.
+///
+/// Reading the ids back rather than taking them as an argument is deliberate:
+/// a test that later grows a third fixture issue gets a correct abbreviation
+/// without anyone remembering to update a list, which is exactly the
+/// maintenance failure that would let bds-r2z back in.
+fn routed_partial_id(workspace: &BrWorkspace, issue_id: &str) -> String {
+    // Two listings, because the resolver's catalogue is `get_all_ids` -- every
+    // row in `issues`, tombstones included -- while `br list --all` still
+    // excludes tombstones. Sampling only the first would let a deleted issue
+    // collide with the abbreviation while looking unique from here, which is
+    // the same shape of latent flake this helper exists to remove.
+    let mut ids: Vec<String> = Vec::new();
+    for (args, label) in [
+        (
+            ["list", "--all", "--limit", "0", "--json"].as_slice(),
+            "list_ids_for_abbreviation",
+        ),
+        (
+            ["list", "--status", "tombstone", "--limit", "0", "--json"].as_slice(),
+            "list_tombstones_for_abbreviation",
+        ),
+    ] {
+        let list = run_br(workspace, args.iter().copied(), label);
+        assert!(
+            list.status.success(),
+            "listing ids for abbreviation failed: {}",
+            list.stderr
+        );
+        let page: Value =
+            serde_json::from_str(&extract_json_payload(&list.stdout)).expect("list json");
+        ids.extend(
+            page["issues"]
+                .as_array()
+                .expect("list envelope carries issues")
+                .iter()
+                .map(|issue| issue["id"].as_str().expect("issue id").to_string()),
+        );
+    }
+    ids.sort();
+    ids.dedup();
+
+    let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert!(
+        borrowed.contains(&issue_id),
+        "{issue_id} should be among the workspace's ids: {borrowed:?}"
+    );
+    shortest_unambiguous_abbreviation(issue_id, &borrowed)
+}
+
+#[cfg(test)]
+mod partial_id_tests {
+    use super::shortest_unambiguous_abbreviation;
+
+    /// bds-r2z. `find_matching_ids` matches the needle as a substring
+    /// *anywhere* in the hash, not as a prefix, so `ext-la` matches `ext-hla`
+    /// as well as `ext-lal` and `ext-law`. These three ids are not invented:
+    /// they came out of a workspace while reproducing the flake.
+    #[test]
+    fn an_abbreviation_a_sibling_also_matches_is_lengthened() {
+        let all = ["ext-lal", "ext-law", "ext-hla"];
+        // No abbreviation of "lal" is unique here, so the full id is the
+        // answer -- "l" and "la" both hit siblings.
+        assert_eq!(
+            shortest_unambiguous_abbreviation("ext-lal", &all),
+            "ext-lal"
+        );
+        // "hla" needs only one: neither sibling's hash contains an "h".
+        assert_eq!(shortest_unambiguous_abbreviation("ext-hla", &all), "ext-h");
+    }
+
+    /// The point of using an abbreviation at all is to prove routing resolves
+    /// a partial id in the *target* workspace, so the helper must still
+    /// abbreviate whenever it safely can.
+    #[test]
+    fn a_lone_issue_abbreviates_to_a_single_character() {
+        assert_eq!(
+            shortest_unambiguous_abbreviation("ext-abc", &["ext-abc"]),
+            "ext-a"
+        );
+    }
+
+    #[test]
+    fn a_sibling_sharing_only_the_first_character_still_abbreviates() {
+        let all = ["ext-abc", "ext-axy"];
+        assert_eq!(shortest_unambiguous_abbreviation("ext-abc", &all), "ext-ab");
+    }
 }
 
 // =============================================================================
@@ -787,7 +902,7 @@ fn e2e_routing_update_sets_invoking_workspace_last_touched_for_follow_up_close()
         serde_json::from_str(&extract_json_payload(&create.stdout)).expect("create json");
     let external_id = created["id"].as_str().expect("external id").to_string();
 
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
     let update = run_br(
         &main_workspace,
         ["update", &routed_input, "--status", "in_progress", "--json"],
@@ -861,7 +976,7 @@ fn e2e_routing_close_external_issue_via_main_workspace() {
     let created: Value =
         serde_json::from_str(&extract_json_payload(&create.stdout)).expect("create json");
     let external_id = created["id"].as_str().expect("external id").to_string();
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
 
     let close = run_br(
         &main_workspace,
@@ -930,7 +1045,7 @@ fn e2e_routing_close_sets_invoking_workspace_last_touched_for_follow_up_reopen()
         serde_json::from_str(&extract_json_payload(&create.stdout)).expect("create json");
     let external_id = created["id"].as_str().expect("external id").to_string();
 
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
     let close = run_br(
         &main_workspace,
         ["close", &routed_input, "--json"],
@@ -1004,7 +1119,7 @@ fn e2e_routing_reopen_external_issue_via_main_workspace() {
     let created: Value =
         serde_json::from_str(&extract_json_payload(&create.stdout)).expect("create json");
     let external_id = created["id"].as_str().expect("external id").to_string();
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
 
     let close = run_br(
         &external_workspace,
@@ -1077,7 +1192,7 @@ fn e2e_routing_label_add_and_list_external_issue_via_main_workspace() {
     let created: Value =
         serde_json::from_str(&extract_json_payload(&create.stdout)).expect("create json");
     let external_id = created["id"].as_str().expect("external id").to_string();
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
 
     let label_add = run_br(
         &main_workspace,
@@ -1176,7 +1291,7 @@ fn e2e_routing_label_add_sets_invoking_workspace_last_touched_for_follow_up_upda
         serde_json::from_str(&extract_json_payload(&create.stdout)).expect("create json");
     let external_id = created["id"].as_str().expect("external id").to_string();
 
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
     let label_add = run_br(
         &main_workspace,
         ["label", "add", &routed_input, "triage", "--json"],
@@ -1252,7 +1367,7 @@ fn e2e_routing_comments_add_and_list_external_issue_via_main_workspace() {
     let created: Value =
         serde_json::from_str(&extract_json_payload(&create.stdout)).expect("create json");
     let external_id = created["id"].as_str().expect("external id").to_string();
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
 
     let comment_add = run_br(
         &main_workspace,
@@ -1325,7 +1440,7 @@ fn e2e_routing_comments_list_imports_stale_external_jsonl() {
         "External comments stale db target",
         "create_external_comments_stale_target",
     );
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
 
     let mut jsonl_issue = issue_from_jsonl(&external_workspace, &external_id);
     jsonl_issue["comments"] = serde_json::json!([
@@ -1409,7 +1524,7 @@ fn e2e_routing_comments_add_sets_invoking_workspace_last_touched_for_follow_up_u
         serde_json::from_str(&extract_json_payload(&create.stdout)).expect("create json");
     let external_id = created["id"].as_str().expect("external id").to_string();
 
-    let routed_input = routed_partial_id(&external_id);
+    let routed_input = routed_partial_id(&external_workspace, &external_id);
     let comment_add = run_br(
         &main_workspace,
         [
@@ -1476,8 +1591,8 @@ fn e2e_routing_dep_add_remove_and_list_external_issue_via_main_workspace() {
         "External dep child",
         "create_external_dep_child",
     );
-    let routed_parent = routed_partial_id(&parent_id);
-    let routed_child = routed_partial_id(&child_id);
+    let routed_parent = routed_partial_id(&external_workspace, &parent_id);
+    let routed_child = routed_partial_id(&external_workspace, &child_id);
 
     let dep_add = run_br(
         &main_workspace,
@@ -1588,8 +1703,8 @@ fn e2e_routing_dep_add_sets_invoking_workspace_last_touched_for_follow_up_update
         "External follow-up dep child",
         "create_external_follow_up_dep_child",
     );
-    let routed_parent = routed_partial_id(&parent_id);
-    let routed_child = routed_partial_id(&child_id);
+    let routed_parent = routed_partial_id(&external_workspace, &parent_id);
+    let routed_child = routed_partial_id(&external_workspace, &child_id);
 
     let dep_add = run_br(
         &main_workspace,
@@ -1672,7 +1787,7 @@ fn e2e_routing_delete_external_issue_via_main_workspace() {
         "External delete target",
         "create_external_delete_target",
     );
-    let routed_issue = routed_partial_id(&issue_id);
+    let routed_issue = routed_partial_id(&external_workspace, &issue_id);
 
     let delete = run_br(
         &main_workspace,
@@ -1727,7 +1842,7 @@ fn e2e_routing_delete_preview_does_not_mutate_earlier_local_batch() {
         dep_add.stderr
     );
 
-    let routed_blocker = routed_partial_id(&blocker_id);
+    let routed_blocker = routed_partial_id(&external_workspace, &blocker_id);
     let delete = run_br(
         &main_workspace,
         ["delete", &local_id, &routed_blocker, "--json"],
@@ -1811,7 +1926,7 @@ fn e2e_routing_delete_force_dry_run_reports_orphans_not_cascade() {
         grandchild_dep.stderr
     );
 
-    let routed_blocker = routed_partial_id(&blocker_id);
+    let routed_blocker = routed_partial_id(&external_workspace, &blocker_id);
     let delete = run_br(
         &main_workspace,
         ["delete", &routed_blocker, "--dry-run", "--force", "--json"],
