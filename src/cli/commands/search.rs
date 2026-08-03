@@ -865,20 +865,30 @@ mod tests {
         let t_old = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let t_new = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
 
-        let mut c = make_issue("c", "c", None, t_old);
-        c.priority = Priority(1);
-        let mut a = make_issue("a", "a", None, t_old);
-        a.priority = Priority(0);
-        let mut b = make_issue("b", "b", None, t_old);
-        b.priority = Priority(1);
-        b.updated_at = t_new;
+        // The two priority-1 issues are named *opposite* to their correct
+        // `updated` order: "aaa-older" must end up *after* "zzz-newer" once
+        // the second key applies. If `updated` were silently dropped (or
+        // the `id` terminator alone decided the priority-1 tie), id-ASC
+        // would put "aaa-older" first instead — same as
+        // `tests/storage/sort_spec.rs`'s
+        // `priority_then_updated_orders_within_the_priority_band` and
+        // `src/model/sort.rs`'s `multi_key_falls_through_in_order`, and for
+        // the same reason: a spec that parses but doesn't apply its second
+        // key must fail this assertion, not slip through it.
+        let mut low_priority = make_issue("crit", "crit", None, t_old);
+        low_priority.priority = Priority(0);
+        let mut older = make_issue("aaa-older", "aaa-older", None, t_old);
+        older.priority = Priority(1);
+        let mut newer = make_issue("zzz-newer", "zzz-newer", None, t_old);
+        newer.priority = Priority(1);
+        newer.updated_at = t_new;
 
-        let mut issues = vec![c, a, b];
+        let mut issues = vec![older, low_priority, newer];
 
         apply_issue_sort(&mut issues, Some(&spec), false).expect("sort");
 
         let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "b", "c"]);
+        assert_eq!(ids, vec!["crit", "zzz-newer", "aaa-older"]);
     }
 
     #[test]
@@ -886,15 +896,20 @@ mod tests {
         let t_old = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let t_new = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
 
-        let old = make_issue("old", "old", None, t_old);
-        let new = make_issue("new", "new", None, t_new);
-        let mut issues = vec![old, new];
+        // Named so alphabetical (id-terminator) order disagrees with the
+        // correct `created_at DESC` order: "aaa-older" sorts first
+        // alphabetically but must land *second* once the real tiebreaker
+        // applies — same technique as `sort_spec.rs`'s
+        // `bare_priority_still_breaks_ties_by_created_at_descending`.
+        let older = make_issue("aaa-older", "aaa-older", None, t_old);
+        let newer = make_issue("zzz-newer", "zzz-newer", None, t_new);
+        let mut issues = vec![older, newer];
 
         apply_issue_sort(&mut issues, None, false).expect("sort");
 
         // priority ASC, created_at DESC — newest first within the band.
         let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["new", "old"]);
+        assert_eq!(ids, vec!["zzz-newer", "aaa-older"]);
     }
 
     #[test]
