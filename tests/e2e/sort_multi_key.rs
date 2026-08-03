@@ -105,11 +105,18 @@ fn status_sorts_in_workflow_order_not_alphabetical_order() {
     );
 
     // 'blocked' precedes 'open' alphabetically; by workflow rank it must not.
-    let first_blocked = statuses.iter().position(|s| s.contains("blocked"));
-    let last_open = statuses.iter().rposition(|s| s.contains("open"));
-    if let (Some(blocked), Some(open)) = (first_blocked, last_open) {
-        assert!(open < blocked, "open must precede blocked: {statuses:?}");
-    }
+    // Both `.expect()`s are load-bearing, not decoration: an `if let` here
+    // would let the update silently no-op, or a status-field shape change,
+    // pass the test having asserted nothing at all.
+    let blocked = statuses
+        .iter()
+        .position(|s| s.contains("blocked"))
+        .expect("blocked entry must be present after update");
+    let open = statuses
+        .iter()
+        .rposition(|s| s.contains("open"))
+        .expect("open entries must remain after update");
+    assert!(open < blocked, "open must precede blocked: {statuses:?}");
 }
 
 #[test]
@@ -138,29 +145,108 @@ fn bare_priority_sort_is_unchanged() {
 
 #[test]
 fn reverse_composes_with_a_multi_key_spec() {
-    let workspace = seeded();
+    // `seeded()` (two issues at each of two priorities) is wrong for this
+    // test: flipping `-priority` alone swaps which band leads, so
+    // `assert_ne!(forward, reversed)` would trip even if the `updated` key
+    // were dropped entirely. Every issue below gets the SAME priority
+    // instead, so priority contributes nothing to the order and only the
+    // second key -- composed with `--reverse` -- can differentiate forward
+    // from reversed.
+    //
+    // Note also that `-`/`+` are "force descending" / "force ascending",
+    // not "flip from natural" (`SortSpec::resolved` in
+    // `src/model/sort.rs`): `updated`'s natural direction is already
+    // descending, so `-priority,-updated` is NOT the reverse of bare
+    // `priority,updated` -- verified by hand against the built binary,
+    // where the two produced an IDENTICAL order on this same-priority
+    // fixture. `--reverse` is the mechanism that is guaranteed to invert
+    // every resolved key regardless of each field's natural direction, so
+    // it is what this test composes with the multi-key spec.
+    let workspace = BrWorkspace::new();
+    let init = run_br(&workspace, ["init", "--prefix", "srt"], "init");
+    assert!(init.status.success(), "init failed: {}", init.stderr);
+
+    let mut id_of: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    for title in ["un", "deux", "trois", "quatre"] {
+        let run = run_br(&workspace, ["create", title, "--priority", "1"], "create");
+        assert!(
+            run.status.success(),
+            "create {title} failed: {}",
+            run.stderr
+        );
+        id_of.insert(title, parse_created_id(&run.stdout));
+    }
+
+    // `br update` stamps `updated_at` from `Utc::now()` at the moment its
+    // subprocess runs (src/cli/commands/update.rs), and `run_br` blocks
+    // until each child exits, so touching the four issues in this order
+    // gives a known, strictly increasing `updated_at` order: deux, quatre,
+    // un, trois (established here by construction, not merely assumed).
+    let touch_order = ["deux", "quatre", "un", "trois"];
+    for title in touch_order {
+        let id = id_of[title].clone();
+        let new_title = format!("touched-{title}");
+        let run = run_br(
+            &workspace,
+            ["update", id.as_str(), "--title", new_title.as_str()],
+            "touch",
+        );
+        assert!(run.status.success(), "touch {title} failed: {}", run.stderr);
+    }
+
     let forward = list_field(
         &workspace,
         &["list", "--sort", "priority,updated", "--json"],
         "id",
         "forward",
     );
-    // The first key here starts with `-`, so (per the CLI ergonomics fact
-    // this epic pinned) it must be attached with `=`; a separated
-    // `"--sort", "-priority,-updated"` pair would be parsed by clap as a
-    // flag and fail before ever reaching the sort logic.
+    let forward: Vec<String> = forward
+        .iter()
+        .map(|id| id.trim_matches('"').to_string())
+        .collect();
     let reversed = list_field(
         &workspace,
-        &["list", "--sort=-priority,-updated", "--json"],
+        &["list", "--sort", "priority,updated", "--reverse", "--json"],
         "id",
         "reversed",
     );
+    let reversed: Vec<String> = reversed
+        .iter()
+        .map(|id| id.trim_matches('"').to_string())
+        .collect();
+
+    // Bare `updated` takes its natural direction (descending, newest
+    // first), so forward order is the touch order reversed; `--reverse`
+    // inverts that back to the touch order itself.
+    let expected_forward: Vec<String> = ["trois", "un", "quatre", "deux"]
+        .iter()
+        .map(|t| id_of[t].clone())
+        .collect();
+    let expected_reversed: Vec<String> = touch_order.iter().map(|t| id_of[t].clone()).collect();
 
     assert_eq!(
-        forward.len(),
-        reversed.len(),
-        "same issues, different order"
+        forward, expected_forward,
+        "priority,updated should order by updated_at descending (newest first) \
+         when every issue shares the same priority"
     );
+    assert_eq!(
+        reversed, expected_reversed,
+        "--reverse should invert every resolved key (here, updated_at), not just the \
+         first (priority, which is tied and so cannot itself account for a difference)"
+    );
+
+    // What a build that dropped the second key internally would produce:
+    // NOT the same as literally passing bare `--sort priority` (that hits
+    // the unrelated legacy carve-out, which falls back to `created_at DESC`
+    // and would itself discriminate here). The hypothetical bug this guards
+    // against is `SortSpec::resolved`/`compare` retaining only the first of
+    // the two *parsed* keys from a `priority,updated` spec. With every issue
+    // at the same priority, that leaves nothing but the `id ASC` terminator
+    // -- and `--reverse` does not flip that terminator by design (see the
+    // doc comment on `resolved`). Forward and reversed would then both be
+    // plain id-ascending order and therefore IDENTICAL, so this assertion
+    // would fail exactly the way it is meant to if the second key were
+    // ignored or `--reverse` did not compose with it.
     assert_ne!(
         forward, reversed,
         "flipping every key must change the order"
@@ -246,14 +332,18 @@ fn invalid_specs_are_rejected_before_the_query_runs() {
             run.stdout
         );
         // With `--json`, `br` renders the error as a JSON object on stdout
-        // rather than prose on stderr (see the `VALIDATION_FAILED` envelope),
-        // so the "mentions sort" check has to look at whichever stream
-        // actually carries it instead of assuming stderr.
+        // deterministically -- never on stderr (see `handle_error`'s JSON
+        // branch in `src/main.rs`, issue #336: "so scripted callers read ONE
+        // clean, parseable stream"). `tests/e2e/errors.rs` pins the same
+        // contract via
+        // `parse_error_json(&update.stdout)`. Asserting stdout alone (not
+        // stdout-or-stderr) means a regression that put JSON errors back on
+        // stderr -- breaking that one-clean-stream contract -- fails here
+        // instead of slipping through on the `stderr` half of an `||`.
         assert!(
-            run.stdout.contains("sort") || run.stderr.contains("sort"),
-            "error for {spec:?} should mention sort -- stdout: {} stderr: {}",
-            run.stdout,
-            run.stderr
+            run.stdout.contains("sort"),
+            "error for {spec:?} should mention sort on stdout: {}",
+            run.stdout
         );
     }
 }
