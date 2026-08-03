@@ -1167,13 +1167,19 @@ parseable stream; log lines stay on stderr.
 | --- | --- |
 | `code` | Stable `SCREAMING_SNAKE_CASE` identifier — match on this, not on `message`. |
 | `message` | Human-readable description. Wording is not a stable interface. |
-| `hint` | Optional suggested fix. Absent when there is nothing useful to say. |
+| `hint` | Optional suggested fix — the most specific one available. Absent when there is nothing useful to say. |
 | `retryable` | Whether retrying could succeed — after fixing the input, or after waiting when the database is locked. |
 | `context` | Optional, code-specific structured detail. |
 
 The process exit code is derived from `code`: 2 for database errors, 3 for
 issue errors, 4 for validation, 5 for dependencies, 6 for sync/JSONL, 7 for
 config, 8 for I/O, 1 for internal, and 130 for an interrupted run.
+
+`hint` prefers a value derived from what you actually typed over a generic
+one. `br create x --priority high` answers `Did you mean --priority 1?`, and
+falls back to the range (`Use a priority between 0 (critical) and 4
+(backlog)`) only when nothing can be inferred. Do not match on the wording of
+either — it is prose, and which of the two you get depends on the input.
 
 For `ISSUE_NOT_FOUND`, `context.similar_ids` lists IDs within one edit of what
 was searched for, closest first, and is `[]` when nothing is close — in which

@@ -641,23 +641,35 @@ impl StructuredError {
     }
 
     /// Generate context-aware hint from error.
+    /// The hint shown to a human, most specific answer first.
+    ///
+    /// The arms below are consulted *before* [`BeadsError::suggestion`], and
+    /// the order is the whole point (bds-b0m). It used to be the other way
+    /// round, and `suggestion()` is `Some` for exactly the priority, status
+    /// and type variants these arms were written for — so
+    /// `detect_priority_intent` resolved "high" to 1 and the answer was
+    /// thrown away, leaving the user the static range to map onto themselves.
+    ///
+    /// `suggestion()` remains the right answer for the dozen variants with no
+    /// arm here, and the fallback for an arm that returns `None` because it
+    /// could not detect anything. It is a default, not a pre-emption.
     fn generate_hint(err: &BeadsError, context: Option<&Value>) -> Option<String> {
-        // First check if BeadsError has a built-in suggestion
-        if let Some(suggestion) = err.suggestion() {
-            return Some(suggestion.to_string());
-        }
+        Self::specific_hint(err, context).or_else(|| err.suggestion().map(ToString::to_string))
+    }
 
-        // Generate additional hints based on context
+    /// The context-aware hint for errors that can compute a better one than
+    /// their static [`BeadsError::suggestion`]. `None` means "nothing more
+    /// specific to say", which sends [`Self::generate_hint`] to the fallback.
+    fn specific_hint(err: &BeadsError, context: Option<&Value>) -> Option<String> {
         match err {
             BeadsError::IssueNotFound { .. } => {
                 Some("Run 'br list' to see available issues.".to_string())
             }
-            BeadsError::InvalidPriority { priority } => {
-                Some(detect_priority_intent(priority).map_or_else(
-                    || PRIORITY_SHORT_HINT.to_string(),
-                    |detected| flag_value_hint("priority", detected),
-                ))
-            }
+            // `None` rather than PRIORITY_SHORT_HINT when nothing is
+            // detected: the fallback says the same thing at more length, and
+            // an arm that always answers cannot be overridden by anything.
+            BeadsError::InvalidPriority { priority } => detect_priority_intent(priority)
+                .map(|detected| flag_value_hint("priority", detected)),
             BeadsError::InvalidStatus { status } => {
                 detect_status_intent(status).map(|detected| flag_value_hint("status", detected))
             }
@@ -669,10 +681,10 @@ impl StructuredError {
                     && let Some(count) = ctx.get("dependent_count")
                 {
                     return Some(format!(
-                        "Use --force to delete anyway, or close {count} dependents first."
+                        "Use --force or --cascade to delete anyway, or close {count} dependents first."
                     ));
                 }
-                Some(format!("Use --force to delete '{id}' anyway."))
+                Some(format!("Use --force or --cascade to delete '{id}' anyway."))
             }
             BeadsError::NothingToDo { reason } => {
                 // The reason string carries the per-issue skip explanations
@@ -1284,17 +1296,31 @@ mod tests {
     }
 
     #[test]
-    fn invalid_priority_error_is_retryable_and_explains_the_range() {
+    fn invalid_priority_error_is_retryable_and_names_the_detected_value() {
         let err = StructuredError::from_error(&BeadsError::InvalidPriority {
             priority: "high".to_string(),
         });
         assert_eq!(err.code, ErrorCode::InvalidPriority);
         assert!(err.retryable);
-        // Deliberately not asserting "--priority 1". The live path cannot
-        // produce it: `generate_hint` returns `BeadsError::suggestion()` before
-        // reaching its own `detect_priority_intent` arm, so the static range
-        // text always wins. That is bds-b0m.
-        assert!(err.hint.as_ref().unwrap().contains("0 (critical)"));
+        // "high" is detectable, so the hint says so rather than reciting the
+        // range and leaving the reader to map "high" onto it. This assertion
+        // used to be the opposite, pinning the static text with a comment
+        // pointing at bds-b0m; that is the bug, now fixed.
+        assert_eq!(err.hint.as_deref(), Some("Did you mean --priority 1?"));
+    }
+
+    #[test]
+    fn undetectable_priority_falls_back_to_the_static_range() {
+        let err = StructuredError::from_error(&BeadsError::InvalidPriority {
+            priority: "zzzqqq".to_string(),
+        });
+        // Nothing to detect, so `specific_hint` declines and
+        // `BeadsError::suggestion()` answers. Losing that fallback would be
+        // the obvious way to break this fix.
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("Use a priority between 0 (critical) and 4 (backlog)")
+        );
     }
 
     #[test]
@@ -1303,13 +1329,30 @@ mod tests {
             status: "done".to_string(),
         });
         assert_eq!(err.code, ErrorCode::InvalidStatus);
-        assert!(err.hint.as_ref().unwrap().contains("closed"));
-        // The intent detection is not lost, only demoted: it lands in the
-        // machine-readable context rather than the human hint.
+        // "done" is detectable, so the human hint names the value; the
+        // machine-readable context carries the same answer, as it always did.
+        assert_eq!(err.hint.as_deref(), Some("Did you mean --status closed?"));
         assert_eq!(
             err.context.as_ref().unwrap()["hint"],
             "Did you mean --status closed?"
         );
+    }
+
+    /// Inverting hint precedence (bds-b0m) routes `HasDependents` through
+    /// `generate_hint`'s own arm instead of the static suggestion. The arm's
+    /// text is more specific — it names the id or the dependent count — but
+    /// it must not drop `--cascade` on the way, since that is the other way
+    /// out of this error.
+    #[test]
+    fn has_dependents_hint_offers_both_escapes() {
+        let err = StructuredError::from_error(&BeadsError::HasDependents {
+            id: "bd-abc123".to_string(),
+            count: 3,
+        });
+        assert_eq!(err.code, ErrorCode::HasDependents);
+        let hint = err.hint.as_ref().unwrap();
+        assert!(hint.contains("--force"), "hint lost --force: {hint}");
+        assert!(hint.contains("--cascade"), "hint lost --cascade: {hint}");
     }
 
     #[test]

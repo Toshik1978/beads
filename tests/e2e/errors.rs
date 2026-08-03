@@ -3700,3 +3700,78 @@ fn hyphen_leading_value_error_names_the_flag() {
         "the value must round-trip verbatim, leading '- ' included"
     );
 }
+
+/// bds-b0m: `--priority high` is a guessable typo, and the detector already
+/// resolves it to 1. Before the fix that answer was computed and discarded —
+/// `generate_hint` returned the static range text first — so the user was
+/// told the range and left to map "high" onto it themselves.
+#[test]
+fn e2e_invalid_priority_hint_names_the_detected_value() {
+    let _log = common::test_log("e2e_invalid_priority_hint_names_the_detected_value");
+    let workspace = BrWorkspace::new();
+
+    let init = run_br(&workspace, ["init"], "init");
+    assert!(init.status.success());
+
+    let result = run_br(
+        &workspace,
+        ["create", "Test issue", "--priority", "high", "--json"],
+        "create_priority_high_json",
+    );
+    assert!(!result.status.success());
+
+    let json = parse_error_json(&result.stdout).expect("should be valid JSON");
+    let error = &json["error"];
+    assert_eq!(error["code"], "INVALID_PRIORITY");
+    let hint = error["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("--priority 1"),
+        "hint should name the detected value, got: {hint}"
+    );
+
+    // The human surface must carry it too — that was the half the machine
+    // surface never lost, since `context.hint` had it all along.
+    let text = run_br(
+        &workspace,
+        ["create", "Test issue", "--priority", "high"],
+        "create_priority_high_text",
+    );
+    assert!(!text.status.success());
+    let combined = format!("{}{}", text.stdout, text.stderr);
+    assert!(
+        combined.contains("--priority 1"),
+        "text hint should name the detected value, got: {combined}"
+    );
+}
+
+/// The fallback still has to work: a value the detector cannot resolve must
+/// still get told the range, rather than getting no hint at all now that the
+/// specific arm is consulted first.
+#[test]
+fn e2e_unguessable_priority_still_explains_the_range() {
+    let _log = common::test_log("e2e_unguessable_priority_still_explains_the_range");
+    let workspace = BrWorkspace::new();
+
+    let init = run_br(&workspace, ["init"], "init");
+    assert!(init.status.success());
+
+    let result = run_br(
+        &workspace,
+        ["create", "Test issue", "--priority", "zzzqqq", "--json"],
+        "create_priority_gibberish_json",
+    );
+    assert!(!result.status.success());
+
+    let json = parse_error_json(&result.stdout).expect("should be valid JSON");
+    let error = &json["error"];
+    assert_eq!(error["code"], "INVALID_PRIORITY");
+    let hint = error["hint"].as_str().unwrap();
+    assert!(
+        !hint.contains("Did you mean"),
+        "nothing was detected, so nothing should be guessed: {hint}"
+    );
+    assert!(
+        hint.contains('0') && hint.contains('4'),
+        "hint should still explain the range, got: {hint}"
+    );
+}
