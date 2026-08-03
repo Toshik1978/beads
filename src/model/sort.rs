@@ -26,6 +26,16 @@ pub enum SortField {
     Id,
 }
 
+/// What one sort field expands to, in order. Two slots because `status`,
+/// `type` and `assignee` each need a pair and nothing needs more; the shorter
+/// fields leave the second `None`.
+///
+/// A fixed array rather than a `Vec` for two reasons. It costs no allocation,
+/// which matters because [`SortField::compare_fragments`] runs inside a
+/// comparator. And it is the same shape for both renderings, so the two stay
+/// visibly arm-for-arm — the property the whole design rests on.
+type Fragments<T> = [Option<(T, FragmentDirection)>; 2];
+
 impl SortField {
     /// Every user-facing field, in the order the documentation lists them.
     /// `Id` is deliberately absent: it is the implicit terminator, not a key
@@ -93,115 +103,151 @@ impl SortField {
     /// `status` and `type` emit a `CASE` plus the raw column: the raw column
     /// only ever breaks ties inside the custom bucket, since every known value
     /// has a distinct rank, so it cannot disturb the documented order.
-    fn sql_fragments(self) -> Vec<(String, FragmentDirection)> {
+    fn sql_fragments(self) -> Fragments<String> {
         match self {
-            Self::Priority => vec![("priority".to_string(), FragmentDirection::Follow)],
-            Self::Status => vec![
-                (
+            Self::Priority => [
+                Some(("priority".to_string(), FragmentDirection::Follow)),
+                None,
+            ],
+            Self::Status => [
+                Some((
                     case_expression("status", Status::SORT_RANKS, Status::CUSTOM_SORT_RANK),
                     FragmentDirection::Follow,
-                ),
-                ("status".to_string(), FragmentDirection::Follow),
+                )),
+                Some(("status".to_string(), FragmentDirection::Follow)),
             ],
-            Self::Type => vec![
-                (
+            Self::Type => [
+                Some((
                     case_expression(
                         "issue_type",
                         IssueType::SORT_RANKS,
                         IssueType::CUSTOM_SORT_RANK,
                     ),
                     FragmentDirection::Follow,
-                ),
-                ("issue_type".to_string(), FragmentDirection::Follow),
+                )),
+                Some(("issue_type".to_string(), FragmentDirection::Follow)),
             ],
-            Self::Assignee => vec![
-                (
+            Self::Assignee => [
+                Some((
                     "CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END".to_string(),
                     FragmentDirection::ForceAsc,
-                ),
-                ("NULLIF(assignee,'')".to_string(), FragmentDirection::Follow),
+                )),
+                Some(("NULLIF(assignee,'')".to_string(), FragmentDirection::Follow)),
             ],
-            Self::CreatedAt => vec![("created_at".to_string(), FragmentDirection::Follow)],
-            Self::UpdatedAt => vec![("updated_at".to_string(), FragmentDirection::Follow)],
-            Self::Title => vec![(
-                "title COLLATE NOCASE".to_string(),
-                FragmentDirection::Follow,
-            )],
-            Self::Id => vec![("id".to_string(), FragmentDirection::Follow)],
+            Self::CreatedAt => [
+                Some(("created_at".to_string(), FragmentDirection::Follow)),
+                None,
+            ],
+            Self::UpdatedAt => [
+                Some(("updated_at".to_string(), FragmentDirection::Follow)),
+                None,
+            ],
+            Self::Title => [
+                Some((
+                    "title COLLATE NOCASE".to_string(),
+                    FragmentDirection::Follow,
+                )),
+                None,
+            ],
+            Self::Id => [Some(("id".to_string(), FragmentDirection::Follow)), None],
         }
     }
 
     /// The comparisons this field orders by, in the same order and with the
     /// same direction modes as [`Self::sql_fragments`]. Keeping the two in
-    /// lockstep is what makes the SQL and in-memory orderings agree.
-    fn compare_fragments(self, left: &Issue, right: &Issue) -> Vec<(Ordering, FragmentDirection)> {
+    /// lockstep is what makes the SQL and in-memory orderings agree, which is
+    /// also why both return the same fixed-size shape: an arm that emits one
+    /// fragment here must emit one there, and a reader can check that by
+    /// looking rather than by counting.
+    ///
+    /// Every arm is allocation-free. `sort_by` calls this once per key per
+    /// comparison — O(n log n) times — so a `Vec` or a `String` here is a
+    /// `Vec` or a `String` n log n times.
+    fn compare_fragments(self, left: &Issue, right: &Issue) -> Fragments<Ordering> {
         match self {
-            Self::Priority => vec![(
-                left.priority.cmp(&right.priority),
-                FragmentDirection::Follow,
-            )],
-            Self::Status => vec![
-                (
+            Self::Priority => [
+                Some((
+                    left.priority.cmp(&right.priority),
+                    FragmentDirection::Follow,
+                )),
+                None,
+            ],
+            Self::Status => [
+                Some((
                     left.status.sort_rank().cmp(&right.status.sort_rank()),
                     FragmentDirection::Follow,
-                ),
-                (
+                )),
+                Some((
                     left.status.as_str().cmp(right.status.as_str()),
                     FragmentDirection::Follow,
-                ),
+                )),
             ],
-            Self::Type => vec![
-                (
+            Self::Type => [
+                Some((
                     left.issue_type
                         .sort_rank()
                         .cmp(&right.issue_type.sort_rank()),
                     FragmentDirection::Follow,
-                ),
-                (
+                )),
+                Some((
                     left.issue_type.as_str().cmp(right.issue_type.as_str()),
                     FragmentDirection::Follow,
-                ),
+                )),
             ],
             Self::Assignee => {
                 // Matches NULLIF(assignee,''): only the empty string folds,
-                // not whitespace.
-                let fold = |issue: &Issue| -> Option<String> {
-                    issue
-                        .assignee
-                        .as_deref()
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string)
-                };
+                // not whitespace. A nested `fn` rather than a closure so the
+                // borrow of each issue ends with the call.
+                fn fold(issue: &Issue) -> Option<&str> {
+                    issue.assignee.as_deref().filter(|value| !value.is_empty())
+                }
                 let (left_name, right_name) = (fold(left), fold(right));
-                vec![
-                    (
+                [
+                    Some((
                         u8::from(left_name.is_none()).cmp(&u8::from(right_name.is_none())),
                         FragmentDirection::ForceAsc,
-                    ),
-                    (
+                    )),
+                    Some((
                         left_name
                             .unwrap_or_default()
-                            .cmp(&right_name.unwrap_or_default()),
+                            .cmp(right_name.unwrap_or_default()),
                         FragmentDirection::Follow,
-                    ),
+                    )),
                 ]
             }
-            Self::CreatedAt => vec![(
-                left.created_at.cmp(&right.created_at),
-                FragmentDirection::Follow,
-            )],
-            Self::UpdatedAt => vec![(
-                left.updated_at.cmp(&right.updated_at),
-                FragmentDirection::Follow,
-            )],
-            // ASCII-only fold, matching SQLite's COLLATE NOCASE.
-            Self::Title => vec![(
-                left.title
-                    .to_ascii_lowercase()
-                    .cmp(&right.title.to_ascii_lowercase()),
-                FragmentDirection::Follow,
-            )],
-            Self::Id => vec![(left.id.cmp(&right.id), FragmentDirection::Follow)],
+            Self::CreatedAt => [
+                Some((
+                    left.created_at.cmp(&right.created_at),
+                    FragmentDirection::Follow,
+                )),
+                None,
+            ],
+            Self::UpdatedAt => [
+                Some((
+                    left.updated_at.cmp(&right.updated_at),
+                    FragmentDirection::Follow,
+                )),
+                None,
+            ],
+            // ASCII-only fold, matching SQLite's COLLATE NOCASE. Comparing the
+            // folded bytes lazily is byte-for-byte what comparing two
+            // `to_ascii_lowercase()` `String`s would give — `str` orders by
+            // bytes and the fold only ever rewrites ASCII ones — without
+            // allocating either of them.
+            Self::Title => [
+                Some((
+                    left.title
+                        .bytes()
+                        .map(|byte| byte.to_ascii_lowercase())
+                        .cmp(right.title.bytes().map(|byte| byte.to_ascii_lowercase())),
+                    FragmentDirection::Follow,
+                )),
+                None,
+            ],
+            Self::Id => [
+                Some((left.id.cmp(&right.id), FragmentDirection::Follow)),
+                None,
+            ],
         }
     }
 }
@@ -360,7 +406,7 @@ impl SortSpec {
         let mut sql = String::from(" ORDER BY ");
         let mut first = true;
         for key in self.resolved(reverse) {
-            for (expression, mode) in key.field.sql_fragments() {
+            for (expression, mode) in key.field.sql_fragments().into_iter().flatten() {
                 if !first {
                     sql.push_str(", ");
                 }
@@ -375,27 +421,57 @@ impl SortSpec {
         sql
     }
 
+    /// A comparator over this spec, for sorting a collection.
+    ///
+    /// [`Self::resolved`] is walked once, here, and the result captured — so
+    /// the returned closure allocates nothing at all. Prefer this to
+    /// [`Self::compare`] for anything larger than a handful of comparisons:
+    /// `sort_by` calls its closure O(n log n) times, so work done per call is
+    /// work done n log n times.
+    #[must_use]
+    pub fn comparator(&self, reverse: bool) -> impl Fn(&Issue, &Issue) -> Ordering + use<> {
+        let keys = self.resolved(reverse);
+        move |left, right| compare_resolved(&keys, left, right)
+    }
+
     /// Compare two issues under this spec. The in-memory counterpart of
     /// [`Self::order_by_sql`]; both walk [`Self::resolved`].
+    ///
+    /// Resolves the spec on every call. To sort a collection use
+    /// [`Self::comparator`], which resolves once.
     #[must_use]
     pub fn compare(&self, left: &Issue, right: &Issue, reverse: bool) -> Ordering {
-        for key in self.resolved(reverse) {
-            for (ordering, mode) in key.field.compare_fragments(left, right) {
-                let direction = match mode {
-                    FragmentDirection::ForceAsc => SortDirection::Asc,
-                    FragmentDirection::Follow => key.direction,
-                };
-                let ordering = match direction {
-                    SortDirection::Asc => ordering,
-                    SortDirection::Desc => ordering.reverse(),
-                };
-                if ordering != Ordering::Equal {
-                    return ordering;
-                }
+        compare_resolved(&self.resolved(reverse), left, right)
+    }
+}
+
+/// The whole in-memory ordering, over an already-resolved key list.
+///
+/// Both [`SortSpec::compare`] and [`SortSpec::comparator`] end here, so there
+/// is exactly one implementation of the comparison and the cheap path cannot
+/// drift from the convenient one.
+fn compare_resolved(keys: &[SortKey], left: &Issue, right: &Issue) -> Ordering {
+    for key in keys {
+        for (ordering, mode) in key
+            .field
+            .compare_fragments(left, right)
+            .into_iter()
+            .flatten()
+        {
+            let direction = match mode {
+                FragmentDirection::ForceAsc => SortDirection::Asc,
+                FragmentDirection::Follow => key.direction,
+            };
+            let ordering = match direction {
+                SortDirection::Asc => ordering,
+                SortDirection::Desc => ordering.reverse(),
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
             }
         }
-        Ordering::Equal
     }
+    Ordering::Equal
 }
 
 impl FromStr for SortSpec {
@@ -459,9 +535,22 @@ mod tests {
         issue
     }
 
+    /// Orders through `comparator`, the path the CLI takes, and asserts on the
+    /// way past that `compare` — the single-shot convenience — would have said
+    /// the same thing. Every ordering test below therefore checks both.
     fn order(spec_str: &str, reverse: bool, mut issues: Vec<Issue>) -> Vec<String> {
         let parsed = spec(spec_str);
-        issues.sort_by(|left, right| parsed.compare(left, right, reverse));
+
+        let mut one_shot = issues.clone();
+        one_shot.sort_by(|left, right| parsed.compare(left, right, reverse));
+
+        issues.sort_by(parsed.comparator(reverse));
+
+        assert_eq!(
+            issues.iter().map(|i| &i.id).collect::<Vec<_>>(),
+            one_shot.iter().map(|i| &i.id).collect::<Vec<_>>(),
+            "'{spec_str}' reverse={reverse}: compare disagreed with comparator"
+        );
         issues.into_iter().map(|i| i.id).collect()
     }
 

@@ -196,9 +196,23 @@ proptest! {
         let from_sql = storage.list_issues(&filters).expect("list");
         let sql_ids: Vec<String> = from_sql.iter().map(|i| i.id.clone()).collect();
 
+        // `comparator`, not `compare`: this is the call the CLI actually makes
+        // when it sorts, so it is the one whose agreement with SQL matters.
         let mut in_memory = issues.clone();
-        in_memory.sort_by(|left, right| spec.compare(left, right, reverse));
+        in_memory.sort_by(spec.comparator(reverse));
         let memory_ids: Vec<String> = in_memory.iter().map(|i| i.id.clone()).collect();
+
+        // …and the single-shot convenience must not drift from it.
+        let mut one_shot = issues.clone();
+        one_shot.sort_by(|left, right| spec.compare(left, right, reverse));
+        let one_shot_ids: Vec<String> = one_shot.iter().map(|i| i.id.clone()).collect();
+        prop_assert_eq!(
+            &memory_ids,
+            &one_shot_ids,
+            "spec {:?} reverse={}: compare disagreed with comparator",
+            spec_text,
+            reverse
+        );
 
         prop_assert_eq!(
             sql_ids,

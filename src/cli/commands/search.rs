@@ -622,7 +622,10 @@ fn apply_sort_by_issue<T>(
         &default_spec
     };
 
-    items.sort_by(|left, right| spec.compare(issue_of(left), issue_of(right), reverse));
+    // `comparator` resolves the spec once; `compare` would resolve it on every
+    // one of the O(n log n) calls `sort_by` makes.
+    let compare = spec.comparator(reverse);
+    items.sort_by(|left, right| compare(issue_of(left), issue_of(right)));
     Ok(())
 }
 
