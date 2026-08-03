@@ -132,9 +132,6 @@ fn execute_inner(
         ul
     };
 
-    // Validate sort key before query
-    validate_sort_key(args.sort.as_deref())?;
-
     let use_projected_text_rows = matches!(output_format, OutputFormat::Text)
         && !args.long
         && !args.pretty
@@ -629,20 +626,6 @@ fn render_pretty_text_issues(
     }
 }
 
-fn validate_sort_key(sort: Option<&str>) -> Result<()> {
-    let Some(sort_key) = sort else {
-        return Ok(());
-    };
-
-    match sort_key {
-        "priority" | "created_at" | "updated_at" | "title" | "created" | "updated" => Ok(()),
-        _ => Err(BeadsError::Validation {
-            field: "sort".to_string(),
-            reason: format!("invalid sort field '{sort_key}'"),
-        }),
-    }
-}
-
 fn validate_priority_bounds(priority_min: Option<u8>, priority_max: Option<u8>) -> Result<()> {
     if let Some(min) = priority_min.map(i32::from)
         && !(0..=4).contains(&min)
@@ -682,7 +665,6 @@ mod tests {
     /// chains are still live on the `list` path.
     fn validate_list_args(args: &ListArgs) -> Result<()> {
         let _ = build_filters(args)?;
-        validate_sort_key(args.sort.as_deref())?;
         validate_priority_bounds(args.priority_min, args.priority_max)?;
         Ok(())
     }

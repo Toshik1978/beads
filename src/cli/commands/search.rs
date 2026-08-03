@@ -119,6 +119,7 @@ fn collect_search_results_with_projection(
     use_text_projection: bool,
 ) -> Result<Vec<Issue>> {
     let mut filters = build_filters(list_args)?;
+    let sort_spec = filters.sort.clone();
     let client_filters = needs_client_filters(list_args);
     let needs_post_query_ordering = requires_post_query_ordering(list_args, client_filters);
     let (offset, limit) = if needs_post_query_ordering {
@@ -143,7 +144,7 @@ fn collect_search_results_with_projection(
     };
 
     if needs_post_query_ordering {
-        apply_issue_sort(&mut issues, list_args.sort.as_deref(), list_args.reverse)?;
+        apply_issue_sort(&mut issues, sort_spec.as_ref(), list_args.reverse)?;
         if let Some(offset) = offset
             && offset > 0
         {
@@ -407,8 +408,6 @@ fn normalize_whitespace(input: &str) -> String {
 }
 
 fn build_filters(args: &ListArgs) -> Result<ListFilters> {
-    validate_sort_key(args.sort.as_deref())?;
-
     let statuses = if args.status.is_empty() {
         None
     } else {
@@ -501,20 +500,6 @@ fn needs_client_filters(args: &ListArgs) -> bool {
 
 fn requires_post_query_ordering(_args: &ListArgs, client_filters: bool) -> bool {
     client_filters
-}
-
-fn validate_sort_key(sort: Option<&str>) -> Result<()> {
-    let Some(sort_key) = sort else {
-        return Ok(());
-    };
-
-    match sort_key {
-        "priority" | "created_at" | "created" | "updated_at" | "updated" | "title" => Ok(()),
-        _ => Err(BeadsError::Validation {
-            field: "sort".to_string(),
-            reason: format!("invalid sort field '{sort_key}'"),
-        }),
-    }
 }
 
 fn apply_client_filters(
@@ -620,95 +605,39 @@ fn apply_client_filters(
     Ok(filtered)
 }
 
+// `Result` is kept (rather than returning `()`) so both call sites below can
+// keep using `?` without reshaping — sorting itself is now infallible.
+#[allow(clippy::unnecessary_wraps)]
 fn apply_sort_by_issue<T>(
     items: &mut [T],
-    sort: Option<&str>,
+    sort: Option<&SortSpec>,
     reverse: bool,
     mut issue_of: impl FnMut(&T) -> &crate::model::Issue,
 ) -> Result<()> {
-    match sort {
-        None | Some("priority") => {
-            if reverse {
-                items.sort_by_cached_key(|item| {
-                    let issue = issue_of(item);
-                    (
-                        std::cmp::Reverse(issue.priority),
-                        issue.created_at,
-                        issue.id.clone(),
-                    )
-                });
-            } else {
-                items.sort_by_cached_key(|item| {
-                    let issue = issue_of(item);
-                    (
-                        issue.priority,
-                        std::cmp::Reverse(issue.created_at),
-                        issue.id.clone(),
-                    )
-                });
-            }
-        }
-        Some("created_at" | "created") => {
-            if reverse {
-                items.sort_by_cached_key(|item| {
-                    let issue = issue_of(item);
-                    (issue.created_at, issue.id.clone())
-                });
-            } else {
-                items.sort_by_cached_key(|item| {
-                    let issue = issue_of(item);
-                    (std::cmp::Reverse(issue.created_at), issue.id.clone())
-                });
-            }
-        }
-        Some("updated_at" | "updated") => {
-            if reverse {
-                items.sort_by_cached_key(|item| {
-                    let issue = issue_of(item);
-                    (issue.updated_at, issue.id.clone())
-                });
-            } else {
-                items.sort_by_cached_key(|item| {
-                    let issue = issue_of(item);
-                    (std::cmp::Reverse(issue.updated_at), issue.id.clone())
-                });
-            }
-        }
-        Some("title") => {
-            if reverse {
-                items.sort_by_cached_key(|item| {
-                    let issue = issue_of(item);
-                    (
-                        std::cmp::Reverse(issue.title.to_lowercase()),
-                        issue.id.clone(),
-                    )
-                });
-            } else {
-                items.sort_by_cached_key(|item| {
-                    let issue = issue_of(item);
-                    (issue.title.to_lowercase(), issue.id.clone())
-                });
-            }
-        }
-        Some(sort_key) => {
-            return Err(BeadsError::Validation {
-                field: "sort".to_string(),
-                reason: format!("invalid sort field '{sort_key}'"),
-            });
-        }
-    }
+    let default_spec;
+    let spec = if let Some(spec) = sort {
+        spec
+    } else {
+        default_spec = SortSpec::default_order();
+        &default_spec
+    };
 
+    items.sort_by(|left, right| spec.compare(issue_of(left), issue_of(right), reverse));
     Ok(())
 }
 
 #[cfg(test)]
-fn apply_sort(issues: &mut [IssueWithCounts], sort: Option<&str>, reverse: bool) -> Result<()> {
+fn apply_sort(
+    issues: &mut [IssueWithCounts],
+    sort: Option<&SortSpec>,
+    reverse: bool,
+) -> Result<()> {
     apply_sort_by_issue(issues, sort, reverse, |issue| &issue.issue)
 }
 
 fn apply_issue_sort(
     issues: &mut [crate::model::Issue],
-    sort: Option<&str>,
+    sort: Option<&SortSpec>,
     reverse: bool,
 ) -> Result<()> {
     apply_sort_by_issue(issues, sort, reverse, |issue| issue)
@@ -924,9 +853,48 @@ mod tests {
             older_created_but_newer_updated,
         ];
 
-        apply_issue_sort(&mut items, Some("updated"), false).expect("sort");
+        let spec: SortSpec = "updated".parse().expect("valid spec");
+        apply_issue_sort(&mut items, Some(&spec), false).expect("sort");
         items.truncate(1);
         assert_eq!(items[0].id, "bd-b");
+    }
+
+    #[test]
+    fn in_memory_sort_accepts_a_multi_key_spec() {
+        let spec: SortSpec = "priority,updated".parse().expect("valid spec");
+        let t_old = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t_new = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+
+        let mut c = make_issue("c", "c", None, t_old);
+        c.priority = Priority(1);
+        let mut a = make_issue("a", "a", None, t_old);
+        a.priority = Priority(0);
+        let mut b = make_issue("b", "b", None, t_old);
+        b.priority = Priority(1);
+        b.updated_at = t_new;
+
+        let mut issues = vec![c, a, b];
+
+        apply_issue_sort(&mut issues, Some(&spec), false).expect("sort");
+
+        let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn in_memory_sort_defaults_to_the_legacy_priority_ordering() {
+        let t_old = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t_new = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+
+        let old = make_issue("old", "old", None, t_old);
+        let new = make_issue("new", "new", None, t_new);
+        let mut issues = vec![old, new];
+
+        apply_issue_sort(&mut issues, None, false).expect("sort");
+
+        // priority ASC, created_at DESC — newest first within the band.
+        let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["new", "old"]);
     }
 
     #[test]
@@ -1111,7 +1079,13 @@ mod tests {
 
         let mut issues = storage.search_issues("match", &filters).expect("search");
 
-        apply_issue_sort(&mut issues, args.sort.as_deref(), args.reverse).expect("sort");
+        let sort_spec: Option<SortSpec> = args
+            .sort
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .expect("valid spec");
+        apply_issue_sort(&mut issues, sort_spec.as_ref(), args.reverse).expect("sort");
         if let Some(limit) = limit {
             issues.truncate(limit);
         }
@@ -1166,9 +1140,10 @@ mod tests {
             },
         ];
 
-        apply_sort(&mut items, Some("title"), false).expect("sort");
+        let spec: SortSpec = "title".parse().expect("valid spec");
+        apply_sort(&mut items, Some(&spec), false).expect("sort");
         assert_eq!(items[0].issue.title, "Alpha");
-        apply_sort(&mut items, Some("title"), true).expect("sort");
+        apply_sort(&mut items, Some(&spec), true).expect("sort");
         assert_eq!(items[0].issue.title, "Beta");
     }
 
@@ -1193,7 +1168,8 @@ mod tests {
             },
         ];
 
-        apply_sort(&mut items, Some("created_at"), false).expect("sort");
+        let spec: SortSpec = "created_at".parse().expect("valid spec");
+        apply_sort(&mut items, Some(&spec), false).expect("sort");
         assert_eq!(items[0].issue.id, "bd-new");
     }
 
