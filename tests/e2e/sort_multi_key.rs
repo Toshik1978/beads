@@ -87,12 +87,23 @@ fn multi_key_sort_orders_by_the_second_key_within_each_band() {
 #[test]
 fn status_sorts_in_workflow_order_not_alphabetical_order() {
     let workspace = seeded();
-    let ids = list_field(&workspace, &["list", "--json"], "id", "list all");
-    let first = ids[0].trim_matches('"').to_string();
+    let mut ids: Vec<String> = list_field(&workspace, &["list", "--json"], "id", "list all")
+        .iter()
+        .map(|id| id.trim_matches('"').to_string())
+        .collect();
+    ids.sort();
+
+    // Block the *lexicographically smallest* id, not an arbitrary one. Ids
+    // here are content-hashed, so blocking an arbitrary issue would leave
+    // this test discriminating only by luck: were the status key ignored the
+    // implicit `id ASC` terminator would decide, and the blocked issue would
+    // land last — passing the assertion — roughly three times in four.
+    // Blocking the smallest id makes that failure land first, always.
+    let smallest = ids.first().expect("seeded workspace has issues").clone();
 
     let update = run_br(
         &workspace,
-        ["update", &first, "--status", "blocked"],
+        ["update", &smallest, "--status", "blocked"],
         "block one",
     );
     assert!(update.status.success(), "update failed: {}", update.stderr);

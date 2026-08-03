@@ -70,11 +70,13 @@ fn priority_then_updated_orders_within_the_priority_band() {
 #[test]
 fn status_orders_by_workflow_rank_not_alphabetically() {
     let mut storage = test_db();
+    // Ids run counter to workflow rank: were the status key dropped, the
+    // implicit `id ASC` terminator would put the blocked issue first.
     let open = fixtures::IssueBuilder::new("open one")
-        .with_id("aaa-open")
+        .with_id("zzz-open")
         .build();
     let blocked = fixtures::IssueBuilder::new("blocked one")
-        .with_id("zzz-blocked")
+        .with_id("aaa-blocked")
         .with_status(Status::Blocked)
         .build();
     storage.create_issue(&open, "tester").expect("create");
@@ -85,7 +87,7 @@ fn status_orders_by_workflow_rank_not_alphabetically() {
         .expect("list");
 
     // Alphabetically 'blocked' precedes 'open'; by workflow rank it does not.
-    assert_eq!(ids(&issues), vec!["aaa-open", "zzz-blocked"]);
+    assert_eq!(ids(&issues), vec!["zzz-open", "aaa-blocked"]);
 }
 
 #[test]

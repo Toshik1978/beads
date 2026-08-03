@@ -575,32 +575,40 @@ mod tests {
 
     #[test]
     fn status_orders_by_rank_not_alphabetically() {
-        let mut open = issue("a");
+        // Ids run counter to rank order on purpose. Were the status key
+        // dropped, the implicit `id ASC` terminator would produce [a, m, z] —
+        // so this pins the key doing work, not merely that it is not
+        // alphabetical by status name.
+        let mut open = issue("z");
         open.status = Status::Open;
-        let mut blocked = issue("b");
+        let mut blocked = issue("m");
         blocked.status = Status::Blocked;
-        let mut closed = issue("c");
+        let mut closed = issue("a");
         closed.status = Status::Closed;
 
-        // Alphabetically this would be blocked, closed, open.
+        // Alphabetically by status this would be blocked, closed, open.
         assert_eq!(
             order("status", false, vec![closed, blocked, open]),
-            vec!["a", "b", "c"]
+            vec!["z", "m", "a"]
         );
     }
 
     #[test]
     fn custom_statuses_sort_last_and_alphabetically_among_themselves() {
-        let mut known = issue("a");
+        // Ids contradict the expected order twice over: dropping the rank
+        // fragment leaves [a, m, z] by the id terminator, and dropping only
+        // the name fragment leaves the two customs tied on rank, so `zeta`
+        // ("a") would precede `alpha` ("m"). Both fragments have to work.
+        let mut known = issue("z");
         known.status = Status::Pinned;
-        let mut zeta = issue("z");
+        let mut zeta = issue("a");
         zeta.status = Status::Custom("zeta".to_string());
         let mut alpha = issue("m");
         alpha.status = Status::Custom("alpha".to_string());
 
         assert_eq!(
             order("status", false, vec![zeta, alpha, known]),
-            vec!["a", "m", "z"]
+            vec!["z", "m", "a"]
         );
     }
 
