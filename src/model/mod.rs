@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
+pub mod sort;
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(b: &bool) -> bool {
     !*b
