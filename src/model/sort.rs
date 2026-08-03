@@ -4,11 +4,12 @@
 //! into a SQL `ORDER BY` clause, and into an in-memory comparator. Both read
 //! `resolved()`, so the two engines cannot disagree about the effective order.
 
+use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::str::FromStr;
 
 use crate::error::{BeadsError, Result};
-use crate::model::{IssueType, Status};
+use crate::model::{Issue, IssueType, Status};
 
 /// A column the result set can be ordered by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,6 +90,80 @@ impl SortField {
                 FragmentDirection::Follow,
             )],
             Self::Id => vec![("id".to_string(), FragmentDirection::Follow)],
+        }
+    }
+
+    /// The comparisons this field orders by, in the same order and with the
+    /// same direction modes as [`Self::sql_fragments`]. Keeping the two in
+    /// lockstep is what makes the SQL and in-memory orderings agree.
+    fn compare_fragments(self, left: &Issue, right: &Issue) -> Vec<(Ordering, FragmentDirection)> {
+        match self {
+            Self::Priority => vec![(
+                left.priority.cmp(&right.priority),
+                FragmentDirection::Follow,
+            )],
+            Self::Status => vec![
+                (
+                    left.status.sort_rank().cmp(&right.status.sort_rank()),
+                    FragmentDirection::Follow,
+                ),
+                (
+                    left.status.as_str().cmp(right.status.as_str()),
+                    FragmentDirection::Follow,
+                ),
+            ],
+            Self::Type => vec![
+                (
+                    left.issue_type
+                        .sort_rank()
+                        .cmp(&right.issue_type.sort_rank()),
+                    FragmentDirection::Follow,
+                ),
+                (
+                    left.issue_type.as_str().cmp(right.issue_type.as_str()),
+                    FragmentDirection::Follow,
+                ),
+            ],
+            Self::Assignee => {
+                // Matches NULLIF(assignee,''): only the empty string folds,
+                // not whitespace.
+                let fold = |issue: &Issue| -> Option<String> {
+                    issue
+                        .assignee
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                };
+                let (left_name, right_name) = (fold(left), fold(right));
+                vec![
+                    (
+                        u8::from(left_name.is_none()).cmp(&u8::from(right_name.is_none())),
+                        FragmentDirection::ForceAsc,
+                    ),
+                    (
+                        left_name
+                            .unwrap_or_default()
+                            .cmp(&right_name.unwrap_or_default()),
+                        FragmentDirection::Follow,
+                    ),
+                ]
+            }
+            Self::CreatedAt => vec![(
+                left.created_at.cmp(&right.created_at),
+                FragmentDirection::Follow,
+            )],
+            Self::UpdatedAt => vec![(
+                left.updated_at.cmp(&right.updated_at),
+                FragmentDirection::Follow,
+            )],
+            // ASCII-only fold, matching SQLite's COLLATE NOCASE.
+            Self::Title => vec![(
+                left.title
+                    .to_ascii_lowercase()
+                    .cmp(&right.title.to_ascii_lowercase()),
+                FragmentDirection::Follow,
+            )],
+            Self::Id => vec![(left.id.cmp(&right.id), FragmentDirection::Follow)],
         }
     }
 }
@@ -261,6 +336,28 @@ impl SortSpec {
         }
         sql
     }
+
+    /// Compare two issues under this spec. The in-memory counterpart of
+    /// [`Self::order_by_sql`]; both walk [`Self::resolved`].
+    #[must_use]
+    pub fn compare(&self, left: &Issue, right: &Issue, reverse: bool) -> Ordering {
+        for key in self.resolved(reverse) {
+            for (ordering, mode) in key.field.compare_fragments(left, right) {
+                let direction = match mode {
+                    FragmentDirection::ForceAsc => SortDirection::Asc,
+                    FragmentDirection::Follow => key.direction,
+                };
+                let ordering = match direction {
+                    SortDirection::Asc => ordering,
+                    SortDirection::Desc => ordering.reverse(),
+                };
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
+        Ordering::Equal
+    }
 }
 
 impl FromStr for SortSpec {
@@ -307,15 +404,147 @@ impl FromStr for SortSpec {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
+    use crate::model::{Issue, Priority, Status};
+    use chrono::{TimeZone, Utc};
+    use std::cmp::Ordering;
 
     fn spec(input: &str) -> SortSpec {
         input.parse().expect("valid spec")
     }
 
+    fn issue(id: &str) -> Issue {
+        let mut issue = Issue::default();
+        issue.id = id.to_string();
+        issue.created_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        issue.updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        issue
+    }
+
+    fn order(spec_str: &str, reverse: bool, mut issues: Vec<Issue>) -> Vec<String> {
+        let parsed = spec(spec_str);
+        issues.sort_by(|left, right| parsed.compare(left, right, reverse));
+        issues.into_iter().map(|i| i.id).collect()
+    }
+
     fn fields(keys: &[SortKey]) -> Vec<(SortField, SortDirection)> {
         keys.iter().map(|k| (k.field, k.direction)).collect()
+    }
+
+    #[test]
+    fn compares_by_priority_then_falls_through_to_id() {
+        let mut low = issue("b");
+        low.priority = Priority(3);
+        let mut high = issue("a");
+        high.priority = Priority(0);
+        let mut tie = issue("c");
+        tie.priority = Priority(0);
+
+        assert_eq!(
+            order("+priority", false, vec![low, high, tie]),
+            vec!["a", "c", "b"]
+        );
+    }
+
+    #[test]
+    fn status_orders_by_rank_not_alphabetically() {
+        let mut open = issue("a");
+        open.status = Status::Open;
+        let mut blocked = issue("b");
+        blocked.status = Status::Blocked;
+        let mut closed = issue("c");
+        closed.status = Status::Closed;
+
+        // Alphabetically this would be blocked, closed, open.
+        assert_eq!(
+            order("status", false, vec![closed, blocked, open]),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn custom_statuses_sort_last_and_alphabetically_among_themselves() {
+        let mut known = issue("a");
+        known.status = Status::Pinned;
+        let mut zeta = issue("z");
+        zeta.status = Status::Custom("zeta".to_string());
+        let mut alpha = issue("m");
+        alpha.status = Status::Custom("alpha".to_string());
+
+        assert_eq!(
+            order("status", false, vec![zeta, alpha, known]),
+            vec!["a", "m", "z"]
+        );
+    }
+
+    #[test]
+    fn unassigned_sorts_last_in_both_directions() {
+        let mut anna = issue("a");
+        anna.assignee = Some("anna".to_string());
+        let mut zoe = issue("z");
+        zoe.assignee = Some("zoe".to_string());
+        let nobody = issue("n"); // assignee: None
+        let mut blank = issue("e");
+        blank.assignee = Some(String::new()); // folded to unassigned like NULLIF
+
+        let ascending = order(
+            "assignee",
+            false,
+            vec![zoe.clone(), nobody.clone(), blank.clone(), anna.clone()],
+        );
+        assert_eq!(ascending, vec!["a", "z", "e", "n"]);
+
+        let descending = order("-assignee", false, vec![zoe, nobody, blank, anna]);
+        assert_eq!(descending, vec!["z", "a", "e", "n"]);
+    }
+
+    #[test]
+    fn title_folds_ascii_case_only() {
+        let mut upper = issue("a");
+        upper.title = "Beta".to_string();
+        let mut lower = issue("b");
+        lower.title = "alpha".to_string();
+
+        assert_eq!(order("title", false, vec![upper, lower]), vec!["b", "a"]);
+    }
+
+    #[test]
+    fn reverse_flips_keys_but_id_still_breaks_ties_ascending() {
+        let mut first = issue("a");
+        first.priority = Priority(1);
+        let mut second = issue("b");
+        second.priority = Priority(1);
+
+        assert_eq!(
+            order("+priority", true, vec![second, first]),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn multi_key_falls_through_in_order() {
+        let mut a = issue("a");
+        a.priority = Priority(1);
+        a.updated_at = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+        let mut b = issue("b");
+        b.priority = Priority(1);
+        b.updated_at = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let mut c = issue("c");
+        c.priority = Priority(0);
+        c.updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+        // priority ASC first, then updated_at DESC within the priority-1 band.
+        assert_eq!(
+            order("priority,updated", false, vec![a, b, c]),
+            vec!["c", "b", "a"]
+        );
+    }
+
+    #[test]
+    fn an_exhausted_spec_reports_equal_only_for_the_same_id() {
+        let left = issue("a");
+        let right = issue("a");
+        assert_eq!(spec("title").compare(&left, &right, false), Ordering::Equal);
     }
 
     #[test]
