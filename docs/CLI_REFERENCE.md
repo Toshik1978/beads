@@ -259,10 +259,19 @@ br list [OPTIONS]
 `-` forces descending and `+` forces ascending. `--reverse` flips every key.
 Every sort ends with an implicit `id` tiebreaker, so output is deterministic.
 
+A key that *begins* with `-` (a leading key with no other key before it, e.g.
+`-updated`) must be attached to `--sort` with `=`: `--sort=-updated`, not
+`--sort -updated`. Written as two arguments, the shell hands `-updated` to
+clap as the next token, and clap reads its leading `-` as another flag rather
+than as `--sort`'s value — the same class of problem `--acceptance-criteria`
+and the other free-text flags have with `-`-leading values. A `-` prefix on a
+second or later key (`priority,-updated`) does not need `=`, because it no
+longer begins the argument.
+
 ```bash
 br list --sort priority,updated     # critical first, most recent within each band
 br list --sort status,priority      # group by workflow state, then priority
-br list --sort -updated             # oldest first
+br list --sort=-updated             # oldest first
 ```
 
 `--sort priority` on its own keeps its historical tiebreaker and is

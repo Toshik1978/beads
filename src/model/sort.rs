@@ -30,6 +30,12 @@ impl SortField {
     /// Every user-facing field, in the order the documentation lists them.
     /// `Id` is deliberately absent: it is the implicit terminator, not a key
     /// anyone can ask for.
+    ///
+    /// [`Self::parse`] reads this list rather than matching the enum
+    /// directly, so a variant absent from `ALL` is simply not parseable — do
+    /// not "simplify" `parse` back into a standalone match, or a new field
+    /// could become usable from `--sort` without ever being offered by
+    /// completion or documented.
     pub const ALL: &'static [Self] = &[
         Self::Priority,
         Self::Status,
@@ -65,17 +71,21 @@ impl SortField {
         }
     }
 
+    /// Parses a `--sort` key name against [`Self::ALL`], so a variant not
+    /// listed there cannot be reached this way regardless of what arm this
+    /// function's `match` might otherwise have. `created`/`updated` are the
+    /// only aliases — spellings that do not equal any [`Self::canonical_name`]
+    /// — so they are handled explicitly before the lookup.
     fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "priority" => Self::Priority,
-            "status" => Self::Status,
-            "type" => Self::Type,
-            "assignee" => Self::Assignee,
-            "created_at" | "created" => Self::CreatedAt,
-            "updated_at" | "updated" => Self::UpdatedAt,
-            "title" => Self::Title,
-            _ => return None,
-        })
+        match name {
+            "created" => return Some(Self::CreatedAt),
+            "updated" => return Some(Self::UpdatedAt),
+            _ => {}
+        }
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|field| field.canonical_name() == name)
     }
 
     /// The SQL fragments this field orders by, in order.

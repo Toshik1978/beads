@@ -1264,7 +1264,9 @@ pub struct ListArgs {
     /// `created_at`, `updated_at`, `title`. Prefix a key with `-` for
     /// descending or `+` for ascending; a bare key uses its natural direction
     /// (timestamps newest first, everything else ascending). Example:
-    /// `--sort priority,-updated`
+    /// `--sort priority,-updated`. If the first key starts with `-`, write
+    /// `--sort=-updated` so the shell doesn't hand `-updated` to clap as its
+    /// own flag.
     #[arg(long, add = ArgValueCompleter::new(sort_key_completer))]
     pub sort: Option<String>,
 
