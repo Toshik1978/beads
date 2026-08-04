@@ -7311,6 +7311,16 @@ impl SqliteStorage {
             Self::rewrite_issue_id(conn, old_id, new_id)?;
             ctx.mark_dirty(new_id);
 
+            // `rewrite_issue_id` only moves the `blocked_issues_cache` row
+            // keyed by `issue_id`; any *other* row whose `blocked_by` JSON
+            // blob names the old id as a blocker is untouched by that update
+            // (that JSON is opaque to plain SQL). A full rebuild is the only
+            // way to purge the old id out of every such blob — an incremental
+            // one would need the set of every issue currently blocked by
+            // anything in this subtree, which is exactly the query the
+            // rebuild already does.
+            ctx.invalidate_cache();
+
             Ok(())
         })
     }

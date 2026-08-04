@@ -154,11 +154,98 @@ fn rename_rejects_a_new_id_that_is_already_taken() {
 }
 
 #[test]
-fn rename_leaves_nothing_behind_on_failure() {
+fn rename_front_door_collision_leaves_the_subtree_untouched() {
+    // NB: this only exercises the up-front `id_exists(new_id)` guard, which
+    // returns *before* the write transaction ever opens — no rollback is
+    // involved. It's still worth keeping (the guard must not touch
+    // descendants either), but `rename_rolls_back_earlier_cascade_writes_on_a_later_failure`
+    // below is the test that actually exercises transactional atomicity.
     let mut storage = tree();
 
     let _ = storage.rename_issue("bd-p.1", "bd-p.2", "tester");
 
-    // The whole thing is one transaction, so the subtree must be untouched too.
     assert!(storage.get_issue("bd-p.1.1").unwrap().is_some());
+}
+
+#[test]
+fn rename_rolls_back_earlier_cascade_writes_on_a_later_failure() {
+    // `bd-q.1` is occupied by an unrelated issue; `bd-q` and `bd-q.1.1` are
+    // free, so the up-front `id_exists("bd-q")` guard passes and the cascade
+    // actually begins inside `mutate()`'s transaction. Descendants rename
+    // deepest-first (`descendant_ids_returns_every_depth_deepest_first`
+    // above), so for a rename of `bd-p` -> `bd-q` the order is `bd-p.1.1`,
+    // then `bd-p.1`, then `bd-p.2`. The first `UPDATE issues SET id =
+    // 'bd-q.1.1'` succeeds *inside* the transaction; the second then hits a
+    // real `PRIMARY KEY` collision renaming `bd-p.1` to the already-occupied
+    // `bd-q.1`. A genuinely transactional `rename_issue` must undo that
+    // already-applied first write along with everything else — which is what
+    // distinguishes this from a non-transactional implementation that simply
+    // stops on the first failure and leaves prior renames in place.
+    let mut storage = tree();
+    let mut occupied = fixtures::issue("bd-q.1");
+    occupied.id = "bd-q.1".to_string();
+    storage.create_issue(&occupied, "tester").unwrap();
+
+    storage
+        .rename_issue("bd-p", "bd-q", "tester")
+        .expect_err("bd-q.1 is already occupied by an unrelated issue");
+
+    assert!(
+        storage.get_issue("bd-p.1.1").unwrap().is_some(),
+        "the descendant renamed earlier in the cascade must have been rolled back"
+    );
+    assert!(
+        storage.get_issue("bd-q.1.1").unwrap().is_none(),
+        "the earlier, already-applied rename must not have survived the rollback"
+    );
+    assert!(storage.get_issue("bd-p").unwrap().is_some());
+    assert!(storage.get_issue("bd-p.1").unwrap().is_some());
+    assert!(storage.get_issue("bd-p.2").unwrap().is_some());
+    assert!(
+        storage.get_issue("bd-q").unwrap().is_none(),
+        "the top-level rename must not have taken effect either"
+    );
+    assert!(
+        storage.get_issue("bd-q.1").unwrap().is_some(),
+        "the pre-existing occupant of the colliding id must be untouched"
+    );
+}
+
+#[test]
+fn rename_invalidates_the_blocked_cache_for_inbound_blockers() {
+    // `blocked_issues_cache.blocked_by` is a JSON blob of blocker refs, opaque
+    // to the plain-SQL rewrite in `rewrite_issue_id`: renaming a blocker moves
+    // its own `blocked_issues_cache` row but cannot reach into some *other*
+    // issue's blob and edit the id embedded there. The only way to purge the
+    // old id out of those blobs is a cache rebuild, which is why
+    // `rename_issue` must call `ctx.invalidate_cache()`.
+    let mut storage = tree();
+    let mut other = fixtures::issue("bd-other");
+    other.id = "bd-other".to_string();
+    storage.create_issue(&other, "tester").unwrap();
+    storage
+        .add_dependency("bd-other", "bd-p.2", "blocks", "tester")
+        .unwrap();
+
+    // Force the cache onto disk (non-stale) *before* the rename. `get_blockers`
+    // falls back to an in-memory recompute from `dependencies`/`issues`
+    // whenever the cache is merely marked stale, and that fallback would
+    // report the right answer even if `rename_issue` never invalidated
+    // anything — so without this, the test would not actually exercise the
+    // bug.
+    storage.rebuild_blocked_cache(true).unwrap();
+    assert_eq!(
+        storage.get_blockers("bd-other").unwrap(),
+        vec!["bd-p.2".to_string()],
+        "sanity check: the cache must be populated with the pre-rename blocker"
+    );
+
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    assert_eq!(
+        storage.get_blockers("bd-other").unwrap(),
+        vec!["bd-new".to_string()],
+        "blocked_issues_cache still names the vacated id — rename_issue must \
+         invalidate the cache"
+    );
 }
