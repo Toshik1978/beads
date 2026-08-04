@@ -404,6 +404,28 @@ const KNOWN_METADATA_DEFAULTS: [(&str, &str); 7] = [
 // the delete batched/full-table, but re-insert rows individually.
 const BLOCKED_CACHE_DELETE_CHUNK_SIZE: usize = 400;
 const DIRTY_ISSUE_CHUNK_SIZE: usize = 900;
+
+/// Every `(table, column)` pair in the schema that stores an issue ID.
+///
+/// `rename_issue`'s single-node helper (`SqliteStorage::rewrite_issue_id`)
+/// walks this list to move a row from one ID to another. A future
+/// introspection guard is expected to walk `PRAGMA table_info` and fail if a
+/// table gains an ID-bearing column missing from this list — add the pair
+/// rather than weakening that guard.
+pub(crate) const ID_BEARING_COLUMNS: &[(&str, &str)] = &[
+    ("dependencies", "issue_id"),
+    // No foreign key on this one (schema.rs:132, kept so `external:` refs can
+    // dangle), so a missed rewrite here fails silently rather than loudly.
+    ("dependencies", "depends_on_id"),
+    ("labels", "issue_id"),
+    ("comments", "issue_id"),
+    ("dirty_issues", "issue_id"),
+    ("export_hashes", "issue_id"),
+    ("blocked_issues_cache", "issue_id"),
+    ("child_counters", "parent_id"),
+    ("close_metadata", "issue_id"),
+];
+
 /// SQLite-based storage backend.
 #[derive(Debug)]
 pub struct SqliteStorage {
@@ -7189,6 +7211,108 @@ impl SqliteStorage {
             }
         }
         Ok(result)
+    }
+
+    /// Move one issue from `old_id` to `new_id`, rewriting every reference.
+    ///
+    /// One node only — subtree cascade belongs to [`Self::rename_issue`].
+    ///
+    /// The caller must already be inside a [`Self::mutate`] closure, whose
+    /// connection-scoped `PRAGMA foreign_keys = OFF` is what makes this safe:
+    /// no foreign key in this schema declares `ON UPDATE`, and the `issues`
+    /// row moves before its referencing rows do.
+    fn rewrite_issue_id(conn: &Connection, old_id: &str, new_id: &str) -> Result<()> {
+        conn.execute_with_params(
+            "UPDATE issues SET id = ? WHERE id = ?",
+            &[SqliteValue::from(new_id), SqliteValue::from(old_id)],
+        )?;
+
+        for (table, column) in ID_BEARING_COLUMNS {
+            // Table and column names come from the compile-time slice above,
+            // never from user input, so formatting them into the SQL is sound.
+            //
+            // `OR IGNORE`, not plain `UPDATE`: `dependencies` has
+            // `PRIMARY KEY (issue_id, depends_on_id)` and `labels` has
+            // `PRIMARY KEY (issue_id, label)`, so a rewrite can collide with a
+            // row that already names both endpoints under their new spelling.
+            // `OR IGNORE` drops that redundant duplicate instead of aborting
+            // the whole rename. The single-column-PK tables in this list
+            // (`dirty_issues`, `export_hashes`, `blocked_issues_cache`,
+            // `child_counters`, `close_metadata`) can only collide with a
+            // *stale* row already sitting at `new_id`; `rename_issue` has
+            // already confirmed `new_id` names no live issue, so such a row
+            // can only be an orphan left behind by something that skipped
+            // cleanup (`purge_issue` at the time of writing does not clear
+            // `close_metadata`). `OR IGNORE` then keeps the orphan and drops
+            // the moved issue's own row for that table instead — for
+            // `dirty_issues` this is harmless (the caller re-marks `new_id`
+            // dirty below) and for the two caches it self-heals on the next
+            // rebuild, but for `close_metadata` it would silently discard the
+            // renamed issue's real close metadata in favor of someone else's
+            // leftover row. That collision requires an id `purge_issue` has
+            // already leaked, so it is accepted here rather than solved.
+            conn.execute_with_params(
+                &format!("UPDATE OR IGNORE {table} SET {column} = ? WHERE {column} = ?"),
+                &[SqliteValue::from(new_id), SqliteValue::from(old_id)],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Move `old_id` to `new_id`, carrying the entire subtree beneath it.
+    ///
+    /// Renaming `bd-p.1` to `bd-q.7` also moves `bd-p.1.1` to `bd-q.7.1`, at
+    /// every depth and in every status. The whole move is one [`Self::mutate`]
+    /// transaction: a failure at any node leaves the tree exactly as it was.
+    ///
+    /// Does **not** touch `former_ids` or write a tombstone — a later task
+    /// layers those on top. `actor` is accepted now so callers get a stable
+    /// signature; this primitive does not yet persist it anywhere, because
+    /// this schema has no per-issue audit-log table to write to (`br
+    /// history` covers JSONL export backups, not issue-level events).
+    ///
+    /// # Errors
+    ///
+    /// - `IssueNotFound` if `old_id` does not exist
+    /// - `validation` if `new_id` is already taken
+    /// - any database error, with the transaction rolled back
+    pub fn rename_issue(&mut self, old_id: &str, new_id: &str, actor: &str) -> Result<()> {
+        if !self.id_exists(old_id)? {
+            return Err(BeadsError::IssueNotFound {
+                id: old_id.to_string(),
+            });
+        }
+        if self.id_exists(new_id)? {
+            return Err(BeadsError::validation(
+                "new_id",
+                format!("{new_id} already exists"),
+            ));
+        }
+
+        tracing::debug!(old_id, new_id, actor, "rename_issue");
+
+        // Deepest-first, so renaming a node never invalidates an ID still
+        // queued behind it.
+        let descendants = self.descendant_ids(old_id)?;
+
+        self.mutate("rename_issue", |conn, ctx| {
+            for descendant in &descendants {
+                // `bd-p.1.1` under a `bd-p.1` -> `bd-q.7` move becomes
+                // `bd-q.7` + `.1` — splice the new prefix onto the tail.
+                let suffix = descendant.strip_prefix(old_id).ok_or_else(|| {
+                    BeadsError::internal(format!("{descendant} is not beneath {old_id}"))
+                })?;
+                let new_descendant_id = format!("{new_id}{suffix}");
+                Self::rewrite_issue_id(conn, descendant, &new_descendant_id)?;
+                ctx.mark_dirty(&new_descendant_id);
+            }
+
+            Self::rewrite_issue_id(conn, old_id, new_id)?;
+            ctx.mark_dirty(new_id);
+
+            Ok(())
+        })
     }
 
     /// Add a dependency between issues.
