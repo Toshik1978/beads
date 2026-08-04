@@ -8,11 +8,20 @@
 //! dependency. A flat ID makes no such claim, so detaching one only drops the
 //! dependency. An issue with no parent by either measure is a successful
 //! no-op: detaching twice in a row must succeed both times.
+//!
+//! The dep-removal and the rename are two separate `mutate` transactions
+//! (`detach_one` below), so a crash between them leaves an issue with its
+//! `parent-child` edge already gone but its ID still dotted. That is
+//! deliberately self-healing rather than a bug to fix: a re-run sees
+//! `parent == None && is_dotted`, so it skips the no-op early return (which
+//! only fires when the ID is already flat) and falls through to complete the
+//! rename. Detaching the same ID any number of times converges to the same
+//! end state.
 
 use crate::cli::DetachArgs;
 use crate::cli::commands::{
     acquire_routed_workspace_write_lock, auto_import_storage_ctx_if_stale,
-    finalize_batched_blocked_cache_refresh, resolve_issue_ids,
+    finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error, resolve_issue_ids,
 };
 use crate::config;
 use crate::error::{BeadsError, Result};
@@ -74,7 +83,32 @@ pub fn execute(
     let mut outcomes = Vec::with_capacity(resolved_ids.len());
     let mut cache_dirty = false;
     for issue_id in &resolved_ids {
-        let outcome = detach_one(&mut storage_ctx.storage, &id_gen, issue_id, &actor)?;
+        let result = detach_one(&mut storage_ctx.storage, &id_gen, issue_id, &actor);
+        // A later ID in the batch can fail (e.g. a descendant renamed out from
+        // under it by an earlier ID in the same batch — see the module test).
+        // Earlier IDs already committed their mutation by this point, so on
+        // error the cache must be left marked stale rather than silently
+        // wrong, and any no-db JSONL debt from those earlier IDs must still be
+        // flushed before the error propagates. `preserve_blocked_cache_on_error`
+        // is the same helper `reopen`/`close` use for this exact window.
+        let outcome = match preserve_blocked_cache_on_error(
+            &mut storage_ctx.storage,
+            cache_dirty,
+            "detach",
+            result,
+        ) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                if let Err(flush_err) = storage_ctx.flush_no_db_if_dirty() {
+                    tracing::warn!(
+                        error = %flush_err,
+                        original_error = %err,
+                        "failed to flush no-db JSONL after a mid-batch detach error"
+                    );
+                }
+                return Err(err);
+            }
+        };
         if outcome.action != "no_parent" {
             cache_dirty = true;
         }
@@ -184,4 +218,103 @@ fn detach_one(
         new_id: Some(new_id),
         action: "renamed".to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::commands;
+    use crate::config::CliOverrides;
+    use crate::model::{Issue, IssueType, Priority, Status};
+    use crate::output::OutputContext;
+    use crate::storage::SqliteStorage;
+    use chrono::Utc;
+    use tempfile::TempDir;
+
+    fn make_issue(id: &str, title: &str) -> Issue {
+        let now = Utc::now();
+        Issue {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: Status::Open,
+            priority: Priority::MEDIUM,
+            issue_type: IssueType::Task,
+            created_at: now,
+            updated_at: now,
+            ..Issue::default()
+        }
+    }
+
+    /// A later ID in a batch can fail after an earlier one already committed.
+    /// Renaming `child_id` also rewrites every descendant's row in place
+    /// (`rename_issue` cascades to the whole subtree), so once the batch has
+    /// processed `child_id`, the literal string `grandchild_id` no longer
+    /// names any row — it was rewritten to `<new child id>.1`. Detaching both
+    /// in the same batch is therefore a real, reachable way for the second ID
+    /// to fail with `IssueNotFound` after the first ID's mutation has already
+    /// committed, without needing to fake an error.
+    #[test]
+    fn execute_marks_the_blocked_cache_stale_when_a_later_id_in_the_batch_fails() {
+        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let ctx = OutputContext::from_flags(false, false, true);
+        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
+
+        let beads_dir = temp.path().join(".beads");
+        let db_path = beads_dir.join("beads.db");
+        let mut storage = SqliteStorage::open(&db_path).expect("storage");
+
+        let epic_id = "bd-epic";
+        let child_id = "bd-epic.1";
+        let grandchild_id = "bd-epic.1.1";
+
+        storage
+            .create_issue(&make_issue(epic_id, "Epic"), "tester")
+            .expect("create epic");
+        storage
+            .create_issue(&make_issue(child_id, "Child"), "tester")
+            .expect("create child");
+        storage
+            .create_issue(&make_issue(grandchild_id, "Grandchild"), "tester")
+            .expect("create grandchild");
+        storage
+            .add_dependency(child_id, epic_id, "parent-child", "tester")
+            .expect("child -> epic dep");
+        storage
+            .add_dependency(grandchild_id, child_id, "parent-child", "tester")
+            .expect("grandchild -> child dep");
+        drop(storage);
+
+        let args = DetachArgs {
+            ids: vec![child_id.to_string(), grandchild_id.to_string()],
+        };
+        let overrides = CliOverrides {
+            db: Some(db_path.clone()),
+            ..CliOverrides::default()
+        };
+        let err = execute(&args, false, &overrides, &ctx).expect_err("second ID must fail");
+        assert!(
+            matches!(err, BeadsError::IssueNotFound { .. }),
+            "expected IssueNotFound for the stale grandchild_id string, got: {err:?}"
+        );
+
+        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
+        assert!(
+            storage.blocked_cache_marked_stale().unwrap(),
+            "the first ID's committed dep-removal and rename must leave the \
+             blocked cache marked stale, not silently wrong, when a later ID \
+             in the same batch fails"
+        );
+
+        // The first ID's mutation really did commit despite the batch erroring:
+        // `child_id` no longer names a live issue, only a tombstone left by
+        // `rename_issue`.
+        let child_after = storage.get_issue(child_id).unwrap();
+        assert!(
+            child_after.is_some_and(|issue| issue.status == Status::Tombstone),
+            "child_id should have been renamed away by the first, successful iteration"
+        );
+    }
 }
