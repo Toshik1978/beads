@@ -34,6 +34,7 @@ fn create_issue(id: &str, title: &str, issue_type: IssueType) -> Issue {
         deleted_by: None,
         delete_reason: None,
         original_type: None,
+        former_ids: vec![],
         compaction_level: None,
         compacted_at: None,
         compacted_at_commit: None,

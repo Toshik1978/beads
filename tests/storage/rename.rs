@@ -249,3 +249,49 @@ fn rename_invalidates_the_blocked_cache_for_inbound_blockers() {
          invalidate the cache"
     );
 }
+
+#[test]
+fn former_ids_defaults_to_empty_and_round_trips_through_storage() {
+    let mut storage = test_db();
+    let mut issue = fixtures::issue("bd-f");
+    issue.id = "bd-f".to_string();
+    storage.create_issue(&issue, "tester").unwrap();
+
+    let fresh = storage.get_issue("bd-f").unwrap().expect("exists");
+    assert!(fresh.former_ids.is_empty(), "a new issue has no former IDs");
+
+    let mut with_history = fresh.clone();
+    with_history.former_ids = vec!["bd-old".to_string(), "bd-older".to_string()];
+    // NOTE: the brief named a nonexistent `update_issue_full`. The real
+    // full-issue-replace primitive on `SqliteStorage` is
+    // `upsert_issue_for_import`, used by JSONL import/sync to write every
+    // column of an `Issue` in one shot — exactly the "replace the whole row"
+    // operation this round-trip needs.
+    storage.upsert_issue_for_import(&with_history).unwrap();
+
+    let reloaded = storage.get_issue("bd-f").unwrap().expect("exists");
+    assert_eq!(reloaded.former_ids, vec!["bd-old", "bd-older"]);
+}
+
+#[test]
+fn former_ids_survives_a_jsonl_round_trip() {
+    let mut issue = fixtures::issue("bd-f");
+    issue.id = "bd-f".to_string();
+    issue.former_ids = vec!["bd-old".to_string()];
+
+    let line = serde_json::to_string(&issue).unwrap();
+    let back: beads::model::Issue = serde_json::from_str(&line).unwrap();
+
+    assert_eq!(back.former_ids, vec!["bd-old"]);
+
+    // And an issue with no former IDs must not emit the key at all — the JSONL
+    // is a tracked file and every issue gaining a `"former_ids":[]` would be a
+    // whole-file diff for nothing.
+    let mut plain = fixtures::issue("bd-g");
+    plain.id = "bd-g".to_string();
+    let plain_line = serde_json::to_string(&plain).unwrap();
+    assert!(
+        !plain_line.contains("former_ids"),
+        "empty former_ids must be skipped in serialization; got {plain_line}"
+    );
+}

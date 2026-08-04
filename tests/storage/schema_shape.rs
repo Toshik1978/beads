@@ -257,6 +257,7 @@ const EXPECTED_TABLE_COLUMNS: &[(&str, &[ColumnShape])] = &[
             ("is_template", "INTEGER", true, Some("0"), 0),
             ("source_repo_path", "TEXT", false, None, 0),
             ("agent_context", "TEXT", false, None, 0),
+            ("former_ids", "TEXT", true, Some("'[]'"), 0),
         ],
     ),
     (
@@ -414,7 +415,8 @@ const EXPECTED_TABLE_DDL: &[(&str, &str)] = &[
          original_type text default '', compaction_level integer default 0, compacted_at \
          datetime, compacted_at_commit text, original_size integer, sender text default '', \
          ephemeral integer not null default 0, pinned integer not null default 0, is_template \
-         integer not null default 0, source_repo_path text, agent_context text, check status \
+         integer not null default 0, source_repo_path text, agent_context text, former_ids \
+         text not null default '[]', check status \
          = 'closed' and closed_at is not null or status = 'tombstone' or status not in \
          'closed', 'tombstone' and closed_at is null",
     ),
@@ -670,6 +672,7 @@ const EXPECTED_JSONL_KEYS: &[&str] = &[
     "ephemeral",
     "estimated_minutes",
     "external_ref",
+    "former_ids",
     "id",
     "is_template",
     "issue_type",
@@ -1149,7 +1152,7 @@ fn fresh_init_stamps_the_current_schema_version() {
     // migrated without the stamp being written.
     assert_eq!(
         user_version(&conn),
-        17,
+        18,
         "PRAGMA user_version on a fresh database changed"
     );
     assert_eq!(
@@ -1247,6 +1250,7 @@ fn fully_populated_issue() -> Issue {
         deleted_by: Some("deleter".to_owned()),
         delete_reason: Some("reason".to_owned()),
         original_type: Some("bug".to_owned()),
+        former_ids: vec!["shape-0".to_owned()],
         compaction_level: Some(1),
         compacted_at: Some(now),
         compacted_at_commit: Some("abc123".to_owned()),

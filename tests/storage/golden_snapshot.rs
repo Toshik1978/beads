@@ -57,6 +57,7 @@ fn fixed_issue() -> Issue {
         deleted_by: None,
         delete_reason: None,
         original_type: None,
+        former_ids: vec![],
         compaction_level: Some(0),
         compacted_at: None,
         compacted_at_commit: None,

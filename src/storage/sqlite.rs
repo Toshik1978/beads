@@ -598,7 +598,8 @@ impl ReadyIssueProjection {
                          due_at, defer_until, external_ref, source_system, source_repo,
                          deleted_at, deleted_by, delete_reason, original_type,
                          compaction_level, compacted_at, compacted_at_commit, original_size,
-                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context"
+                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
+                         former_ids"
             }
             Self::Command => {
                 r"SELECT id, title, description, acceptance_criteria, notes, status, priority,
@@ -630,7 +631,8 @@ impl SearchIssueProjection {
                          due_at, defer_until, external_ref, source_system, source_repo,
                          deleted_at, deleted_by, delete_reason, original_type,
                          compaction_level, compacted_at, compacted_at_commit, original_size,
-                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context
+                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
+                         former_ids
                   FROM issues
                   WHERE 1=1"
             }
@@ -662,6 +664,7 @@ impl BlockedIssueProjection {
                      i.deleted_at, i.deleted_by, i.delete_reason, i.original_type, i.compaction_level,
                      i.compacted_at, i.compacted_at_commit, i.original_size, i.sender, i.ephemeral,
                      i.pinned, i.is_template, i.source_repo_path, i.agent_context,
+                     i.former_ids,
                      bc.blocked_by"
             }
             Self::Command => {
@@ -680,7 +683,7 @@ impl BlockedIssueProjection {
                      due_at, defer_until, external_ref, source_system, source_repo,
                      deleted_at, deleted_by, delete_reason, original_type, compaction_level,
                      compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                     pinned, is_template, source_repo_path, agent_context"
+                     pinned, is_template, source_repo_path, agent_context, former_ids"
             }
             Self::Command => {
                 r"SELECT id, title, description, status, priority, issue_type,
@@ -691,11 +694,11 @@ impl BlockedIssueProjection {
 
     const fn cached_blocked_by_index(self) -> usize {
         match self {
-            // Bumped from 37 → 38 after `agent_context` was appended
-            // to the Full SELECT at position 37 (beads#297).
-            // Source_repo_path is at 36, agent_context is at 37, so
-            // bc.blocked_by lands at 38 in the joined projection.
-            Self::Full => 38,
+            // Bumped from 38 → 39 after `former_ids` was appended to the
+            // Full SELECT at position 38 (schema v18). Source_repo_path is
+            // at 36, agent_context is at 37, former_ids is at 38, so
+            // bc.blocked_by lands at 39 in the joined projection.
+            Self::Full => 39,
             Self::Command => 9,
         }
     }
@@ -2748,6 +2751,8 @@ impl SqliteStorage {
             let deleted_at_str = issue.deleted_at.map(|dt| dt.to_rfc3339());
             let compacted_at_str = issue.compacted_at.map(|dt| dt.to_rfc3339());
             let content_hash = issue.compute_content_hash();
+            let former_ids_json = serde_json::to_string(&issue.former_ids)
+                .unwrap_or_else(|_| "[]".to_string());
 
             conn.execute_with_params(
                 "INSERT INTO issues (
@@ -2757,8 +2762,8 @@ impl SqliteStorage {
                     closed_by_session, due_at, defer_until, external_ref, source_system,
                     source_repo, source_repo_path, deleted_at, deleted_by, delete_reason, original_type,
                     compaction_level, compacted_at, compacted_at_commit, original_size,
-                    sender, ephemeral, pinned, is_template, agent_context
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    sender, ephemeral, pinned, is_template, agent_context, former_ids
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 &[
                     SqliteValue::from(issue.id.as_str()),
                     SqliteValue::from(content_hash.as_str()),
@@ -2798,6 +2803,7 @@ impl SqliteStorage {
                     SqliteValue::from(i64::from(i32::from(issue.pinned))),
                     SqliteValue::from(i64::from(i32::from(issue.is_template))),
                     issue.agent_context.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
+                    SqliteValue::from(former_ids_json.as_str()),
                 ],
             )?;
 
@@ -3823,7 +3829,8 @@ impl SqliteStorage {
                    due_at, defer_until, external_ref, source_system, source_repo,
                    deleted_at, deleted_by, delete_reason, original_type,
                    compaction_level, compacted_at, compacted_at_commit, original_size,
-                   sender, ephemeral, pinned, is_template, source_repo_path, agent_context
+                   sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
+                   former_ids
             FROM issues
             WHERE id = ?
         ";
@@ -3863,7 +3870,8 @@ impl SqliteStorage {
                          due_at, defer_until, external_ref, source_system, source_repo,
                          deleted_at, deleted_by, delete_reason, original_type,
                          compaction_level, compacted_at, compacted_at_commit, original_size,
-                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context
+                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
+                         former_ids
                   FROM issues WHERE id IN ({})",
                 placeholders.join(",")
             );
@@ -3999,7 +4007,8 @@ impl SqliteStorage {
                      due_at, defer_until, external_ref, source_system, source_repo,
                      deleted_at, deleted_by, delete_reason, original_type,
                      compaction_level, compacted_at, compacted_at_commit, original_size,
-                     sender, ephemeral, pinned, is_template, source_repo_path, agent_context",
+                     sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
+                     former_ids",
         );
 
         let mut params: Vec<SqliteValue> = Vec::new();
@@ -4155,7 +4164,8 @@ impl SqliteStorage {
                          due_at, defer_until, external_ref, source_system, source_repo,
                          deleted_at, deleted_by, delete_reason, original_type,
                          compaction_level, compacted_at, compacted_at_commit, original_size,
-                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context
+                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
+                         former_ids
                   FROM issues
                   WHERE {status_filter}
                     AND is_template = 0
@@ -9283,7 +9293,8 @@ impl SqliteStorage {
                            due_at, defer_until, external_ref, source_system, source_repo,
                            deleted_at, deleted_by, delete_reason, original_type, compaction_level,
                            compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                           pinned, is_template, source_repo_path, agent_context
+                           pinned, is_template, source_repo_path, agent_context,
+                           former_ids
                     FROM issues
                     WHERE (ephemeral = 0 OR ephemeral IS NULL)
                       AND id NOT LIKE '%-wisp-%'
@@ -9804,11 +9815,16 @@ impl SqliteStorage {
             is_template: get_bool(35),
             // Position 36 lands after `is_template` in the Full SELECT
             // and before `bc.blocked_by` in the BlockedIssue::Full
-            // variant; the cached_blocked_by_index was bumped to 37
+            // variant; the cached_blocked_by_index was bumped to 39
             // in lock-step so the projection-specific blocked-by
             // accessor still finds the right column.
             source_repo_path: get_non_empty_str(36),
             agent_context: get_non_empty_str(37),
+            // `former_ids` (schema v18) is a JSON array in a TEXT column, same
+            // convention as `blocked_issues_cache.blocked_by`. A malformed or
+            // legacy value degrades to "no former IDs" rather than making the
+            // whole row unreadable.
+            former_ids: serde_json::from_str(&get_str(38)).unwrap_or_default(),
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -9866,6 +9882,7 @@ impl SqliteStorage {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -9931,6 +9948,7 @@ impl SqliteStorage {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -9996,6 +10014,7 @@ impl SqliteStorage {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -10061,6 +10080,7 @@ impl SqliteStorage {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -10120,6 +10140,7 @@ impl SqliteStorage {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -11624,7 +11645,8 @@ impl SqliteStorage {
                      due_at, defer_until, external_ref, source_system, source_repo,
                      deleted_at, deleted_by, delete_reason, original_type, compaction_level,
                      compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                     pinned, is_template, source_repo_path, agent_context
+                     pinned, is_template, source_repo_path, agent_context,
+                     former_ids
                FROM issues WHERE external_ref = ?",
             &[SqliteValue::from(external_ref)],
         ) {
@@ -11714,6 +11736,9 @@ impl SqliteStorage {
                 .agent_context
                 .as_deref()
                 .map_or(SqliteValue::Null, SqliteValue::from),
+            SqliteValue::from(
+                serde_json::to_string(&issue.former_ids).unwrap_or_else(|_| "[]".to_string()),
+            ),
         ]
     }
 
@@ -11722,7 +11747,7 @@ impl SqliteStorage {
         issue: &Issue,
         timestamps: &ImportIssueTimestampStrings,
     ) -> Result<usize> {
-        let mut insert_params = Vec::with_capacity(38);
+        let mut insert_params = Vec::with_capacity(39);
         insert_params.push(SqliteValue::from(issue.id.as_str()));
         insert_params.extend(Self::import_issue_field_values(issue, timestamps));
 
@@ -11734,9 +11759,9 @@ impl SqliteStorage {
                 due_at, defer_until, external_ref, source_system, source_repo, source_repo_path,
                 deleted_at, deleted_by, delete_reason, original_type, compaction_level,
                 compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                pinned, is_template, agent_context
+                pinned, is_template, agent_context, former_ids
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )",
             &insert_params,
         )?;
@@ -11761,7 +11786,7 @@ impl SqliteStorage {
                 external_ref = ?, source_system = ?, source_repo = ?, source_repo_path = ?,
                 deleted_at = ?, deleted_by = ?, delete_reason = ?, original_type = ?, compaction_level = ?,
                 compacted_at = ?, compacted_at_commit = ?, original_size = ?, sender = ?,
-                ephemeral = ?, pinned = ?, is_template = ?, agent_context = ?
+                ephemeral = ?, pinned = ?, is_template = ?, agent_context = ?, former_ids = ?
               WHERE id = ?",
             &params,
         )?;
@@ -12476,6 +12501,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -13403,6 +13429,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -16498,6 +16525,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -16579,6 +16607,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -16654,6 +16683,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -16731,6 +16761,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -17346,6 +17377,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,

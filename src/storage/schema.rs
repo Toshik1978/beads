@@ -7,7 +7,7 @@ use crate::error::{BeadsError, Result};
 use crate::model::{IssueType, Priority, Status};
 use crate::util::content_hash_from_parts;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 17;
+pub const CURRENT_SCHEMA_VERSION: i32 = 18;
 const ISSUES_CLOSED_AT_CHECK: &str = "CHECK ((status = 'closed' AND closed_at IS NOT NULL) OR (status = 'tombstone') OR (status NOT IN ('closed', 'tombstone') AND closed_at IS NULL))";
 
 /// The complete SQL schema for the beads database.
@@ -66,6 +66,10 @@ pub const SCHEMA_SQL: &str = r"
         -- column itself stays a TEXT bag. NULL means no inherited context;
         -- emission for descendants silently skips ancestors with NULL.
         agent_context TEXT,
+        -- former_ids (schema v18) holds a JSON array of every ID this issue
+        -- previously held, oldest first. Populated by `rename_issue`. Same
+        -- JSON-array-in-TEXT convention as `blocked_issues_cache.blocked_by`.
+        former_ids TEXT NOT NULL DEFAULT '[]',
         CHECK (
             (status = 'closed' AND closed_at IS NOT NULL) OR
             (status = 'tombstone') OR
@@ -595,6 +599,9 @@ const ISSUE_COLUMNS: &[(&str, &str)] = &[
     // Append-at-end keeps EXPECTED_ISSUE_COLUMN_ORDER aligned for fresh
     // and migrated databases.
     ("agent_context", "TEXT"),
+    // Schema v18: JSON array of every ID this issue previously held.
+    // Append-at-end for the same reason as source_repo_path/agent_context.
+    ("former_ids", "TEXT NOT NULL DEFAULT '[]'"),
 ];
 
 // bds-04l.18. The four column sets below cover the remaining tables that
@@ -811,6 +818,7 @@ const EXPECTED_ISSUE_COLUMN_ORDER: &[&str] = &[
     "is_template",
     "source_repo_path",
     "agent_context",
+    "former_ids",
 ];
 
 /// Check whether the issues table has columns in the expected order.
@@ -1663,6 +1671,21 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
                 conn.execute(&format!("ALTER TABLE close_metadata DROP COLUMN {column}"))?;
             }
         }
+    }
+
+    // Migration v17 -> v18: add `former_ids TEXT NOT NULL DEFAULT '[]'` to
+    // `issues`, holding a JSON array of every ID the issue previously held.
+    // Purely additive — existing rows get the default and existing consumers
+    // ignore it. Same idempotence guards as the v10/v11 column migrations:
+    // skipped when the column already exists, and skipped when the table was
+    // just rebuilt from scratch (a rebuild already produces the v18 layout).
+    if !issues_rebuilt
+        && user_version < 18
+        && table_exists(conn, "issues")
+        && !column_exists(conn, "issues", "former_ids")
+    {
+        tracing::info!("Migrating database to schema version 18 (former_ids on issues)");
+        conn.execute("ALTER TABLE issues ADD COLUMN former_ids TEXT NOT NULL DEFAULT '[]'")?;
     }
 
     // Migration: Add missing indexes for bd parity

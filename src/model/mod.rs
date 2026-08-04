@@ -546,6 +546,15 @@ pub struct Issue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_type: Option<String>,
 
+    /// Every ID this issue has previously held, oldest first.
+    ///
+    /// Populated by `rename_issue`. Lets a reference written before a rename —
+    /// in a git commit message, a PR body, another issue's prose — still resolve
+    /// to the issue it named. Outlives the tombstone left at the old ID, which
+    /// `br delete --hard` may collect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_ids: Vec<String>,
+
     // Compaction (legacy/compat)
     // Note: Always serialize compaction_level as integer (0 when None) for bd conformance
     // bd's Go sql scanner cannot handle NULL for integer columns
@@ -612,6 +621,7 @@ impl Default for Issue {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: Vec::new(),
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -926,6 +936,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
@@ -1368,6 +1379,7 @@ mod tests {
             deleted_by: None,
             delete_reason: None,
             original_type: None,
+            former_ids: vec![],
             compaction_level: None,
             compacted_at: None,
             compacted_at_commit: None,
