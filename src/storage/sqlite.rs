@@ -7501,51 +7501,150 @@ impl SqliteStorage {
         let descendants = self.descendant_ids(old_id)?;
 
         self.mutate("rename_issue", |conn, ctx| {
-            for descendant in &descendants {
-                // `bd-p.1.1` under a `bd-p.1` -> `bd-q.7` move becomes
-                // `bd-q.7` + `.1` — splice the new prefix onto the tail.
-                let suffix = descendant.strip_prefix(old_id).ok_or_else(|| {
-                    BeadsError::internal(format!("{descendant} is not beneath {old_id}"))
-                })?;
-                let new_descendant_id = format!("{new_id}{suffix}");
-                Self::rewrite_issue_id(conn, descendant, &new_descendant_id)?;
-                ctx.mark_dirty(&new_descendant_id);
+            Self::rename_issue_in_tx(conn, ctx, old_id, new_id, &descendants, &pre_rename, actor)
+        })
+    }
+
+    /// Transactional body of [`Self::rename_issue`], factored out so
+    /// [`Self::attach_to_parent`] can run it and [`Self::set_parent_in_tx`]
+    /// inside one `mutate()` transaction. `descendants` and `pre_rename` are
+    /// read by the caller before the transaction opens (mirroring
+    /// [`Self::rename_issue`] itself) since they are plain lookups, not
+    /// writes that need the same lock.
+    fn rename_issue_in_tx(
+        conn: &Connection,
+        ctx: &mut MutationContext,
+        old_id: &str,
+        new_id: &str,
+        descendants: &[String],
+        pre_rename: &Issue,
+        actor: &str,
+    ) -> Result<()> {
+        for descendant in descendants {
+            // `bd-p.1.1` under a `bd-p.1` -> `bd-q.7` move becomes
+            // `bd-q.7` + `.1` — splice the new prefix onto the tail.
+            let suffix = descendant.strip_prefix(old_id).ok_or_else(|| {
+                BeadsError::internal(format!("{descendant} is not beneath {old_id}"))
+            })?;
+            let new_descendant_id = format!("{new_id}{suffix}");
+            Self::rewrite_issue_id(conn, descendant, &new_descendant_id)?;
+            ctx.mark_dirty(&new_descendant_id);
+        }
+
+        Self::rewrite_issue_id(conn, old_id, new_id)?;
+        ctx.mark_dirty(new_id);
+
+        // Provenance on the issue that moved. Appended, not replaced: an
+        // issue renamed twice carries both hops, oldest first.
+        let mut former = pre_rename.former_ids.clone();
+        former.push(old_id.to_string());
+        let former_ids_json = serde_json::to_string(&former).unwrap_or_else(|_| "[]".to_string());
+        conn.execute_with_params(
+            "UPDATE issues SET former_ids = ? WHERE id = ?",
+            &[
+                SqliteValue::from(former_ids_json.as_str()),
+                SqliteValue::from(new_id),
+            ],
+        )?;
+
+        // A tombstone at the vacated ID, so the move propagates through
+        // JSONL. Without it, a clone still holding `old_id` merges its
+        // copy back in as a live issue and silently undoes the rename.
+        Self::insert_rename_tombstone(conn, pre_rename, new_id, actor)?;
+        ctx.mark_dirty(old_id);
+
+        // `rewrite_issue_id` only moves the `blocked_issues_cache` row
+        // keyed by `issue_id`; any *other* row whose `blocked_by` JSON
+        // blob names the old id as a blocker is untouched by that update
+        // (that JSON is opaque to plain SQL). A full rebuild is the only
+        // way to purge the old id out of every such blob — an incremental
+        // one would need the set of every issue currently blocked by
+        // anything in this subtree, which is exactly the query the
+        // rebuild already does.
+        ctx.invalidate_cache();
+
+        Ok(())
+    }
+
+    /// Set `issue_id`'s parent to `parent_id` and renumber it to match, as
+    /// one atomic operation.
+    ///
+    /// This is the storage-layer counterpart of
+    /// `cli::commands::attach_to_parent` (`src/cli/commands/mod.rs`), which
+    /// used to call [`Self::set_parent_with_options`] and then
+    /// [`Self::rename_issue`] as two separately committed operations. If the
+    /// second one failed, the first had already committed — the dependency
+    /// pointed at the new parent while the ID still named the old one, which
+    /// is the exact divergence this epic exists to make unrepresentable.
+    /// [`Self::set_parent_in_tx`] and [`Self::rename_issue_in_tx`] now run
+    /// inside one [`Self::mutate`] transaction, so any failure in either
+    /// rolls both back together.
+    ///
+    /// The child-counter bump closes the other half of that gap:
+    /// [`Self::next_child_number`] prefers `child_counters.last_child`, and
+    /// nothing previously updated that row for the *target* parent on a
+    /// reparent — only `create_issue` did, and only for the parent an issue
+    /// was created directly under. A second reparent into the same parent
+    /// therefore always recomputed the exact slot the first reparent had
+    /// already taken, and failed with a collision. Here, `next_child_number`
+    /// is read through the connection this method already holds the write
+    /// lock on ([`Self::next_child_number_in_tx`]), and the same transaction
+    /// bumps the counter it just read, so the next attach into that parent
+    /// sees the number this one took.
+    ///
+    /// A no-op when `issue_id` is already a dotted child of `parent_id`:
+    /// nothing is renamed and no dependency row is touched. Without this
+    /// guard, reattaching to the current parent would gratuitously mint a
+    /// new ID and leave a tombstone behind for no actual change.
+    ///
+    /// Returns the id `issue_id` holds after the call — the renumbered id,
+    /// or `issue_id` unchanged in the no-op case.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from the parent-set step (self-dependency,
+    /// cycle, missing target) or the rename step (an ID collision somewhere
+    /// in the subtree), with the whole transaction rolled back.
+    pub fn attach_to_parent(
+        &mut self,
+        issue_id: &str,
+        parent_id: &str,
+        actor: &str,
+    ) -> Result<String> {
+        let pre_rename = self
+            .get_issue(issue_id)?
+            .ok_or_else(|| BeadsError::IssueNotFound {
+                id: issue_id.to_string(),
+            })?;
+        // Read before the transaction opens, mirroring `rename_issue` itself:
+        // a plain lookup, not a write that needs the same lock.
+        let descendants = self.descendant_ids(issue_id)?;
+        let dotted_child_prefix = format!("{parent_id}.");
+
+        self.mutate("attach_to_parent", |conn, ctx| {
+            let existing_parent = conn
+                .query_with_params(
+                    "SELECT depends_on_id FROM dependencies WHERE issue_id = ? AND type = 'parent-child' ORDER BY rowid ASC LIMIT 1",
+                    &[SqliteValue::from(issue_id)],
+                )?
+                .first()
+                .and_then(|row| row.get(0).and_then(SqliteValue::as_text).map(str::to_string));
+
+            if existing_parent.as_deref() == Some(parent_id)
+                && issue_id.starts_with(&dotted_child_prefix)
+            {
+                return Ok(issue_id.to_string());
             }
 
-            Self::rewrite_issue_id(conn, old_id, new_id)?;
-            ctx.mark_dirty(new_id);
+            Self::set_parent_in_tx(conn, ctx, issue_id, Some(parent_id), actor, true)?;
 
-            // Provenance on the issue that moved. Appended, not replaced: an
-            // issue renamed twice carries both hops, oldest first.
-            let mut former = pre_rename.former_ids.clone();
-            former.push(old_id.to_string());
-            let former_ids_json =
-                serde_json::to_string(&former).unwrap_or_else(|_| "[]".to_string());
-            conn.execute_with_params(
-                "UPDATE issues SET former_ids = ? WHERE id = ?",
-                &[
-                    SqliteValue::from(former_ids_json.as_str()),
-                    SqliteValue::from(new_id),
-                ],
-            )?;
+            let next = Self::next_child_number_in_tx(conn, parent_id)?;
+            let new_id = crate::util::id::child_id(parent_id, next);
 
-            // A tombstone at the vacated ID, so the move propagates through
-            // JSONL. Without it, a clone still holding `old_id` merges its
-            // copy back in as a live issue and silently undoes the rename.
-            Self::insert_rename_tombstone(conn, &pre_rename, new_id, actor)?;
-            ctx.mark_dirty(old_id);
+            Self::rename_issue_in_tx(conn, ctx, issue_id, &new_id, &descendants, &pre_rename, actor)?;
+            Self::update_child_counter_in_tx(conn, parent_id, next)?;
 
-            // `rewrite_issue_id` only moves the `blocked_issues_cache` row
-            // keyed by `issue_id`; any *other* row whose `blocked_by` JSON
-            // blob names the old id as a blocker is untouched by that update
-            // (that JSON is opaque to plain SQL). A full rebuild is the only
-            // way to purge the old id out of every such blob — an incremental
-            // one would need the set of every issue currently blocked by
-            // anything in this subtree, which is exactly the query the
-            // rebuild already does.
-            ctx.invalidate_cache();
-
-            Ok(())
+            Ok(new_id)
         })
     }
 
@@ -8000,90 +8099,110 @@ impl SqliteStorage {
         skip_cache_rebuild: bool,
     ) -> Result<()> {
         self.mutate("set_parent", |conn, ctx| {
-            let action = if parent_id.is_some() {
-                "set parent on"
-            } else {
-                "clear parent from"
-            };
-            Self::ensure_issue_mutable_in_tx(conn, issue_id, action)?;
+            Self::set_parent_in_tx(conn, ctx, issue_id, parent_id, actor, skip_cache_rebuild)
+        })
+    }
 
-            let previous_parent_rows = conn.query_with_params(
-                "SELECT depends_on_id FROM dependencies WHERE issue_id = ? AND type = 'parent-child' ORDER BY rowid ASC",
-                &[SqliteValue::from(issue_id)],
-            )?;
-            let previous_parents = previous_parent_rows
-                .iter()
-                .filter_map(|row| row.get(0).and_then(SqliteValue::as_text).map(str::to_string))
-                .collect::<Vec<_>>();
+    /// Transactional body of [`Self::set_parent_with_options`], factored out
+    /// so [`Self::attach_to_parent`] can run it and [`Self::rename_issue_in_tx`]
+    /// inside one `mutate()` transaction instead of two separately-committed
+    /// ones — the fix for the dep-committed-but-rename-failed divergence this
+    /// epic exists to make unrepresentable.
+    fn set_parent_in_tx(
+        conn: &Connection,
+        ctx: &mut MutationContext,
+        issue_id: &str,
+        parent_id: Option<&str>,
+        actor: &str,
+        skip_cache_rebuild: bool,
+    ) -> Result<()> {
+        let action = if parent_id.is_some() {
+            "set parent on"
+        } else {
+            "clear parent from"
+        };
+        Self::ensure_issue_mutable_in_tx(conn, issue_id, action)?;
 
-            if previous_parents.len() == usize::from(parent_id.is_some())
-                && previous_parents.first().map(String::as_str) == parent_id
-            {
-                return Ok(());
+        let previous_parent_rows = conn.query_with_params(
+            "SELECT depends_on_id FROM dependencies WHERE issue_id = ? AND type = 'parent-child' ORDER BY rowid ASC",
+            &[SqliteValue::from(issue_id)],
+        )?;
+        let previous_parents = previous_parent_rows
+            .iter()
+            .filter_map(|row| {
+                row.get(0)
+                    .and_then(SqliteValue::as_text)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+
+        if previous_parents.len() == usize::from(parent_id.is_some())
+            && previous_parents.first().map(String::as_str) == parent_id
+        {
+            return Ok(());
+        }
+
+        // Remove existing parent
+        conn.execute_with_params(
+            "DELETE FROM dependencies WHERE issue_id = ? AND type = 'parent-child'",
+            &[SqliteValue::from(issue_id)],
+        )?;
+
+        if let Some(pid) = parent_id {
+            if pid == issue_id {
+                return Err(BeadsError::SelfDependency {
+                    id: issue_id.to_string(),
+                });
             }
 
-            // Remove existing parent
-            conn.execute_with_params(
-                "DELETE FROM dependencies WHERE issue_id = ? AND type = 'parent-child'",
-                &[SqliteValue::from(issue_id)],
-            )?;
+            Self::validate_parent_child_endpoints(issue_id, pid, "parent-child")?;
+            Self::ensure_dependency_target_exists_in_tx(conn, pid)?;
 
-            if let Some(pid) = parent_id {
-                if pid == issue_id {
-                    return Err(BeadsError::SelfDependency {
-                        id: issue_id.to_string(),
-                    });
-                }
-
-                Self::validate_parent_child_endpoints(issue_id, pid, "parent-child")?;
-                Self::ensure_dependency_target_exists_in_tx(conn, pid)?;
-
-                if Self::check_parent_child_cycle(conn, issue_id, pid, true)? {
-                    return Err(BeadsError::DependencyCycle {
-                        path: format!("Setting parent of {issue_id} to {pid} would create a cycle"),
-                    });
-                }
-
-                conn.execute_with_params(
-                    "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by)
-                     VALUES (?, ?, 'parent-child', ?, ?)",
-                    &[
-                        SqliteValue::from(issue_id),
-                        SqliteValue::from(pid),
-                        SqliteValue::from(Utc::now().to_rfc3339()),
-                        SqliteValue::from(actor),
-                    ],
-                )?;
+            if Self::check_parent_child_cycle(conn, issue_id, pid, true)? {
+                return Err(BeadsError::DependencyCycle {
+                    path: format!("Setting parent of {issue_id} to {pid} would create a cycle"),
+                });
             }
 
             conn.execute_with_params(
-                "UPDATE issues SET updated_at = ? WHERE id = ?",
+                "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by)
+                 VALUES (?, ?, 'parent-child', ?, ?)",
                 &[
-                    SqliteValue::from(Utc::now().to_rfc3339()),
                     SqliteValue::from(issue_id),
+                    SqliteValue::from(pid),
+                    SqliteValue::from(Utc::now().to_rfc3339()),
+                    SqliteValue::from(actor),
                 ],
             )?;
+        }
 
-            ctx.mark_dirty(issue_id);
-            if skip_cache_rebuild {
-                ctx.invalidate_cache_deferred();
-            } else {
-                let mut cache_ids = vec![issue_id];
-                for previous_parent in &previous_parents {
-                    let previous_parent = previous_parent.as_str();
-                    if !cache_ids.contains(&previous_parent) {
-                        cache_ids.push(previous_parent);
-                    }
+        conn.execute_with_params(
+            "UPDATE issues SET updated_at = ? WHERE id = ?",
+            &[
+                SqliteValue::from(Utc::now().to_rfc3339()),
+                SqliteValue::from(issue_id),
+            ],
+        )?;
+
+        ctx.mark_dirty(issue_id);
+        if skip_cache_rebuild {
+            ctx.invalidate_cache_deferred();
+        } else {
+            let mut cache_ids = vec![issue_id];
+            for previous_parent in &previous_parents {
+                let previous_parent = previous_parent.as_str();
+                if !cache_ids.contains(&previous_parent) {
+                    cache_ids.push(previous_parent);
                 }
-                if let Some(parent_id) = parent_id
-                    && !cache_ids.contains(&parent_id)
-                {
-                    cache_ids.push(parent_id);
-                }
-                ctx.invalidate_cache_for(&cache_ids);
             }
-            Ok(())
-        })
+            if let Some(parent_id) = parent_id
+                && !cache_ids.contains(&parent_id)
+            {
+                cache_ids.push(parent_id);
+            }
+            ctx.invalidate_cache_for(&cache_ids);
+        }
+        Ok(())
     }
 
     /// Add a label to an issue.
@@ -9187,8 +9306,19 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn next_child_number(&self, parent_id: &str) -> Result<u32> {
+        Self::next_child_number_in_tx(&self.conn, parent_id)
+    }
+
+    /// Same lookup as [`Self::next_child_number`], but reading through a
+    /// `&Connection` handed to us by [`Self::mutate`] instead of `self.conn`.
+    ///
+    /// [`Self::attach_to_parent`] calls this from inside its own write
+    /// transaction so the number it picks is read under the same lock it
+    /// writes under, instead of racing that write with a read taken before
+    /// the transaction opened.
+    fn next_child_number_in_tx(conn: &Connection, parent_id: &str) -> Result<u32> {
         // First, check the child_counters table (source of truth)
-        match self.conn.query_row_with_params(
+        match conn.query_row_with_params(
             "SELECT last_child FROM child_counters WHERE parent_id = ?",
             &[SqliteValue::from(parent_id)],
         ) {
@@ -9206,7 +9336,7 @@ impl SqliteStorage {
         // Escape LIKE wildcards in parent_id to prevent injection
         let escaped_parent = escape_like_pattern(parent_id);
         let pattern = format!("{escaped_parent}.%");
-        let ids_rows = self.conn.query_with_params(
+        let ids_rows = conn.query_with_params(
             "SELECT id FROM issues WHERE id LIKE ? ESCAPE '\\'",
             &[SqliteValue::from(pattern.as_str())],
         )?;

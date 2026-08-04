@@ -140,39 +140,30 @@ pub(super) fn resolve_issue_ids(
 /// parent it no longer has, which is exactly the divergence `close`'s
 /// dot-notation child check trips over.
 ///
-/// The parent-child dependency is set first, via
-/// [`SqliteStorage::set_parent_with_options`] rather than a raw
-/// `add_dependency` call: that method already replaces any *existing*
-/// parent-child edge (a plain insert would instead error with "already has
-/// parent"), validates endpoints/self-reference/cycles, and bumps
-/// `updated_at` -- all bookkeeping this helper wants for free rather than
-/// reimplemented. `rename_issue` runs second and rewrites
-/// `dependencies.issue_id`, so setting the dep afterward would mean chasing
-/// the row under a spelling that does not exist yet. `skip_cache_rebuild` is
-/// passed as `true` because the following `rename_issue` call unconditionally
-/// triggers a full blocked-cache invalidation of its own; deferring the first
-/// one avoids doing that work twice.
+/// A thin wrapper around [`SqliteStorage::attach_to_parent`], which does the
+/// real work: setting the parent-child dep and renaming the issue inside one
+/// transaction (an earlier version of this function called
+/// `set_parent_with_options` then `rename_issue` as two separately committed
+/// operations, which left the dep pointing at the new parent with the ID
+/// unmoved if the rename failed after the dep had already committed -- see
+/// that method's doc comment) and bumping the target parent's child counter
+/// so a second attach into the same parent does not recompute the slot the
+/// first one just took.
 ///
-/// Returns the new, renumbered ID.
+/// Returns the id `issue_id` holds after the call -- the renumbered id, or
+/// `issue_id` unchanged if it was already a dotted child of `parent_id`.
 ///
 /// # Errors
 ///
 /// Propagates storage failures, including a self-dependency or cycle from
-/// `set_parent_with_options` and an ID collision from `rename_issue`.
+/// the parent-set step and an ID collision from the rename step.
 pub(crate) fn attach_to_parent(
     storage: &mut SqliteStorage,
     issue_id: &str,
     parent_id: &str,
     actor: &str,
 ) -> crate::Result<String> {
-    storage.set_parent_with_options(issue_id, Some(parent_id), actor, true)?;
-
-    let next = storage.next_child_number(parent_id)?;
-    let new_id = crate::util::id::child_id(parent_id, next);
-
-    storage.rename_issue(issue_id, &new_id, actor)?;
-
-    Ok(new_id)
+    storage.attach_to_parent(issue_id, parent_id, actor)
 }
 
 pub(super) fn rebuild_blocked_cache_after_partial_mutation(

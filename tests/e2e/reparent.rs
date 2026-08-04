@@ -374,3 +374,99 @@ fn e2e_last_touched_id_after_reparent_is_the_new_id() {
         "the last-touched id must be the renamed id, not the vacated one; got: {claim_payload}"
     );
 }
+
+#[test]
+fn e2e_a_second_reparent_into_the_same_parent_succeeds() {
+    let _log = common::test_log("e2e_a_second_reparent_into_the_same_parent_succeeds");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(epic.status.success());
+    let epic_id = parse_created_id(&epic.stdout);
+
+    // One pre-existing child under the epic, so the epic's child counter is
+    // already at 1 before either reparent below.
+    let existing_child = run_br(
+        &workspace,
+        [
+            "create",
+            "Existing child",
+            "--type",
+            "task",
+            "--parent",
+            &epic_id,
+        ],
+        "create_existing_child",
+    );
+    assert!(existing_child.status.success());
+
+    let other_epic = run_br(
+        &workspace,
+        ["create", "Other epic", "--type", "epic"],
+        "create_other_epic",
+    );
+    assert!(other_epic.status.success());
+    let other_epic_id = parse_created_id(&other_epic.stdout);
+
+    let first_movable = run_br(
+        &workspace,
+        [
+            "create",
+            "First movable",
+            "--type",
+            "task",
+            "--parent",
+            &other_epic_id,
+        ],
+        "create_first_movable",
+    );
+    assert!(first_movable.status.success());
+    let first_movable_id = parse_created_id(&first_movable.stdout);
+
+    let second_movable = run_br(
+        &workspace,
+        [
+            "create",
+            "Second movable",
+            "--type",
+            "task",
+            "--parent",
+            &other_epic_id,
+        ],
+        "create_second_movable",
+    );
+    assert!(second_movable.status.success());
+    let second_movable_id = parse_created_id(&second_movable.stdout);
+
+    let first_reparent = run_br(
+        &workspace,
+        ["update", &first_movable_id, "--parent", &epic_id],
+        "first_reparent",
+    );
+    assert!(
+        first_reparent.status.success(),
+        "first reparent failed: {}",
+        first_reparent.stderr
+    );
+
+    // The bug: nothing bumped the target parent's child counter on attach,
+    // so this second, independent reparent into the SAME parent recomputed
+    // the exact slot the first reparent just took and collided with it --
+    // `"<epic>.2 already exists"`.
+    let second_reparent = run_br(
+        &workspace,
+        ["update", &second_movable_id, "--parent", &epic_id],
+        "second_reparent",
+    );
+    assert!(
+        second_reparent.status.success(),
+        "a second reparent into the same parent must succeed: {}",
+        second_reparent.stderr
+    );
+}

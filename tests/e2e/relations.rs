@@ -291,9 +291,10 @@ fn e2e_relations_labels_comments() {
         parent_update.stderr
     );
     // `--parent` renumbers the child beneath its new parent (a dotted prefix
-    // always names the real parent), so `child_id` above is now a vacated
-    // id -- still resolvable via `former_ids` for the calls below, but no
-    // longer what `list`/`show` report back as the issue's identity.
+    // always names the real parent), so `child_id` above is now a vacated id.
+    // It would still resolve via `former_ids`, but this test doesn't exercise
+    // that path: `child_id` is rebound to the renamed id right here, and every
+    // call below uses the rebound value, not the original.
     let parent_update_json = extract_issues_array(&parent_update.stdout);
     let child_id = parent_update_json[0]["id"]
         .as_str()

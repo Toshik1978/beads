@@ -2,7 +2,7 @@
 
 use crate::common;
 
-use beads::model::Status;
+use beads::model::{DependencyType, Status};
 use beads::storage::{IssueUpdate, SqliteStorage};
 use beads::sync::{ExportConfig, ImportConfig, export_to_jsonl, import_from_jsonl};
 use beads::util::id::{IdExistence, IdResolver, ResolverConfig};
@@ -554,4 +554,142 @@ fn resolving_a_genuinely_deleted_id_still_returns_its_tombstone() {
         .expect("a deleted issue's tombstone must still resolve, not IssueNotFound");
 
     assert_eq!(resolved, "bd-p.2");
+}
+
+fn create_at(storage: &mut SqliteStorage, id: &str) {
+    let mut issue = fixtures::issue(id);
+    issue.id = id.to_string();
+    storage.create_issue(&issue, "tester").unwrap();
+}
+
+/// Regression for review finding A on bds-a23.4.1: nothing previously bumped
+/// `child_counters` for the *target* parent on a reparent (only `create_issue`
+/// did, and only for the parent an issue was created directly under), so a
+/// second, independent `attach_to_parent` into the same parent recomputed the
+/// exact slot the first one had just taken and collided with it.
+#[test]
+fn attach_to_parent_bumps_the_target_parents_child_counter() {
+    let mut storage = test_db();
+    for id in ["bd-e1", "bd-c1", "bd-c2"] {
+        create_at(&mut storage, id);
+    }
+
+    let first = storage
+        .attach_to_parent("bd-c1", "bd-e1", "tester")
+        .unwrap();
+    assert_eq!(first, "bd-e1.1");
+
+    let second = storage
+        .attach_to_parent("bd-c2", "bd-e1", "tester")
+        .unwrap();
+    assert_eq!(
+        second, "bd-e1.2",
+        "a second, independent attach into the same parent must not recompute \
+         the slot the first attach just took"
+    );
+}
+
+/// Regression for review finding B on bds-a23.4.1: setting the parent-child
+/// dependency and renaming used to be two separately committed operations
+/// (`set_parent_with_options` then `rename_issue`). If the rename failed
+/// after the dependency insert had already committed, the dependency pointed
+/// at the new parent while the ID still named the old one -- the exact
+/// divergence this epic exists to make unrepresentable. `attach_to_parent`
+/// now runs both inside one transaction.
+#[test]
+fn attach_to_parent_rolls_back_the_dependency_when_rename_fails() {
+    let mut storage = test_db();
+    create_at(&mut storage, "bd-e1");
+    create_at(&mut storage, "bd-e2");
+
+    // A real first child directly under `bd-e2` so `child_counters["bd-e2"]`
+    // exists and `next_child_number` takes the `child_counters` fast path
+    // instead of the pattern-scan fallback. The fallback scans for *any* id
+    // matching `bd-e2.%` -- including the squatter planted below, two levels
+    // down -- and would report a different (collision-free) number than the
+    // real attach ends up computing, defeating the setup.
+    create_at(&mut storage, "bd-e2.1");
+
+    // The subtree being moved: a child with its own child, so the rename
+    // cascades through more than one write (deepest-first).
+    create_at(&mut storage, "bd-e1.1");
+    storage
+        .add_dependency("bd-e1.1", "bd-e1", "parent-child", "tester")
+        .unwrap();
+    create_at(&mut storage, "bd-e1.1.1");
+    storage
+        .add_dependency("bd-e1.1.1", "bd-e1.1", "parent-child", "tester")
+        .unwrap();
+
+    // `next_child_number("bd-e2")` will be 2 (the sibling above holds slot
+    // 1), so the real move is `bd-e1.1` -> `bd-e2.2`, cascading the
+    // grandchild `bd-e1.1.1` -> `bd-e2.2.1`. Plant a squatter at exactly that
+    // grandchild slot: descendants rename deepest-first, so this is the
+    // first write inside the transaction to fail -- *after*
+    // `set_parent_in_tx`'s dependency INSERT has already run in the same
+    // transaction, which is what makes this a genuine atomicity test rather
+    // than an up-front guard test.
+    create_at(&mut storage, "bd-e2.2.1");
+
+    storage
+        .attach_to_parent("bd-e1.1", "bd-e2", "tester")
+        .expect_err("bd-e2.2.1 is already occupied, so the rename must fail");
+
+    let deps = storage.get_dependencies_full("bd-e1.1").unwrap();
+    assert!(
+        !deps.iter().any(|dep| dep.depends_on_id == "bd-e2"
+            && matches!(dep.dep_type, DependencyType::ParentChild)),
+        "the parent-child dependency must not survive a rename failure inside \
+         the same attach; got: {deps:?}"
+    );
+    assert!(
+        deps.iter().any(|dep| dep.depends_on_id == "bd-e1"
+            && matches!(dep.dep_type, DependencyType::ParentChild)),
+        "the original dependency must still be in place; got: {deps:?}"
+    );
+
+    assert!(storage.get_issue("bd-e1.1").unwrap().is_some());
+    assert!(storage.get_issue("bd-e1.1.1").unwrap().is_some());
+    assert!(storage.get_issue("bd-e2.2").unwrap().is_none());
+    assert!(
+        storage.get_issue("bd-e2.2.1").unwrap().is_some(),
+        "the pre-existing squatter must be untouched"
+    );
+}
+
+/// Regression for review minor 1 on bds-a23.4.1: `set_parent_with_options`
+/// already no-ops when the dependency edge is unchanged, but `attach_to_parent`
+/// used to rename unconditionally regardless -- reattaching to the current
+/// parent minted a gratuitous new ID and left a tombstone behind for no
+/// actual change.
+#[test]
+fn attach_to_parent_is_a_no_op_when_already_a_child_of_the_target() {
+    let mut storage = test_db();
+    create_at(&mut storage, "bd-parent");
+    create_at(&mut storage, "bd-child");
+
+    let attached = storage
+        .attach_to_parent("bd-child", "bd-parent", "tester")
+        .unwrap();
+    assert_eq!(attached, "bd-parent.1");
+
+    let reattached = storage
+        .attach_to_parent("bd-parent.1", "bd-parent", "tester")
+        .unwrap();
+    assert_eq!(
+        reattached, "bd-parent.1",
+        "reattaching to the current parent must be a no-op, not mint a new slot"
+    );
+
+    assert!(
+        storage.get_issue("bd-parent.2").unwrap().is_none(),
+        "a true no-op must not consume another slot"
+    );
+    let issue = storage.get_issue("bd-parent.1").unwrap().unwrap();
+    assert_eq!(
+        issue.former_ids,
+        vec!["bd-child".to_string()],
+        "the first, real attach recorded `bd-child` as expected, but the \
+         second, no-op reattach must not append another hop"
+    );
 }

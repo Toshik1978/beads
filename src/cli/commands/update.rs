@@ -1442,10 +1442,15 @@ fn resolve_parent_update(
 
 /// Apply the requested parent change to `issue_id`.
 ///
-/// Returns the issue's new ID when `--parent <id>` renumbered it, `None`
-/// otherwise (nothing requested, or the parent was cleared -- clearing never
-/// renames; a dotted ID reaching this function via `ParentUpdatePlan::Clear`
-/// would already have been refused by `validate_parent_updates`).
+/// Returns the issue's new ID when `--parent <id>` actually renumbered it,
+/// `None` otherwise -- nothing requested, the parent was cleared (clearing
+/// never renames; a dotted ID reaching this function via
+/// `ParentUpdatePlan::Clear` would already have been refused by
+/// `validate_parent_updates`), or `--parent <id>` named the parent `issue_id`
+/// already has (`SqliteStorage::attach_to_parent` is a no-op in that case and
+/// returns `issue_id` back unchanged, which the `!=` check below turns back
+/// into `None` so the JSON/human output doesn't report a rename that didn't
+/// happen).
 fn apply_parent_update(
     storage_ctx: &mut config::OpenStorageResult,
     allow_recovery: bool,
@@ -1471,7 +1476,7 @@ fn apply_parent_update(
             Some(issue_id),
             |storage| super::attach_to_parent(storage, issue_id, parent_id, actor),
         )
-        .map(Some),
+        .map(|new_id| (new_id != issue_id).then_some(new_id)),
     }
 }
 
