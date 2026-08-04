@@ -356,6 +356,45 @@ fn rename_leaves_a_tombstone_at_the_vacated_id() {
 }
 
 #[test]
+fn rename_of_an_issue_with_an_external_ref_succeeds() {
+    // idx_issues_external_ref_unique (schema.rs:90) is a unique partial index
+    // over `issues(external_ref) WHERE external_ref IS NOT NULL` with no
+    // status predicate, so a tombstone that copied the live row's
+    // external_ref verbatim would collide with the row rewrite_issue_id had
+    // already moved it to, and the whole rename transaction would roll back.
+    let mut storage = test_db();
+    let mut issue = fixtures::issue("bd-ref");
+    issue.id = "bd-ref".to_string();
+    issue.external_ref = Some("JIRA-123".to_string());
+    storage.create_issue(&issue, "tester").unwrap();
+
+    storage
+        .rename_issue("bd-ref", "bd-ref2", "tester")
+        .expect("a rename must not fail just because the issue has an external_ref");
+
+    let moved = storage
+        .get_issue("bd-ref2")
+        .unwrap()
+        .expect("renamed issue exists");
+    assert_eq!(
+        moved.external_ref,
+        Some("JIRA-123".to_string()),
+        "external_ref must follow the issue to its new id"
+    );
+
+    let stone = storage
+        .get_issue("bd-ref")
+        .unwrap()
+        .expect("tombstone exists");
+    assert_eq!(
+        stone.external_ref, None,
+        "the tombstone must not keep the external_ref -- the live row at the \
+         new id owns it now, and a unique partial index has no status \
+         predicate to tell the two rows apart"
+    );
+}
+
+#[test]
 fn the_tombstone_does_not_block_closing_the_old_parent() {
     let mut storage = tree();
     storage
@@ -379,10 +418,16 @@ fn a_detached_id_is_never_reissued() {
     storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
 
     // bd-p's counter is at 2; the next child must be .3, not a reuse of .2.
-    // `next_child_number` reads from the `child_counters` table first (see
-    // src/storage/sqlite.rs around line 9191), which `rename_issue` never
-    // decrements — it only falls back to scanning live `issues` rows when no
-    // `child_counters` row exists at all, which is not this case.
+    // This exercises the `child_counters` path, not the live-row scan
+    // fallback: `create_issue` already populates a `child_counters` row for
+    // "bd-p" (`last_child = 2`) the moment `tree()` creates `bd-p.2`, via the
+    // `update_child_counter_in_tx` call at src/storage/sqlite.rs:2853.
+    // Confirmed empirically — `next_child_number("bd-p")` already returns 3
+    // immediately after `tree()`, before any rename runs. `rename_issue`
+    // never decrements that counter, so it stays the same read after the
+    // rename below; `next_child_number` (sqlite.rs:9191) only falls back to
+    // scanning live `issues` rows when no `child_counters` row exists at all,
+    // which is not this case.
     let next = storage.next_child_number("bd-p").unwrap();
 
     assert!(

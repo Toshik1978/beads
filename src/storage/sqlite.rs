@@ -2687,6 +2687,110 @@ impl SqliteStorage {
         Ok(result)
     }
 
+    /// Full-row `INSERT INTO issues` — every column, in the order
+    /// [`Self::bind_full_issue_insert_params`] binds them.
+    ///
+    /// Shared by [`Self::create_issue`] and [`Self::insert_rename_tombstone`]
+    /// so the two insert paths cannot drift apart. Before this constant
+    /// existed they were two independently maintained 39-column lists, and
+    /// `former_ids` (added the task before this one) already proved the
+    /// failure mode: a column added to one and not the other silently writes
+    /// the schema `DEFAULT` on whichever path got missed.
+    const FULL_ISSUE_INSERT_SQL: &'static str = "INSERT INTO issues (
+        id, content_hash, title, description, design, acceptance_criteria, notes,
+        status, priority, issue_type, assignee, owner, estimated_minutes,
+        created_at, created_by, updated_at, closed_at, close_reason,
+        closed_by_session, due_at, defer_until, external_ref, source_system,
+        source_repo, source_repo_path, deleted_at, deleted_by, delete_reason, original_type,
+        compaction_level, compacted_at, compacted_at_commit, original_size,
+        sender, ephemeral, pinned, is_template, agent_context, former_ids
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    /// Parameter values for [`Self::FULL_ISSUE_INSERT_SQL`], in column order.
+    fn bind_full_issue_insert_params(issue: &Issue) -> Vec<SqliteValue> {
+        let status_str = issue.status.as_str();
+        let issue_type_str = issue.issue_type.as_str();
+        let created_at_str = issue.created_at.to_rfc3339();
+        let updated_at_str = issue.updated_at.to_rfc3339();
+        let closed_at_str = issue.closed_at.map(|dt| dt.to_rfc3339());
+        let due_at_str = issue.due_at.map(|dt| dt.to_rfc3339());
+        let defer_until_str = issue.defer_until.map(|dt| dt.to_rfc3339());
+        let deleted_at_str = issue.deleted_at.map(|dt| dt.to_rfc3339());
+        let compacted_at_str = issue.compacted_at.map(|dt| dt.to_rfc3339());
+        let content_hash = issue.compute_content_hash();
+        let former_ids_json =
+            serde_json::to_string(&issue.former_ids).unwrap_or_else(|_| "[]".to_string());
+
+        vec![
+            SqliteValue::from(issue.id.as_str()),
+            SqliteValue::from(content_hash.as_str()),
+            SqliteValue::from(issue.title.as_str()),
+            SqliteValue::from(issue.description.as_deref().unwrap_or("")),
+            SqliteValue::from(issue.design.as_deref().unwrap_or("")),
+            SqliteValue::from(issue.acceptance_criteria.as_deref().unwrap_or("")),
+            SqliteValue::from(issue.notes.as_deref().unwrap_or("")),
+            SqliteValue::from(status_str),
+            SqliteValue::from(issue.priority.0),
+            SqliteValue::from(issue_type_str),
+            issue
+                .assignee
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            SqliteValue::from(issue.owner.as_deref().unwrap_or("")),
+            issue
+                .estimated_minutes
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            SqliteValue::from(created_at_str.as_str()),
+            SqliteValue::from(issue.created_by.as_deref().unwrap_or("")),
+            SqliteValue::from(updated_at_str.as_str()),
+            closed_at_str
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            SqliteValue::from(issue.close_reason.as_deref().unwrap_or("")),
+            SqliteValue::from(issue.closed_by_session.as_deref().unwrap_or("")),
+            due_at_str
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            defer_until_str
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            issue
+                .external_ref
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            SqliteValue::from(issue.source_system.as_deref().unwrap_or("")),
+            SqliteValue::from(issue.source_repo.as_deref().unwrap_or(".")),
+            issue
+                .source_repo_path
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            deleted_at_str
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            SqliteValue::from(issue.deleted_by.as_deref().unwrap_or("")),
+            SqliteValue::from(issue.delete_reason.as_deref().unwrap_or("")),
+            SqliteValue::from(issue.original_type.as_deref().unwrap_or("")),
+            SqliteValue::from(i64::from(issue.compaction_level.unwrap_or(0))),
+            compacted_at_str
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            issue
+                .compacted_at_commit
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            SqliteValue::from(i64::from(issue.original_size.unwrap_or(0))),
+            SqliteValue::from(issue.sender.as_deref().unwrap_or("")),
+            SqliteValue::from(i64::from(i32::from(issue.ephemeral))),
+            SqliteValue::from(i64::from(i32::from(issue.pinned))),
+            SqliteValue::from(i64::from(i32::from(issue.is_template))),
+            issue
+                .agent_context
+                .as_deref()
+                .map_or(SqliteValue::Null, SqliteValue::from),
+            SqliteValue::from(former_ids_json.as_str()),
+        ]
+    }
+
     /// Create a new issue.
     ///
     /// # Errors
@@ -2741,70 +2845,9 @@ impl SqliteStorage {
             )?;
             ctx.capacity_warnings.extend(capacity_warnings);
 
-            let status_str = issue.status.as_str();
-            let issue_type_str = issue.issue_type.as_str();
-            let created_at_str = issue.created_at.to_rfc3339();
-            let updated_at_str = issue.updated_at.to_rfc3339();
-            let closed_at_str = issue.closed_at.map(|dt| dt.to_rfc3339());
-            let due_at_str = issue.due_at.map(|dt| dt.to_rfc3339());
-            let defer_until_str = issue.defer_until.map(|dt| dt.to_rfc3339());
-            let deleted_at_str = issue.deleted_at.map(|dt| dt.to_rfc3339());
-            let compacted_at_str = issue.compacted_at.map(|dt| dt.to_rfc3339());
-            let content_hash = issue.compute_content_hash();
-            let former_ids_json = serde_json::to_string(&issue.former_ids)
-                .unwrap_or_else(|_| "[]".to_string());
-
             conn.execute_with_params(
-                "INSERT INTO issues (
-                    id, content_hash, title, description, design, acceptance_criteria, notes,
-                    status, priority, issue_type, assignee, owner, estimated_minutes,
-                    created_at, created_by, updated_at, closed_at, close_reason,
-                    closed_by_session, due_at, defer_until, external_ref, source_system,
-                    source_repo, source_repo_path, deleted_at, deleted_by, delete_reason, original_type,
-                    compaction_level, compacted_at, compacted_at_commit, original_size,
-                    sender, ephemeral, pinned, is_template, agent_context, former_ids
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                &[
-                    SqliteValue::from(issue.id.as_str()),
-                    SqliteValue::from(content_hash.as_str()),
-                    SqliteValue::from(issue.title.as_str()),
-                    SqliteValue::from(issue.description.as_deref().unwrap_or("")),
-                    SqliteValue::from(issue.design.as_deref().unwrap_or("")),
-                    SqliteValue::from(issue.acceptance_criteria.as_deref().unwrap_or("")),
-                    SqliteValue::from(issue.notes.as_deref().unwrap_or("")),
-                    SqliteValue::from(status_str),
-                    SqliteValue::from(issue.priority.0),
-                    SqliteValue::from(issue_type_str),
-                    issue.assignee.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    SqliteValue::from(issue.owner.as_deref().unwrap_or("")),
-                    issue.estimated_minutes.map_or(SqliteValue::Null, SqliteValue::from),
-                    SqliteValue::from(created_at_str.as_str()),
-                    SqliteValue::from(issue.created_by.as_deref().unwrap_or("")),
-                    SqliteValue::from(updated_at_str.as_str()),
-                    closed_at_str.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    SqliteValue::from(issue.close_reason.as_deref().unwrap_or("")),
-                    SqliteValue::from(issue.closed_by_session.as_deref().unwrap_or("")),
-                    due_at_str.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    defer_until_str.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    issue.external_ref.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    SqliteValue::from(issue.source_system.as_deref().unwrap_or("")),
-                    SqliteValue::from(issue.source_repo.as_deref().unwrap_or(".")),
-                    issue.source_repo_path.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    deleted_at_str.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    SqliteValue::from(issue.deleted_by.as_deref().unwrap_or("")),
-                    SqliteValue::from(issue.delete_reason.as_deref().unwrap_or("")),
-                    SqliteValue::from(issue.original_type.as_deref().unwrap_or("")),
-                    SqliteValue::from(i64::from(issue.compaction_level.unwrap_or(0))),
-                    compacted_at_str.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    issue.compacted_at_commit.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    SqliteValue::from(i64::from(issue.original_size.unwrap_or(0))),
-                    SqliteValue::from(issue.sender.as_deref().unwrap_or("")),
-                    SqliteValue::from(i64::from(i32::from(issue.ephemeral))),
-                    SqliteValue::from(i64::from(i32::from(issue.pinned))),
-                    SqliteValue::from(i64::from(i32::from(issue.is_template))),
-                    issue.agent_context.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-                    SqliteValue::from(former_ids_json.as_str()),
-                ],
+                Self::FULL_ISSUE_INSERT_SQL,
+                &Self::bind_full_issue_insert_params(issue),
             )?;
 
             // Update child counter if this is a hierarchical ID
@@ -7339,13 +7382,13 @@ impl SqliteStorage {
     /// This runs *after* [`Self::rewrite_issue_id`] has already moved the
     /// live row from `old_id` to `new_id`, so `old_id` no longer names any
     /// row at this point — unlike [`Self::delete_issue`], which flips an
-    /// existing row's status in place, this INSERTs a fresh one.
+    /// existing row's status in place, this INSERTs a fresh one, sharing
+    /// [`Self::FULL_ISSUE_INSERT_SQL`] with [`Self::create_issue`].
     /// `pre_rename` is the issue's content as it was before the ID rewrite,
     /// so the tombstone still carries the title/description a human would
     /// recognise; `former_ids` is reset to empty on the tombstone because
     /// forward provenance belongs on the row that carries the identity on,
     /// not on the marker left behind.
-    #[allow(clippy::too_many_lines)]
     fn insert_rename_tombstone(
         conn: &Connection,
         pre_rename: &Issue,
@@ -7361,98 +7404,16 @@ impl SqliteStorage {
         tombstone.original_type = Some(pre_rename.issue_type.as_str().to_string());
         tombstone.updated_at = now;
         tombstone.former_ids = Vec::new();
-        let content_hash = tombstone.compute_content_hash();
-
-        let status_str = tombstone.status.as_str();
-        let issue_type_str = tombstone.issue_type.as_str();
-        let created_at_str = tombstone.created_at.to_rfc3339();
-        let updated_at_str = tombstone.updated_at.to_rfc3339();
-        let closed_at_str = tombstone.closed_at.map(|dt| dt.to_rfc3339());
-        let due_at_str = tombstone.due_at.map(|dt| dt.to_rfc3339());
-        let defer_until_str = tombstone.defer_until.map(|dt| dt.to_rfc3339());
-        let deleted_at_str = tombstone.deleted_at.map(|dt| dt.to_rfc3339());
-        let compacted_at_str = tombstone.compacted_at.map(|dt| dt.to_rfc3339());
-        let former_ids_json =
-            serde_json::to_string(&tombstone.former_ids).unwrap_or_else(|_| "[]".to_string());
+        // `rewrite_issue_id` already carried this value to the live row at
+        // `new_id`. `idx_issues_external_ref_unique` (schema.rs:90) is a
+        // unique partial index with no status predicate, so a tombstone that
+        // kept it would collide with the row it was just renamed to and the
+        // whole rename would roll back.
+        tombstone.external_ref = None;
 
         conn.execute_with_params(
-            "INSERT INTO issues (
-                id, content_hash, title, description, design, acceptance_criteria, notes,
-                status, priority, issue_type, assignee, owner, estimated_minutes,
-                created_at, created_by, updated_at, closed_at, close_reason,
-                closed_by_session, due_at, defer_until, external_ref, source_system,
-                source_repo, source_repo_path, deleted_at, deleted_by, delete_reason, original_type,
-                compaction_level, compacted_at, compacted_at_commit, original_size,
-                sender, ephemeral, pinned, is_template, agent_context, former_ids
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            &[
-                SqliteValue::from(tombstone.id.as_str()),
-                SqliteValue::from(content_hash.as_str()),
-                SqliteValue::from(tombstone.title.as_str()),
-                SqliteValue::from(tombstone.description.as_deref().unwrap_or("")),
-                SqliteValue::from(tombstone.design.as_deref().unwrap_or("")),
-                SqliteValue::from(tombstone.acceptance_criteria.as_deref().unwrap_or("")),
-                SqliteValue::from(tombstone.notes.as_deref().unwrap_or("")),
-                SqliteValue::from(status_str),
-                SqliteValue::from(tombstone.priority.0),
-                SqliteValue::from(issue_type_str),
-                tombstone
-                    .assignee
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                SqliteValue::from(tombstone.owner.as_deref().unwrap_or("")),
-                tombstone
-                    .estimated_minutes
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                SqliteValue::from(created_at_str.as_str()),
-                SqliteValue::from(tombstone.created_by.as_deref().unwrap_or("")),
-                SqliteValue::from(updated_at_str.as_str()),
-                closed_at_str
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                SqliteValue::from(tombstone.close_reason.as_deref().unwrap_or("")),
-                SqliteValue::from(tombstone.closed_by_session.as_deref().unwrap_or("")),
-                due_at_str
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                defer_until_str
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                tombstone
-                    .external_ref
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                SqliteValue::from(tombstone.source_system.as_deref().unwrap_or("")),
-                SqliteValue::from(tombstone.source_repo.as_deref().unwrap_or(".")),
-                tombstone
-                    .source_repo_path
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                deleted_at_str
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                SqliteValue::from(tombstone.deleted_by.as_deref().unwrap_or("")),
-                SqliteValue::from(tombstone.delete_reason.as_deref().unwrap_or("")),
-                SqliteValue::from(tombstone.original_type.as_deref().unwrap_or("")),
-                SqliteValue::from(i64::from(tombstone.compaction_level.unwrap_or(0))),
-                compacted_at_str
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                tombstone
-                    .compacted_at_commit
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                SqliteValue::from(i64::from(tombstone.original_size.unwrap_or(0))),
-                SqliteValue::from(tombstone.sender.as_deref().unwrap_or("")),
-                SqliteValue::from(i64::from(i32::from(tombstone.ephemeral))),
-                SqliteValue::from(i64::from(i32::from(tombstone.pinned))),
-                SqliteValue::from(i64::from(i32::from(tombstone.is_template))),
-                tombstone
-                    .agent_context
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-                SqliteValue::from(former_ids_json.as_str()),
-            ],
+            Self::FULL_ISSUE_INSERT_SQL,
+            &Self::bind_full_issue_insert_params(&tombstone),
         )?;
 
         Ok(())
