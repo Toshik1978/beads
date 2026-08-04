@@ -7333,17 +7333,143 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Insert a tombstone row at the vacated `old_id`, recording that the
+    /// issue moved to `new_id`.
+    ///
+    /// This runs *after* [`Self::rewrite_issue_id`] has already moved the
+    /// live row from `old_id` to `new_id`, so `old_id` no longer names any
+    /// row at this point — unlike [`Self::delete_issue`], which flips an
+    /// existing row's status in place, this INSERTs a fresh one.
+    /// `pre_rename` is the issue's content as it was before the ID rewrite,
+    /// so the tombstone still carries the title/description a human would
+    /// recognise; `former_ids` is reset to empty on the tombstone because
+    /// forward provenance belongs on the row that carries the identity on,
+    /// not on the marker left behind.
+    #[allow(clippy::too_many_lines)]
+    fn insert_rename_tombstone(
+        conn: &Connection,
+        pre_rename: &Issue,
+        new_id: &str,
+        actor: &str,
+    ) -> Result<()> {
+        let now = Utc::now();
+        let mut tombstone = pre_rename.clone();
+        tombstone.status = Status::Tombstone;
+        tombstone.deleted_at = Some(now);
+        tombstone.deleted_by = Some(actor.to_string());
+        tombstone.delete_reason = Some(format!("renamed to {new_id}"));
+        tombstone.original_type = Some(pre_rename.issue_type.as_str().to_string());
+        tombstone.updated_at = now;
+        tombstone.former_ids = Vec::new();
+        let content_hash = tombstone.compute_content_hash();
+
+        let status_str = tombstone.status.as_str();
+        let issue_type_str = tombstone.issue_type.as_str();
+        let created_at_str = tombstone.created_at.to_rfc3339();
+        let updated_at_str = tombstone.updated_at.to_rfc3339();
+        let closed_at_str = tombstone.closed_at.map(|dt| dt.to_rfc3339());
+        let due_at_str = tombstone.due_at.map(|dt| dt.to_rfc3339());
+        let defer_until_str = tombstone.defer_until.map(|dt| dt.to_rfc3339());
+        let deleted_at_str = tombstone.deleted_at.map(|dt| dt.to_rfc3339());
+        let compacted_at_str = tombstone.compacted_at.map(|dt| dt.to_rfc3339());
+        let former_ids_json =
+            serde_json::to_string(&tombstone.former_ids).unwrap_or_else(|_| "[]".to_string());
+
+        conn.execute_with_params(
+            "INSERT INTO issues (
+                id, content_hash, title, description, design, acceptance_criteria, notes,
+                status, priority, issue_type, assignee, owner, estimated_minutes,
+                created_at, created_by, updated_at, closed_at, close_reason,
+                closed_by_session, due_at, defer_until, external_ref, source_system,
+                source_repo, source_repo_path, deleted_at, deleted_by, delete_reason, original_type,
+                compaction_level, compacted_at, compacted_at_commit, original_size,
+                sender, ephemeral, pinned, is_template, agent_context, former_ids
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &[
+                SqliteValue::from(tombstone.id.as_str()),
+                SqliteValue::from(content_hash.as_str()),
+                SqliteValue::from(tombstone.title.as_str()),
+                SqliteValue::from(tombstone.description.as_deref().unwrap_or("")),
+                SqliteValue::from(tombstone.design.as_deref().unwrap_or("")),
+                SqliteValue::from(tombstone.acceptance_criteria.as_deref().unwrap_or("")),
+                SqliteValue::from(tombstone.notes.as_deref().unwrap_or("")),
+                SqliteValue::from(status_str),
+                SqliteValue::from(tombstone.priority.0),
+                SqliteValue::from(issue_type_str),
+                tombstone
+                    .assignee
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                SqliteValue::from(tombstone.owner.as_deref().unwrap_or("")),
+                tombstone
+                    .estimated_minutes
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                SqliteValue::from(created_at_str.as_str()),
+                SqliteValue::from(tombstone.created_by.as_deref().unwrap_or("")),
+                SqliteValue::from(updated_at_str.as_str()),
+                closed_at_str
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                SqliteValue::from(tombstone.close_reason.as_deref().unwrap_or("")),
+                SqliteValue::from(tombstone.closed_by_session.as_deref().unwrap_or("")),
+                due_at_str
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                defer_until_str
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                tombstone
+                    .external_ref
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                SqliteValue::from(tombstone.source_system.as_deref().unwrap_or("")),
+                SqliteValue::from(tombstone.source_repo.as_deref().unwrap_or(".")),
+                tombstone
+                    .source_repo_path
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                deleted_at_str
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                SqliteValue::from(tombstone.deleted_by.as_deref().unwrap_or("")),
+                SqliteValue::from(tombstone.delete_reason.as_deref().unwrap_or("")),
+                SqliteValue::from(tombstone.original_type.as_deref().unwrap_or("")),
+                SqliteValue::from(i64::from(tombstone.compaction_level.unwrap_or(0))),
+                compacted_at_str
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                tombstone
+                    .compacted_at_commit
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                SqliteValue::from(i64::from(tombstone.original_size.unwrap_or(0))),
+                SqliteValue::from(tombstone.sender.as_deref().unwrap_or("")),
+                SqliteValue::from(i64::from(i32::from(tombstone.ephemeral))),
+                SqliteValue::from(i64::from(i32::from(tombstone.pinned))),
+                SqliteValue::from(i64::from(i32::from(tombstone.is_template))),
+                tombstone
+                    .agent_context
+                    .as_deref()
+                    .map_or(SqliteValue::Null, SqliteValue::from),
+                SqliteValue::from(former_ids_json.as_str()),
+            ],
+        )?;
+
+        Ok(())
+    }
+
     /// Move `old_id` to `new_id`, carrying the entire subtree beneath it.
     ///
     /// Renaming `bd-p.1` to `bd-q.7` also moves `bd-p.1.1` to `bd-q.7.1`, at
     /// every depth and in every status. The whole move is one [`Self::mutate`]
     /// transaction: a failure at any node leaves the tree exactly as it was.
     ///
-    /// Does **not** touch `former_ids` or write a tombstone — a later task
-    /// layers those on top. `actor` is accepted now so callers get a stable
-    /// signature; this primitive does not yet persist it anywhere, because
-    /// this schema has no per-issue audit-log table to write to (`br
-    /// history` covers JSONL export backups, not issue-level events).
+    /// The top-level node gains a `former_ids` entry recording `old_id` and
+    /// leaves a tombstone at the vacated ID naming where it went. Descendants
+    /// moved implicitly as a consequence of the top-level move get neither —
+    /// their IDs changed only because an ancestor's did, and tombstoning
+    /// every node of a deep subtree would flood the JSONL for no
+    /// navigational benefit.
     ///
     /// # Errors
     ///
@@ -7362,6 +7488,14 @@ impl SqliteStorage {
                 format!("{new_id} already exists"),
             ));
         }
+
+        // Captured before the rewrite: source of the tombstone's content and
+        // of the `former_ids` this hop appends to.
+        let pre_rename = self
+            .get_issue(old_id)?
+            .ok_or_else(|| BeadsError::IssueNotFound {
+                id: old_id.to_string(),
+            })?;
 
         tracing::debug!(old_id, new_id, actor, "rename_issue");
 
@@ -7383,6 +7517,26 @@ impl SqliteStorage {
 
             Self::rewrite_issue_id(conn, old_id, new_id)?;
             ctx.mark_dirty(new_id);
+
+            // Provenance on the issue that moved. Appended, not replaced: an
+            // issue renamed twice carries both hops, oldest first.
+            let mut former = pre_rename.former_ids.clone();
+            former.push(old_id.to_string());
+            let former_ids_json =
+                serde_json::to_string(&former).unwrap_or_else(|_| "[]".to_string());
+            conn.execute_with_params(
+                "UPDATE issues SET former_ids = ? WHERE id = ?",
+                &[
+                    SqliteValue::from(former_ids_json.as_str()),
+                    SqliteValue::from(new_id),
+                ],
+            )?;
+
+            // A tombstone at the vacated ID, so the move propagates through
+            // JSONL. Without it, a clone still holding `old_id` merges its
+            // copy back in as a live issue and silently undoes the rename.
+            Self::insert_rename_tombstone(conn, &pre_rename, new_id, actor)?;
+            ctx.mark_dirty(old_id);
 
             // `rewrite_issue_id` only moves the `blocked_issues_cache` row
             // keyed by `issue_id`; any *other* row whose `blocked_by` JSON

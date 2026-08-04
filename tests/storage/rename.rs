@@ -4,7 +4,9 @@ use crate::common;
 
 use beads::model::Status;
 use beads::storage::{IssueUpdate, SqliteStorage};
+use beads::sync::{ExportConfig, ImportConfig, export_to_jsonl, import_from_jsonl};
 use common::{fixtures, test_db};
+use tempfile::TempDir;
 
 /// Build `parent`, `parent.1`, `parent.1.1` and `parent.2`, returning storage.
 fn tree() -> SqliteStorage {
@@ -131,7 +133,15 @@ fn rename_carries_the_whole_subtree() {
         storage.get_issue("bd-q.7.1").unwrap().is_some(),
         "the grandchild bd-p.1.1 must have followed its parent to bd-q.7.1"
     );
-    assert!(storage.get_issue("bd-p.1").unwrap().is_none());
+    // The top-level node leaves a tombstone behind rather than vanishing —
+    // see `rename_leaves_a_tombstone_at_the_vacated_id` below for the
+    // dedicated coverage. Descendants moved only as a consequence of their
+    // ancestor's move get no tombstone of their own and are simply gone.
+    let stone = storage.get_issue("bd-p.1").unwrap();
+    assert!(
+        stone.is_some_and(|issue| issue.status == Status::Tombstone),
+        "the vacated top-level ID keeps a tombstone row"
+    );
     assert!(storage.get_issue("bd-p.1.1").unwrap().is_none());
 }
 
@@ -293,5 +303,129 @@ fn former_ids_survives_a_jsonl_round_trip() {
     assert!(
         !plain_line.contains("former_ids"),
         "empty former_ids must be skipped in serialization; got {plain_line}"
+    );
+}
+
+#[test]
+fn rename_records_the_old_id_in_former_ids() {
+    let mut storage = tree();
+
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    let moved = storage.get_issue("bd-new").unwrap().expect("exists");
+    assert_eq!(moved.former_ids, vec!["bd-p.2"]);
+}
+
+#[test]
+fn former_ids_accumulate_oldest_first_across_repeated_renames() {
+    let mut storage = tree();
+
+    storage.rename_issue("bd-p.2", "bd-mid", "tester").unwrap();
+    storage
+        .rename_issue("bd-mid", "bd-final", "tester")
+        .unwrap();
+
+    let moved = storage.get_issue("bd-final").unwrap().expect("exists");
+    assert_eq!(
+        moved.former_ids,
+        vec!["bd-p.2", "bd-mid"],
+        "both hops must be recorded, oldest first"
+    );
+}
+
+#[test]
+fn rename_leaves_a_tombstone_at_the_vacated_id() {
+    let mut storage = tree();
+
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    let stone = storage
+        .get_issue("bd-p.2")
+        .unwrap()
+        .expect("the vacated ID keeps a tombstone row");
+    assert_eq!(stone.status, Status::Tombstone);
+    assert!(
+        stone
+            .delete_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bd-new"),
+        "the tombstone must name where the issue went; got {:?}",
+        stone.delete_reason
+    );
+}
+
+#[test]
+fn the_tombstone_does_not_block_closing_the_old_parent() {
+    let mut storage = tree();
+    storage
+        .rename_issue("bd-p.1", "bd-gone-1", "tester")
+        .unwrap();
+    storage
+        .rename_issue("bd-p.2", "bd-gone-2", "tester")
+        .unwrap();
+
+    let blockers = storage.get_open_dot_notation_children("bd-p").unwrap();
+
+    assert!(
+        blockers.is_empty(),
+        "tombstones are not open children and must not block the parent's close; got {blockers:?}"
+    );
+}
+
+#[test]
+fn a_detached_id_is_never_reissued() {
+    let mut storage = tree();
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    // bd-p's counter is at 2; the next child must be .3, not a reuse of .2.
+    // `next_child_number` reads from the `child_counters` table first (see
+    // src/storage/sqlite.rs around line 9191), which `rename_issue` never
+    // decrements — it only falls back to scanning live `issues` rows when no
+    // `child_counters` row exists at all, which is not this case.
+    let next = storage.next_child_number("bd-p").unwrap();
+
+    assert!(
+        next > 2,
+        "reissuing bd-p.2 would silently redirect every stale reference to the \
+         original occupant onto a different issue; got next = {next}"
+    );
+}
+
+#[test]
+fn rename_tombstone_and_former_ids_survive_a_jsonl_export_import_round_trip() {
+    let mut storage = tree();
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("issues.jsonl");
+    export_to_jsonl(&storage, &path, &ExportConfig::default()).unwrap();
+
+    let mut imported = test_db();
+    import_from_jsonl(&mut imported, &path, &ImportConfig::default(), Some("bd-")).unwrap();
+
+    let moved = imported
+        .get_issue("bd-new")
+        .unwrap()
+        .expect("the renamed issue survives the round trip");
+    assert_eq!(
+        moved.former_ids,
+        vec!["bd-p.2"],
+        "former_ids must survive a JSONL export/import round trip"
+    );
+
+    let stone = imported
+        .get_issue("bd-p.2")
+        .unwrap()
+        .expect("the tombstone survives the round trip — this is the whole reason it exists");
+    assert_eq!(stone.status, Status::Tombstone);
+    assert!(
+        stone
+            .delete_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bd-new"),
+        "the imported tombstone must still name its destination; got {:?}",
+        stone.delete_reason
     );
 }
