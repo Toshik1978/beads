@@ -18,6 +18,7 @@ pub mod config;
 pub mod create;
 pub mod delete;
 pub mod dep;
+pub mod detach;
 pub mod epic;
 pub mod history;
 pub mod info;

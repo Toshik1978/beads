@@ -35,6 +35,8 @@ mod create_output;
 mod defer;
 #[path = "e2e/dep_tree_mermaid.rs"]
 mod dep_tree_mermaid;
+#[path = "e2e/detach.rs"]
+mod detach;
 #[path = "e2e/env_overrides.rs"]
 mod env_overrides;
 #[path = "e2e/epic.rs"]

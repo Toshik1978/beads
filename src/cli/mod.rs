@@ -681,6 +681,9 @@ pub enum Commands {
         command: DepCommands,
     },
 
+    /// Detach an issue from its parent, giving it an independent ID
+    Detach(DetachArgs),
+
     /// Epic management commands
     Epic {
         #[command(subcommand)]
@@ -1758,6 +1761,14 @@ pub struct ReopenArgs {
     /// Reason for reopening (stored as a comment)
     #[arg(long, short = 'r')]
     pub reason: Option<String>,
+}
+
+/// Arguments for the detach command.
+#[derive(Args, Debug, Clone, Default)]
+pub struct DetachArgs {
+    /// Issue IDs to detach from their parent
+    #[arg(add = ArgValueCompleter::new(issue_id_completer))]
+    pub ids: Vec<String>,
 }
 
 /// Sort policy for ready command.
