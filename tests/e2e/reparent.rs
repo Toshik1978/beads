@@ -794,3 +794,149 @@ fn e2e_dep_add_parent_child_rejects_metadata_instead_of_silently_dropping_it() {
         dep_list.stdout
     );
 }
+
+#[test]
+fn e2e_create_with_a_parent_child_dep_is_refused_and_names_the_parent_flag() {
+    let _log =
+        common::test_log("e2e_create_with_a_parent_child_dep_is_refused_and_names_the_parent_flag");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(epic.status.success());
+    let epic_id = parse_created_id(&epic.stdout);
+
+    // `--deps parent-child:<epic>` would mint a flat ID while claiming a
+    // parent in the same breath -- the exact state the invariant forbids.
+    // `--parent` already mints the issue as `<epic>.n` correctly.
+    let out = run_br(
+        &workspace,
+        [
+            "create",
+            "Child",
+            "--deps",
+            &format!("parent-child:{epic_id}"),
+        ],
+        "create_with_parent_child_dep",
+    );
+
+    assert!(
+        !out.status.success(),
+        "this would create a flat ID with a parent"
+    );
+    assert!(
+        out.stderr.contains("--parent"),
+        "the error must name the flag that does this correctly; got: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn e2e_create_with_an_ordinary_dep_still_works() {
+    let _log = common::test_log("e2e_create_with_an_ordinary_dep_still_works");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let other = run_br(
+        &workspace,
+        ["create", "Other", "--type", "task"],
+        "create_other",
+    );
+    assert!(other.status.success());
+    let other_id = parse_created_id(&other.stdout);
+
+    let out = run_br(
+        &workspace,
+        [
+            "create",
+            "Blocked thing",
+            "--deps",
+            &format!("blocks:{other_id}"),
+        ],
+        "create_with_ordinary_dep",
+    );
+    assert!(
+        out.status.success(),
+        "an ordinary --deps entry must still work: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn e2e_dep_import_renumbers_parent_child_rows() {
+    let _log = common::test_log("e2e_dep_import_renumbers_parent_child_rows");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(epic.status.success());
+    let epic_id = parse_created_id(&epic.stdout);
+
+    let loose = run_br(
+        &workspace,
+        ["create", "Loose", "--type", "task"],
+        "create_loose",
+    );
+    assert!(loose.status.success());
+    let loose_id = parse_created_id(&loose.stdout);
+
+    let import_path = workspace.root.join("parent_child.jsonl");
+    fs::write(
+        &import_path,
+        format!(
+            "{{\"issue_id\":\"{loose_id}\",\"depends_on_id\":\"{epic_id}\",\"type\":\"parent-child\"}}\n"
+        ),
+    )
+    .expect("write parent-child dependency import jsonl");
+
+    let import_arg = import_path.to_string_lossy().to_string();
+    let import = run_br(
+        &workspace,
+        ["dep", "import", import_arg.as_str(), "--json"],
+        "dep_import_parent_child",
+    );
+    assert!(
+        import.status.success(),
+        "dep import failed: {}",
+        import.stderr
+    );
+
+    let import_result: Value =
+        serde_json::from_str(&extract_json_payload(&import.stdout)).expect("parse dep import json");
+    assert_eq!(
+        import_result["imported"].as_u64(),
+        Some(1),
+        "the parent-child row must count as imported; got: {import_result}"
+    );
+
+    // The pre-import (now former) ID must still resolve, via the
+    // `former_ids` fallback, to the issue renumbered under its new parent.
+    let show = run_br(
+        &workspace,
+        ["show", &loose_id, "--json"],
+        "show_old_id_after_import",
+    );
+    assert!(
+        show.status.success(),
+        "the old ID must still resolve after the import renumbered it: {}",
+        show.stderr
+    );
+    let show_payload: Vec<Value> =
+        serde_json::from_str(&extract_json_payload(&show.stdout)).expect("parse show json");
+    let new_id = show_payload[0]["id"].as_str().expect("id in show payload");
+    assert!(
+        new_id.starts_with(&format!("{epic_id}.")),
+        "dep import must renumber the child under its new parent; got {new_id}"
+    );
+}

@@ -4,7 +4,8 @@ use super::{
     RoutedWorkspaceWriteLock, acquire_routed_workspace_write_lock,
     auto_import_storage_ctx_if_stale, cli_for_routed_workspace,
     external_project_db_paths_after_auto_import_if_needed, finalize_batched_blocked_cache_refresh,
-    report_auto_flush_failure, resolve_issue_id, retry_mutation_with_jsonl_recovery,
+    preserve_blocked_cache_on_error, report_auto_flush_failure, resolve_issue_id,
+    retry_mutation_with_jsonl_recovery,
 };
 use crate::cli::{
     DepAddArgs, DepCommands, DepCyclesArgs, DepDirection, DepImportArgs, DepListArgs,
@@ -138,8 +139,17 @@ fn execute_dep_import(
     auto_import_storage_ctx_if_stale(&mut storage_ctx, cli)?;
     let config_layer = storage_ctx.load_config(cli)?;
     let actor = config::resolve_actor(&config_layer);
+    let id_config = config::id_config_from_layer(&config_layer);
+    let resolver = IdResolver::new(ResolverConfig::with_prefix(id_config.prefix));
     let dependencies = read_dependency_imports(&args.path)?;
-    dep_import(args, &dependencies, &mut storage_ctx, &actor, ctx)
+    dep_import(
+        args,
+        &dependencies,
+        &mut storage_ctx,
+        &resolver,
+        &actor,
+        ctx,
+    )
 }
 
 fn execute_dep_list(
@@ -787,24 +797,119 @@ fn dep_add_parent_child(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn dep_import(
     args: &DepImportArgs,
     dependencies: &[BulkDependencyInsert],
     storage_ctx: &mut config::OpenStorageResult,
+    resolver: &IdResolver,
     actor: &str,
     ctx: &OutputContext,
 ) -> Result<()> {
     let total_edges = dependencies.len();
-    let probe_issue_id = dependencies.first().map(|dep| dep.issue_id.as_str());
-    let imported = retry_mutation_with_jsonl_recovery(
-        storage_ctx,
-        true,
-        "dep import",
-        probe_issue_id,
-        |storage| storage.add_dependencies_bulk_for_import(dependencies, actor),
-    )?;
 
-    finalize_dep_mutation(storage_ctx, imported > 0, "dep import")?;
+    // Renumbering mid-batch is incompatible with a bulk insert: each
+    // `attach_to_parent` call can rename an issue, and that rename
+    // invalidates IDs that later rows in the same file may reference.
+    // Partition the parsed rows so the non-hierarchy rows still go through
+    // the batched insert unchanged, while `parent-child` rows are applied
+    // one at a time, in file order, through the same helper `dep add --type
+    // parent-child` uses.
+    let mut flat_rows: Vec<BulkDependencyInsert> = Vec::with_capacity(dependencies.len());
+    let mut parent_child_rows: Vec<BulkDependencyInsert> = Vec::new();
+    for dep in dependencies {
+        if dep.dep_type == "parent-child" {
+            parent_child_rows.push(dep.clone());
+        } else {
+            flat_rows.push(dep.clone());
+        }
+    }
+
+    let probe_issue_id = flat_rows.first().map(|dep| dep.issue_id.as_str());
+    let mut imported = if flat_rows.is_empty() {
+        0
+    } else {
+        retry_mutation_with_jsonl_recovery(
+            storage_ctx,
+            true,
+            "dep import",
+            probe_issue_id,
+            |storage| storage.add_dependencies_bulk_for_import(&flat_rows, actor),
+        )?
+    };
+
+    // `dep import` is genuinely a batch, unlike `dep add`: if an earlier row
+    // commits and a later one fails, the earlier mutation is already durable
+    // and the blocked cache must be left marked stale rather than silently
+    // wrong, or `br ready` would go on serving stale results. Same window
+    // `reopen`/`detach` guard with `preserve_blocked_cache_on_error`.
+    let mut cache_dirty = imported > 0;
+
+    for row in &parent_child_rows {
+        // A rename caused by an earlier row in this same loop is only
+        // visible through the `former_ids` fallback, so re-resolve
+        // `issue_id` immediately before applying this row rather than
+        // trusting the id as parsed from the file.
+        let resolved = resolve_issue_id(&storage_ctx.storage, resolver, &row.issue_id);
+        let issue_id = match preserve_blocked_cache_on_error(
+            &mut storage_ctx.storage,
+            cache_dirty,
+            "dep import",
+            resolved,
+        ) {
+            Ok(id) => id,
+            Err(err) => {
+                if let Err(flush_err) = storage_ctx.flush_no_db_if_dirty() {
+                    tracing::warn!(
+                        error = %flush_err,
+                        original_error = %err,
+                        "failed to flush no-db JSONL after a mid-batch dep import error"
+                    );
+                }
+                return Err(err);
+            }
+        };
+
+        let attach_result = retry_mutation_with_jsonl_recovery(
+            storage_ctx,
+            true,
+            "dep import",
+            Some(issue_id.as_str()),
+            |storage| {
+                crate::cli::commands::attach_to_parent(
+                    storage,
+                    &issue_id,
+                    &row.depends_on_id,
+                    actor,
+                )
+            },
+        );
+        let new_id = match preserve_blocked_cache_on_error(
+            &mut storage_ctx.storage,
+            cache_dirty,
+            "dep import",
+            attach_result,
+        ) {
+            Ok(id) => id,
+            Err(err) => {
+                if let Err(flush_err) = storage_ctx.flush_no_db_if_dirty() {
+                    tracing::warn!(
+                        error = %flush_err,
+                        original_error = %err,
+                        "failed to flush no-db JSONL after a mid-batch dep import error"
+                    );
+                }
+                return Err(err);
+            }
+        };
+
+        if new_id != issue_id {
+            imported += 1;
+            cache_dirty = true;
+        }
+    }
+
+    finalize_dep_mutation(storage_ctx, cache_dirty, "dep import")?;
     if let Err(error) = storage_ctx.auto_flush_if_enabled() {
         report_auto_flush_failure(
             ctx,

@@ -624,10 +624,28 @@ fn validate_relations(args: &CreateArgs, issue_id: &str) -> Result<()> {
 
     // Validate Dependencies
     for dep_str in &args.deps {
-        let (_, dep_id) = parse_create_dependency(dep_str)?;
+        let (dep_type, dep_id) = parse_create_dependency(dep_str)?;
 
         if dep_id == issue_id {
             return Err(BeadsError::validation("deps", "cannot depend on itself"));
+        }
+
+        // `--dep parent-child:X` would mint a flat ID while claiming a parent
+        // in the same breath -- the exact state the invariant forbids: a
+        // dotted prefix always names the real parent, and having a parent
+        // always implies a dotted ID. `--parent` already mints the issue as
+        // `X.n` correctly, so refuse here rather than let it slip through
+        // and set an edge the ID doesn't reflect. Checked fail-fast, before
+        // any DB write, regardless of whether `--parent` was also given.
+        if dep_type == DependencyType::ParentChild {
+            return Err(BeadsError::validation(
+                "dep",
+                format!(
+                    "a parent cannot be set with --dep, because the new issue would get a \
+                     flat ID while claiming a parent. Use `--parent {dep_id}` instead, \
+                     which mints the issue as a child of {dep_id}."
+                ),
+            ));
         }
     }
 
@@ -1208,6 +1226,25 @@ fn execute_import(
                         create_display_text(&resolved_dep_id),
                         create_display_text(issue_id)
                     );
+                    continue;
+                }
+
+                // Same chokepoint as the single-issue path in
+                // `validate_relations`: a `parent-child` edge declared through
+                // Dependencies/`--dep` would set a parent without renumbering
+                // the (already flat, already created) ID to match. Drop it
+                // with a warning rather than abort the whole batch -- other
+                // invalid edges in this loop already follow that shape --
+                // and point at the field that does this correctly.
+                if type_str.eq_ignore_ascii_case("parent-child") {
+                    eprintln!(
+                        "warning: skipping parent-child dependency '{}' for issue {}: a \
+                         parent cannot be set through Dependencies/--dep in a bulk import; \
+                         use the Parent: field or --parent instead",
+                        create_display_text(dep_str),
+                        create_display_text(issue_id)
+                    );
+                    dropped_import_edges += 1;
                     continue;
                 }
 
