@@ -282,6 +282,7 @@ fn e2e_relations_labels_comments() {
         child_id.clone(),
         "--parent".to_string(),
         parent_id,
+        "--json".to_string(),
     ];
     let parent_update = run_br(&workspace, parent_args, "set_parent");
     assert!(
@@ -289,6 +290,15 @@ fn e2e_relations_labels_comments() {
         "parent update failed: {}",
         parent_update.stderr
     );
+    // `--parent` renumbers the child beneath its new parent (a dotted prefix
+    // always names the real parent), so `child_id` above is now a vacated
+    // id -- still resolvable via `former_ids` for the calls below, but no
+    // longer what `list`/`show` report back as the issue's identity.
+    let parent_update_json = extract_issues_array(&parent_update.stdout);
+    let child_id = parent_update_json[0]["id"]
+        .as_str()
+        .expect("id in update payload")
+        .to_string();
 
     let label_args = vec![
         "update".to_string(),

@@ -30,6 +30,12 @@ struct UpdatedIssueOutput {
     status: String,
     priority: i32,
     updated_at: DateTime<Utc>,
+    /// Present only when `--parent` renumbered this issue. `id` above is
+    /// already the post-rename value (it comes from re-reading the issue
+    /// under its new identity), so this is a convenience for callers that
+    /// want to detect a rename without diffing `id` against the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_id: Option<String>,
 }
 
 impl From<&Issue> for UpdatedIssueOutput {
@@ -40,6 +46,7 @@ impl From<&Issue> for UpdatedIssueOutput {
             status: issue.status.as_str().to_string(),
             priority: issue.priority.0,
             updated_at: issue.updated_at,
+            new_id: None,
         }
     }
 }
@@ -113,6 +120,8 @@ enum UpdateRenderItem {
         id: String,
         title: String,
         diff: Box<UpdateDiff>,
+        /// The renumbered id, when `--parent` moved this issue.
+        renamed_to: Option<String>,
     },
     NoUpdates {
         id: String,
@@ -495,7 +504,13 @@ fn execute_prepared_route(
 
     let mut updated_issues: Vec<UpdatedIssueOutput> = Vec::new();
     let mut render_items = Vec::new();
-    let resolved_ids = prepared.resolved_ids.clone();
+    // The post-mutation identity of each requested id, in request order --
+    // the renamed id when `--parent` renumbered it, the requested id
+    // otherwise. Returned as `UpdateRouteOutput::resolved_ids` instead of the
+    // pre-mutation `prepared.resolved_ids`, because that is what feeds the
+    // last-touched-id bookkeeping in `execute`: recording the vacated id
+    // there would point the next bare-ID command at a tombstone.
+    let mut final_ids: Vec<String> = Vec::with_capacity(prepared.resolved_ids.len());
     let use_machine_output = update_uses_machine_output(ctx);
     let use_human_output = update_uses_human_output(ctx);
     let mut route_has_mutated = false;
@@ -613,7 +628,7 @@ fn execute_prepared_route(
             &prepared.actor,
             defer_blocked_cache_rebuild,
         );
-        preserve_blocked_cache_on_error(
+        let renamed_id = preserve_blocked_cache_on_error(
             &mut prepared.storage_ctx.storage,
             blocked_cache_dirty,
             "update",
@@ -624,12 +639,19 @@ fn execute_prepared_route(
             blocked_cache_dirty = true;
         }
 
+        // `--parent X` renumbers the issue: `id` no longer names a live row
+        // once `attach_to_parent` has renamed it, only the tombstone left
+        // behind. Every read and every id recorded below this point must
+        // follow the rename.
+        let effective_id = renamed_id.as_deref().unwrap_or(id.as_str());
+        final_ids.push(effective_id.to_string());
+
         // Re-read post-mutation state for JSON machine output only.
         // For human-readable diff rendering we synthesize the diff from
         // `(issue_before, update)` below instead of trusting a second read,
         // to defend against the "unrelated bead's fields leak into diff"
         // regression reported in issue #256.
-        let issue_after_result = prepared.storage_ctx.storage.get_issue(id);
+        let issue_after_result = prepared.storage_ctx.storage.get_issue(effective_id);
         let issue_after = preserve_blocked_cache_on_error(
             &mut prepared.storage_ctx.storage,
             blocked_cache_dirty,
@@ -639,7 +661,9 @@ fn execute_prepared_route(
 
         if use_machine_output {
             if let Some(ref issue) = issue_after {
-                updated_issues.push(UpdatedIssueOutput::from(issue));
+                let mut output = UpdatedIssueOutput::from(issue);
+                output.new_id.clone_from(&renamed_id);
+                updated_issues.push(output);
             }
         } else if use_human_output && prepared.has_updates {
             // Derive the rendered title and diff from the validated
@@ -666,6 +690,7 @@ fn execute_prepared_route(
                 id: id.clone(),
                 title,
                 diff: Box::new(diff),
+                renamed_to: renamed_id,
             });
         } else if use_human_output {
             render_items.push(UpdateRenderItem::NoUpdates { id: id.clone() });
@@ -695,7 +720,7 @@ fn execute_prepared_route(
     Ok(UpdateRouteOutput {
         updated_issues,
         render_items,
-        resolved_ids,
+        resolved_ids: final_ids,
         capacity_warnings,
     })
 }
@@ -778,6 +803,7 @@ fn execute_bulk_label_only_route(
                 id: id.clone(),
                 title: issue.map_or_else(String::new, |issue| issue.title.clone()),
                 diff: Box::new(UpdateDiff::default()),
+                renamed_to: None,
             });
         } else if use_human_output {
             render_items.push(UpdateRenderItem::NoUpdates { id: id.clone() });
@@ -919,9 +945,15 @@ fn validate_transition_to_in_progress(
 }
 
 /// Print a summary of what changed for the issue.
-fn print_update_summary(id: &str, title: &str, diff: &UpdateDiff) {
+fn print_update_summary(id: &str, title: &str, diff: &UpdateDiff, renamed_to: Option<&str>) {
     println!("{}", updated_issue_human_line(id, title));
 
+    if let Some(new_id) = renamed_to {
+        println!(
+            "  parent: → {} (renumbered)",
+            sanitize_terminal_inline(new_id)
+        );
+    }
     if let Some((old_status, new_status)) = &diff.status {
         println!(
             "  status: {} → {}",
@@ -982,8 +1014,13 @@ fn issue_input_text(input: &str) -> String {
 fn print_render_items(render_items: &[UpdateRenderItem]) {
     for item in render_items {
         match item {
-            UpdateRenderItem::Summary { id, title, diff } => {
-                print_update_summary(id, title, diff.as_ref());
+            UpdateRenderItem::Summary {
+                id,
+                title,
+                diff,
+                renamed_to,
+            } => {
+                print_update_summary(id, title, diff.as_ref(), renamed_to.as_deref());
             }
             UpdateRenderItem::NoUpdates { id } => println!("{}", no_updates_human_line(id)),
         }
@@ -1403,6 +1440,12 @@ fn resolve_parent_update(
     }
 }
 
+/// Apply the requested parent change to `issue_id`.
+///
+/// Returns the issue's new ID when `--parent <id>` renumbered it, `None`
+/// otherwise (nothing requested, or the parent was cleared -- clearing never
+/// renames; a dotted ID reaching this function via `ParentUpdatePlan::Clear`
+/// would already have been refused by `validate_parent_updates`).
 fn apply_parent_update(
     storage_ctx: &mut config::OpenStorageResult,
     allow_recovery: bool,
@@ -1410,30 +1453,25 @@ fn apply_parent_update(
     parent: &ParentUpdatePlan,
     actor: &str,
     skip_cache_rebuild: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     match parent {
-        ParentUpdatePlan::Unchanged => Ok(()),
+        ParentUpdatePlan::Unchanged => Ok(None),
         ParentUpdatePlan::Clear => retry_mutation_with_jsonl_recovery(
             storage_ctx,
             allow_recovery,
             "update parent clear",
             Some(issue_id),
             |storage| storage.set_parent_with_options(issue_id, None, actor, skip_cache_rebuild),
-        ),
+        )
+        .map(|()| None),
         ParentUpdatePlan::Set(parent_id) => retry_mutation_with_jsonl_recovery(
             storage_ctx,
             allow_recovery,
             "update parent set",
             Some(issue_id),
-            |storage| {
-                storage.set_parent_with_options(
-                    issue_id,
-                    Some(parent_id),
-                    actor,
-                    skip_cache_rebuild,
-                )
-            },
-        ),
+            |storage| super::attach_to_parent(storage, issue_id, parent_id, actor),
+        )
+        .map(Some),
     }
 }
 
@@ -1442,25 +1480,55 @@ fn validate_parent_updates(
     issue_ids: &[String],
     parent: &ParentUpdatePlan,
 ) -> Result<()> {
-    let ParentUpdatePlan::Set(parent_id) = parent else {
-        return Ok(());
-    };
-
-    for issue_id in issue_ids {
-        if issue_id == parent_id {
-            return Err(BeadsError::SelfDependency {
-                id: issue_id.clone(),
-            });
+    match parent {
+        ParentUpdatePlan::Unchanged => Ok(()),
+        ParentUpdatePlan::Clear => {
+            // A dotted ID makes a hierarchy claim just by its shape: it names
+            // its parent. Clearing the parent-child dep without renaming
+            // would leave the ID claiming a parent it no longer has -- the
+            // exact divergence that let the original bug this epic exists to
+            // fix happen (`ab-l04.1` reparented to `ab-fb6` while keeping its
+            // old dotted ID, so `ab-l04` could never close without
+            // `--force`). Refuse rather than silently detach: a rename is
+            // consequential and visible, and should not be a side effect of
+            // an update flag. `br detach` does the rename too.
+            for issue_id in issue_ids {
+                if issue_id.contains('.') {
+                    let parent_prefix = issue_id
+                        .rsplit_once('.')
+                        .map_or(issue_id.as_str(), |(head, _)| head);
+                    return Err(BeadsError::validation(
+                        "parent",
+                        format!(
+                            "{issue_id} is a child of {parent_prefix} by its ID, so clearing \
+                             the parent would leave the ID claiming a parent it no longer has. \
+                             Use `br detach {issue_id}` instead, which gives it an independent ID."
+                        ),
+                    ));
+                }
+            }
+            Ok(())
         }
+        ParentUpdatePlan::Set(parent_id) => {
+            for issue_id in issue_ids {
+                if issue_id == parent_id {
+                    return Err(BeadsError::SelfDependency {
+                        id: issue_id.clone(),
+                    });
+                }
 
-        if storage.would_create_parent_child_cycle(issue_id, parent_id, true)? {
-            return Err(BeadsError::DependencyCycle {
-                path: format!("Setting parent of {issue_id} to {parent_id} would create a cycle"),
-            });
+                if storage.would_create_parent_child_cycle(issue_id, parent_id, true)? {
+                    return Err(BeadsError::DependencyCycle {
+                        path: format!(
+                            "Setting parent of {issue_id} to {parent_id} would create a cycle"
+                        ),
+                    });
+                }
+            }
+
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 fn parse_date(s: &str) -> Result<DateTime<Utc>> {

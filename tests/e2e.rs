@@ -73,6 +73,8 @@ mod ready;
 mod ready_limit;
 #[path = "e2e/relations.rs"]
 mod relations;
+#[path = "e2e/reparent.rs"]
+mod reparent;
 #[path = "e2e/report_generation.rs"]
 mod report_generation;
 #[path = "e2e/routing.rs"]
