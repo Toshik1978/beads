@@ -37,6 +37,8 @@ mod list_filters;
 mod ready;
 #[path = "storage/rename.rs"]
 mod rename;
+#[path = "storage/rename_coverage.rs"]
+mod rename_coverage;
 #[path = "storage/schema_shape.rs"]
 mod schema_shape;
 #[path = "storage/sort_spec.rs"]

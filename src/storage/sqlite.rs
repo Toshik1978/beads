@@ -412,7 +412,7 @@ const DIRTY_ISSUE_CHUNK_SIZE: usize = 900;
 /// introspection guard is expected to walk `PRAGMA table_info` and fail if a
 /// table gains an ID-bearing column missing from this list — add the pair
 /// rather than weakening that guard.
-pub(crate) const ID_BEARING_COLUMNS: &[(&str, &str)] = &[
+pub const ID_BEARING_COLUMNS: &[(&str, &str)] = &[
     ("dependencies", "issue_id"),
     // No foreign key on this one (schema.rs:132, kept so `external:` refs can
     // dangle), so a missed rewrite here fails silently rather than loudly.
@@ -7179,6 +7179,13 @@ impl SqliteStorage {
             }
         }
         Ok(result)
+    }
+
+    /// Read-only access to the underlying connection, for callers that need
+    /// to inspect schema (e.g. `PRAGMA` introspection) rather than issue data.
+    #[must_use]
+    pub fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     /// Every issue ID strictly beneath `id`, at any depth and in any status.
