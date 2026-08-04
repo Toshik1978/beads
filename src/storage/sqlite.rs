@@ -7129,6 +7129,42 @@ impl SqliteStorage {
         Ok(crate::util::id::find_matching_ids(&all_ids, hash_suffix))
     }
 
+    /// The live issue currently holding `former_id` among its former IDs.
+    ///
+    /// Consulted only after exact-match resolution has missed, on a path that
+    /// already performs a full scan for abbreviation matching — so this costs
+    /// nothing on the hot path of a fully spelled current ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn find_id_by_former_id(&self, former_id: &str) -> Result<Option<String>> {
+        let rows = self.conn.query_with_params(
+            "SELECT i.id FROM issues i, json_each(i.former_ids) f \
+             WHERE f.value = ? AND i.status != 'tombstone' \
+             LIMIT 1",
+            &[SqliteValue::from(former_id)],
+        )?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(SqliteValue::as_text)
+            .map(String::from))
+    }
+
+    /// Whether `id` names an issue that is not a tombstone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn live_id_exists(&self, id: &str) -> Result<bool> {
+        let row = self.conn.query_row_with_params(
+            "SELECT count(*) FROM issues WHERE id = ? AND status != 'tombstone'",
+            &[SqliteValue::from(id)],
+        )?;
+        Ok(row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0) > 0)
+    }
+
     /// Count total issues in the database.
     ///
     /// # Errors

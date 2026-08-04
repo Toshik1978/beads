@@ -15,7 +15,7 @@ use crate::model::{Dependency, Issue, Priority, Status};
 use crate::output::{IssuePanel, OutputContext, OutputMode};
 use crate::storage::SqliteStorage;
 use crate::sync::{path as sync_path, read_issues_from_jsonl};
-use crate::util::id::{IdResolver, ResolverConfig, normalize_id};
+use crate::util::id::{IdExistence, IdResolver, ResolverConfig, normalize_id};
 use crate::util::time::to_local;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -442,8 +442,17 @@ fn load_issue_details_from_storage(
     for id_input in target_ids {
         let resolution = resolver.resolve_fallible(
             id_input,
-            |id| storage.id_exists(id),
+            |id| {
+                if storage.live_id_exists(id)? {
+                    Ok(IdExistence::Live)
+                } else if storage.id_exists(id)? {
+                    Ok(IdExistence::Tombstone)
+                } else {
+                    Ok(IdExistence::Missing)
+                }
+            },
             |hash| storage.find_ids_by_hash(hash),
+            |former| storage.find_id_by_former_id(former),
         )?;
 
         let Some(mut details) = storage.get_issue_details(&resolution.id, true)? else {
@@ -498,8 +507,15 @@ fn load_issue_details_from_jsonl_materialized(
     for id_input in target_ids {
         let resolution = resolver.resolve_fallible(
             id_input,
-            |id| Ok(issues_by_id.contains_key(id)),
+            |id| {
+                Ok(match issues_by_id.get(id) {
+                    Some(issue) if issue.status == Status::Tombstone => IdExistence::Tombstone,
+                    Some(_) => IdExistence::Live,
+                    None => IdExistence::Missing,
+                })
+            },
             |hash| Ok(find_ids_by_hash_in_memory(&issues_by_id, hash)),
+            |former| Ok(find_id_by_former_id_in_memory(&issues_by_id, former)),
         )?;
         let issue = issues_by_id
             .get(&resolution.id)
@@ -945,6 +961,18 @@ fn find_ids_by_hash_in_memory(
         .collect()
 }
 
+/// The live issue currently holding `former_id`, mirroring
+/// [`SqliteStorage::find_id_by_former_id`] for the JSONL-backed path.
+fn find_id_by_former_id_in_memory(
+    issues_by_id: &HashMap<String, Issue>,
+    former_id: &str,
+) -> Option<String> {
+    issues_by_id.values().find_map(|issue| {
+        (issue.status != Status::Tombstone && issue.former_ids.iter().any(|id| id == former_id))
+            .then(|| issue.id.clone())
+    })
+}
+
 fn collect_external_dependency_ids(details_list: &[IssueDetails]) -> HashSet<String> {
     details_list
         .iter()
@@ -1268,7 +1296,7 @@ mod tests {
     use crate::format::{IssueDetails, IssueWithDependencyMetadata};
     use crate::model::{Comment, Dependency, DependencyType, Issue, IssueType, Priority, Status};
     use crate::storage::SqliteStorage;
-    use crate::util::id::{IdResolver, ResolverConfig};
+    use crate::util::id::{IdExistence, IdResolver, ResolverConfig};
     use chrono::{TimeZone, Utc};
     use std::collections::HashMap;
     use std::io::Write;
@@ -1487,8 +1515,15 @@ mod tests {
         let resolved_id = resolver
             .resolve_fallible(
                 "bd-abc123",
-                |id| Ok(id == "bd-abc123"),
+                |id| {
+                    Ok(if id == "bd-abc123" {
+                        IdExistence::Live
+                    } else {
+                        IdExistence::Missing
+                    })
+                },
                 |_hash| Ok(Vec::new()),
+                |_former| Ok(None),
             )
             .unwrap();
         assert_eq!(resolved_id.id, "bd-abc123");
@@ -1501,7 +1536,18 @@ mod tests {
         info!("test_show_resolves_prefixed_id: starting");
         let resolver = IdResolver::new(ResolverConfig::with_prefix("bd"));
         let resolved_id = resolver
-            .resolve_fallible("abc123", |id| Ok(id == "bd-abc123"), |_hash| Ok(Vec::new()))
+            .resolve_fallible(
+                "abc123",
+                |id| {
+                    Ok(if id == "bd-abc123" {
+                        IdExistence::Live
+                    } else {
+                        IdExistence::Missing
+                    })
+                },
+                |_hash| Ok(Vec::new()),
+                |_former| Ok(None),
+            )
             .unwrap();
         assert_eq!(resolved_id.id, "bd-abc123");
         info!("test_show_resolves_prefixed_id: assertions passed");
@@ -1515,7 +1561,7 @@ mod tests {
         let resolved_id = resolver
             .resolve_fallible(
                 "abc",
-                |_id| Ok(false),
+                |_id| Ok(IdExistence::Missing),
                 |hash| {
                     if hash == "abc" {
                         Ok(vec!["bd-abc123".to_string()])
@@ -1523,6 +1569,7 @@ mod tests {
                         Ok(Vec::new())
                     }
                 },
+                |_former| Ok(None),
             )
             .unwrap();
         assert_eq!(resolved_id.id, "bd-abc123");
@@ -1534,7 +1581,12 @@ mod tests {
         init_logging();
         info!("test_show_not_found_error: starting");
         let resolver = IdResolver::new(ResolverConfig::with_prefix("bd"));
-        let result = resolver.resolve_fallible("missing", |_id| Ok(false), |_hash| Ok(Vec::new()));
+        let result = resolver.resolve_fallible(
+            "missing",
+            |_id| Ok(IdExistence::Missing),
+            |_hash| Ok(Vec::new()),
+            |_former| Ok(None),
+        );
         assert!(result.is_err());
         info!("test_show_not_found_error: assertions passed");
     }

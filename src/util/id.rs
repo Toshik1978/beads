@@ -550,13 +550,34 @@ pub struct ResolvedId {
     pub id: String,
 }
 
+/// What an exact-match lookup found for a candidate ID.
+///
+/// A tombstone occupies its vacated ID after a rename, so a plain boolean
+/// cannot distinguish "no such ID" from "renamed away from here" — and the
+/// resolver needs to treat those two cases differently: a live match wins
+/// immediately, a tombstone match is held back until the `former_ids`
+/// fallback has had a chance to redirect to wherever the ID moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdExistence {
+    /// No issue occupies this ID at all.
+    Missing,
+    /// A non-tombstone issue occupies this ID.
+    Live,
+    /// A tombstone occupies this ID (left behind by a rename or a delete).
+    Tombstone,
+}
+
 /// ID resolver that resolves partial IDs to full IDs.
 ///
 /// Resolution order:
-/// 1. Exact ID match
-/// 2. Normalize: if missing prefix, prepend `default_prefix-` and retry
-/// 3. Substring match on hash portion across all prefixes
-/// 4. Ambiguity => error with candidate list
+/// 1. Exact match to a **live** issue (O(1); the hot path, untouched)
+/// 2. Normalize: if missing prefix, prepend `default_prefix-` and retry the
+///    live exact match
+/// 3. `former_ids` lookup: the live issue that now holds this (renamed) ID
+/// 4. Exact match to a **tombstone**, so `br show` on a genuinely deleted
+///    issue still resolves rather than reporting not-found
+/// 5. Substring match on hash portion across all prefixes
+/// 6. Ambiguity => error with candidate list
 #[derive(Debug, Clone)]
 pub struct IdResolver {
     config: ResolverConfig,
@@ -581,20 +602,28 @@ impl IdResolver {
     /// storage/query errors instead of forcing callers to coerce them into
     /// `false` or an empty match set.
     ///
+    /// Resolution order — see the type-level doc comment on [`IdResolver`]:
+    /// both exact-match steps prefer a live issue and only fall back to a
+    /// tombstone match after the `former_ids` lookup has had a chance to
+    /// redirect to wherever the ID actually moved.
+    ///
     /// # Errors
     ///
-    /// - Propagates any error returned by `exists_fn` or `substring_match_fn`
+    /// - Propagates any error returned by `exists_fn`, `substring_match_fn`,
+    ///   or `former_id_fn`
     /// - `IssueNotFound` if no match is found
     /// - `AmbiguousId` if multiple matches are found
-    pub fn resolve_fallible<F, G>(
+    pub fn resolve_fallible<F, G, H>(
         &self,
         input: &str,
         exists_fn: F,
         substring_match_fn: G,
+        former_id_fn: H,
     ) -> Result<ResolvedId>
     where
-        F: Fn(&str) -> Result<bool>,
+        F: Fn(&str) -> Result<IdExistence>,
         G: Fn(&str) -> Result<Vec<String>>,
+        H: Fn(&str) -> Result<Option<String>>,
     {
         let input = input.trim();
 
@@ -604,15 +633,50 @@ impl IdResolver {
 
         let normalized = normalize_id(input);
 
-        if exists_fn(&normalized)? {
-            return Ok(ResolvedId { id: normalized });
+        // A tombstone hit is remembered rather than returned immediately: the
+        // `former_ids` fallback below gets first refusal at redirecting to
+        // wherever the ID actually moved, and only a genuinely deleted issue
+        // falls through to the tombstone itself.
+        let mut tombstone_match: Option<String> = None;
+
+        match exists_fn(&normalized)? {
+            IdExistence::Live => return Ok(ResolvedId { id: normalized }),
+            IdExistence::Tombstone => tombstone_match = Some(normalized.clone()),
+            IdExistence::Missing => {}
         }
 
-        if !normalized.contains('-') {
+        let with_prefix = if normalized.contains('-') {
+            None
+        } else {
             let with_prefix = format!("{}-{}", self.config.default_prefix, normalized);
-            if exists_fn(&with_prefix)? {
-                return Ok(ResolvedId { id: with_prefix });
+            match exists_fn(&with_prefix)? {
+                IdExistence::Live => return Ok(ResolvedId { id: with_prefix }),
+                IdExistence::Tombstone => {
+                    tombstone_match.get_or_insert_with(|| with_prefix.clone());
+                }
+                IdExistence::Missing => {}
             }
+            Some(with_prefix)
+        };
+
+        // A renamed issue's old ID. Runs only after both O(1) exact-match
+        // steps have missed a live issue, and before the abbreviation scan,
+        // which is already O(n).
+        if let Some(current) = former_id_fn(&normalized)? {
+            return Ok(ResolvedId { id: current });
+        }
+        if let Some(with_prefix) = with_prefix.as_deref()
+            && let Some(current) = former_id_fn(with_prefix)?
+        {
+            return Ok(ResolvedId { id: current });
+        }
+
+        // Neither the direct ID nor its former-ID trail redirected anywhere
+        // live. If it was a tombstone, resolve to it so `br show` on a
+        // genuinely deleted issue still reports the deletion instead of
+        // `IssueNotFound`.
+        if let Some(id) = tombstone_match {
+            return Ok(ResolvedId { id });
         }
 
         if self.config.allow_substring_match {
@@ -654,19 +718,23 @@ impl IdResolver {
     /// # Errors
     ///
     /// Returns the first callback or resolution error encountered.
-    pub fn resolve_all_fallible<F, G>(
+    pub fn resolve_all_fallible<F, G, H>(
         &self,
         inputs: &[String],
         exists_fn: F,
         substring_match_fn: G,
+        former_id_fn: H,
     ) -> Result<Vec<ResolvedId>>
     where
-        F: Fn(&str) -> Result<bool>,
+        F: Fn(&str) -> Result<IdExistence>,
         G: Fn(&str) -> Result<Vec<String>>,
+        H: Fn(&str) -> Result<Option<String>>,
     {
         inputs
             .iter()
-            .map(|input| self.resolve_fallible(input, &exists_fn, &substring_match_fn))
+            .map(|input| {
+                self.resolve_fallible(input, &exists_fn, &substring_match_fn, &former_id_fn)
+            })
             .collect()
     }
 }
@@ -726,8 +794,12 @@ mod tests {
     // The live resolver takes fallible callbacks so storage errors survive;
     // these mocks cannot fail, hence the allow.
     #[allow(clippy::unnecessary_wraps)]
-    fn exists_in_mock(id: &str) -> Result<bool> {
-        Ok(mock_db().contains(&id.to_string()))
+    fn exists_in_mock(id: &str) -> Result<IdExistence> {
+        Ok(if mock_db().contains(&id.to_string()) {
+            IdExistence::Live
+        } else {
+            IdExistence::Missing
+        })
     }
 
     #[allow(clippy::unnecessary_wraps)]
@@ -735,11 +807,16 @@ mod tests {
         Ok(find_matching_ids(&mock_db(), pattern))
     }
 
+    #[allow(clippy::unnecessary_wraps)]
+    fn no_former_id(_former_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     #[test]
     fn test_resolve_exact_match() {
         let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve_fallible("br-abc123", exists_in_mock, substring_in_mock)
+            .resolve_fallible("br-abc123", exists_in_mock, substring_in_mock, no_former_id)
             .unwrap();
         assert_eq!(result.id, "br-abc123");
     }
@@ -748,7 +825,7 @@ mod tests {
     fn test_resolve_prefix_normalized() {
         let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve_fallible("abc123", exists_in_mock, substring_in_mock)
+            .resolve_fallible("abc123", exists_in_mock, substring_in_mock, no_former_id)
             .unwrap();
         assert_eq!(result.id, "br-abc123");
     }
@@ -758,7 +835,7 @@ mod tests {
         let resolver = IdResolver::new(ResolverConfig::default());
         // "xyz" should uniquely match "br-xyz789"
         let result = resolver
-            .resolve_fallible("xyz", exists_in_mock, substring_in_mock)
+            .resolve_fallible("xyz", exists_in_mock, substring_in_mock, no_former_id)
             .unwrap();
         assert_eq!(result.id, "br-xyz789");
     }
@@ -767,7 +844,8 @@ mod tests {
     fn test_resolve_ambiguous() {
         let resolver = IdResolver::new(ResolverConfig::default());
         // "ab" matches both "br-abc123" and "br-abd456"
-        let result = resolver.resolve_fallible("ab", exists_in_mock, substring_in_mock);
+        let result =
+            resolver.resolve_fallible("ab", exists_in_mock, substring_in_mock, no_former_id);
         assert!(result.is_err());
         if let Err(BeadsError::AmbiguousId { partial, matches }) = result {
             assert_eq!(partial, "ab");
@@ -781,7 +859,12 @@ mod tests {
     #[test]
     fn test_resolve_not_found() {
         let resolver = IdResolver::new(ResolverConfig::default());
-        let result = resolver.resolve_fallible("nonexistent", exists_in_mock, substring_in_mock);
+        let result = resolver.resolve_fallible(
+            "nonexistent",
+            exists_in_mock,
+            substring_in_mock,
+            no_former_id,
+        );
         assert!(result.is_err());
         if let Err(BeadsError::IssueNotFound { id }) = result {
             assert_eq!(id, "nonexistent");
@@ -794,7 +877,12 @@ mod tests {
     fn test_resolve_child_id() {
         let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve_fallible("br-abc123.1", exists_in_mock, substring_in_mock)
+            .resolve_fallible(
+                "br-abc123.1",
+                exists_in_mock,
+                substring_in_mock,
+                no_former_id,
+            )
             .unwrap();
         assert_eq!(result.id, "br-abc123.1");
     }
@@ -803,7 +891,7 @@ mod tests {
     fn test_resolve_case_insensitive() {
         let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve_fallible("BR-ABC123", exists_in_mock, substring_in_mock)
+            .resolve_fallible("BR-ABC123", exists_in_mock, substring_in_mock, no_former_id)
             .unwrap();
         assert_eq!(result.id, "br-abc123");
     }
@@ -811,12 +899,18 @@ mod tests {
     #[test]
     fn test_resolve_with_custom_prefix() {
         let custom_db = vec!["proj-aaa111".to_string()];
-        let exists = |id: &str| Ok(custom_db.contains(&id.to_string()));
+        let exists = |id: &str| {
+            Ok(if custom_db.contains(&id.to_string()) {
+                IdExistence::Live
+            } else {
+                IdExistence::Missing
+            })
+        };
         let substring = |pattern: &str| Ok(find_matching_ids(&custom_db, pattern));
 
         let resolver = IdResolver::new(ResolverConfig::with_prefix("proj"));
         let result = resolver
-            .resolve_fallible("aaa111", exists, substring)
+            .resolve_fallible("aaa111", exists, substring, no_former_id)
             .unwrap();
         assert_eq!(result.id, "proj-aaa111");
     }
@@ -824,7 +918,7 @@ mod tests {
     #[test]
     fn test_resolve_empty_input() {
         let resolver = IdResolver::new(ResolverConfig::default());
-        let result = resolver.resolve_fallible("", exists_in_mock, substring_in_mock);
+        let result = resolver.resolve_fallible("", exists_in_mock, substring_in_mock, no_former_id);
         assert!(result.is_err());
     }
 
@@ -832,7 +926,12 @@ mod tests {
     fn test_resolve_whitespace_trimmed() {
         let resolver = IdResolver::new(ResolverConfig::default());
         let result = resolver
-            .resolve_fallible("  br-abc123  ", exists_in_mock, substring_in_mock)
+            .resolve_fallible(
+                "  br-abc123  ",
+                exists_in_mock,
+                substring_in_mock,
+                no_former_id,
+            )
             .unwrap();
         assert_eq!(result.id, "br-abc123");
     }
@@ -844,6 +943,7 @@ mod tests {
             "br-abc123",
             |_id| Err(BeadsError::Config("lookup failed".to_string())),
             |_hash| Ok(Vec::new()),
+            no_former_id,
         );
         assert!(matches!(result, Err(BeadsError::Config(message)) if message == "lookup failed"));
     }
@@ -856,10 +956,85 @@ mod tests {
             &inputs,
             |_id| Err(BeadsError::Config("exists lookup failed".to_string())),
             |_hash| Ok(Vec::new()),
+            no_former_id,
         );
         assert!(
             matches!(result, Err(BeadsError::Config(message)) if message == "exists lookup failed")
         );
+    }
+
+    #[test]
+    fn test_resolve_former_id_redirects_to_the_live_issue() {
+        // "br-old" was renamed away; only the former_ids lookup knows where it
+        // went. Both exact-match steps must miss for this to be exercised.
+        let resolver = IdResolver::new(ResolverConfig::default());
+        let result = resolver
+            .resolve_fallible(
+                "br-old",
+                |_id| Ok(IdExistence::Missing),
+                |_hash| Ok(Vec::new()),
+                |former_id| {
+                    Ok(if former_id == "br-old" {
+                        Some("br-new".to_string())
+                    } else {
+                        None
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(result.id, "br-new");
+    }
+
+    #[test]
+    fn test_resolve_tombstone_fallback_when_no_former_id_redirect_exists() {
+        // A genuinely deleted issue: the exact match hits a tombstone and the
+        // former_ids lookup has nowhere to redirect to, so the tombstone
+        // itself must still resolve rather than reporting IssueNotFound.
+        let resolver = IdResolver::new(ResolverConfig::default());
+        let result = resolver
+            .resolve_fallible(
+                "br-gone",
+                |id| {
+                    Ok(if id == "br-gone" {
+                        IdExistence::Tombstone
+                    } else {
+                        IdExistence::Missing
+                    })
+                },
+                |_hash| Ok(Vec::new()),
+                no_former_id,
+            )
+            .unwrap();
+        assert_eq!(result.id, "br-gone");
+    }
+
+    #[test]
+    fn test_resolve_former_id_takes_priority_over_a_tombstone_at_the_same_id() {
+        // Renaming leaves a tombstone at the vacated ID, so both the tombstone
+        // exact-match and the former_ids redirect are available here. The
+        // redirect must win: it points at where the issue actually lives now.
+        let resolver = IdResolver::new(ResolverConfig::default());
+        let result = resolver
+            .resolve_fallible(
+                "br-old",
+                |id| {
+                    Ok(if id == "br-old" {
+                        IdExistence::Tombstone
+                    } else {
+                        IdExistence::Missing
+                    })
+                },
+                |_hash| Ok(Vec::new()),
+                |former_id| {
+                    Ok(if former_id == "br-old" {
+                        Some("br-new".to_string())
+                    } else {
+                        None
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(result.id, "br-new");
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crate::common;
 use beads::model::Status;
 use beads::storage::{IssueUpdate, SqliteStorage};
 use beads::sync::{ExportConfig, ImportConfig, export_to_jsonl, import_from_jsonl};
+use beads::util::id::{IdExistence, IdResolver, ResolverConfig};
 use common::{fixtures, test_db};
 use tempfile::TempDir;
 
@@ -473,4 +474,84 @@ fn rename_tombstone_and_former_ids_survive_a_jsonl_export_import_round_trip() {
         "the imported tombstone must still name its destination; got {:?}",
         stone.delete_reason
     );
+}
+
+#[test]
+fn find_id_by_former_id_locates_the_renamed_issue() {
+    let mut storage = tree();
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    let found = storage.find_id_by_former_id("bd-p.2").unwrap();
+
+    assert_eq!(found.as_deref(), Some("bd-new"));
+}
+
+#[test]
+fn find_id_by_former_id_returns_none_for_an_unknown_id() {
+    let storage = tree();
+
+    assert_eq!(storage.find_id_by_former_id("bd-never").unwrap(), None);
+}
+
+#[test]
+fn live_id_exists_ignores_tombstones() {
+    let mut storage = tree();
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    assert!(!storage.live_id_exists("bd-p.2").unwrap());
+    assert!(
+        storage.id_exists("bd-p.2").unwrap(),
+        "the tombstone row is still there"
+    );
+    assert!(storage.live_id_exists("bd-new").unwrap());
+}
+
+/// Wires `IdResolver` up against real storage the same way
+/// `resolve_issue_id` (`src/cli/commands/mod.rs`) and `br show`
+/// (`src/cli/commands/show.rs`) do, since neither `rename` nor `detach` has
+/// a CLI surface yet to drive this as a subprocess end to end.
+fn resolve_via_storage(storage: &SqliteStorage, input: &str) -> beads::Result<String> {
+    let resolver = IdResolver::new(ResolverConfig::with_prefix("bd"));
+    resolver
+        .resolve_fallible(
+            input,
+            |id| {
+                if storage.live_id_exists(id)? {
+                    Ok(IdExistence::Live)
+                } else if storage.id_exists(id)? {
+                    Ok(IdExistence::Tombstone)
+                } else {
+                    Ok(IdExistence::Missing)
+                }
+            },
+            |hash| storage.find_ids_by_hash(hash),
+            |former| storage.find_id_by_former_id(former),
+        )
+        .map(|resolved| resolved.id)
+}
+
+#[test]
+fn resolving_an_old_id_after_rename_finds_the_issue_that_now_holds_it() {
+    let mut storage = tree();
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    let resolved = resolve_via_storage(&storage, "bd-p.2").expect("the old ID must still resolve");
+
+    assert_eq!(
+        resolved, "bd-new",
+        "a reference to the pre-rename ID must land on the issue that now holds it"
+    );
+}
+
+#[test]
+fn resolving_a_genuinely_deleted_id_still_returns_its_tombstone() {
+    let mut storage = tree();
+    storage
+        .delete_issue("bd-p.2", "tester", "no longer needed", None)
+        .unwrap();
+
+    let resolved = resolve_via_storage(&storage, "bd-p.2")
+        .expect("a deleted issue's tombstone must still resolve, not IssueNotFound");
+
+    assert_eq!(resolved, "bd-p.2");
 }

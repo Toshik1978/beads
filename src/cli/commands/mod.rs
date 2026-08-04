@@ -5,7 +5,7 @@ use crate::model::Issue;
 use crate::output::OutputContext;
 use crate::storage::{IssueUpdate, SqliteStorage};
 use crate::sync::auto_import_if_stale;
-use crate::util::id::IdResolver;
+use crate::util::id::{IdExistence, IdResolver};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -88,6 +88,17 @@ pub fn report_auto_flush_failure(
     eprintln!("{}", sanitize_terminal_text(&warning));
 }
 
+/// Whether `id` names a live issue, a tombstone, or nothing at all.
+fn issue_id_existence(storage: &SqliteStorage, id: &str) -> crate::Result<IdExistence> {
+    if storage.live_id_exists(id)? {
+        Ok(IdExistence::Live)
+    } else if storage.id_exists(id)? {
+        Ok(IdExistence::Tombstone)
+    } else {
+        Ok(IdExistence::Missing)
+    }
+}
+
 /// Resolve an issue ID from a potentially partial input.
 pub(super) fn resolve_issue_id(
     storage: &SqliteStorage,
@@ -97,8 +108,9 @@ pub(super) fn resolve_issue_id(
     resolver
         .resolve_fallible(
             input,
-            |id| storage.id_exists(id),
+            |id| issue_id_existence(storage, id),
             |hash| storage.find_ids_by_hash(hash),
+            |former| storage.find_id_by_former_id(former),
         )
         .map(|resolved| resolved.id)
 }
@@ -111,8 +123,9 @@ pub(super) fn resolve_issue_ids(
     resolver
         .resolve_all_fallible(
             inputs,
-            |id| storage.id_exists(id),
+            |id| issue_id_existence(storage, id),
             |hash| storage.find_ids_by_hash(hash),
+            |former| storage.find_id_by_former_id(former),
         )
         .map(|resolved| resolved.into_iter().map(|entry| entry.id).collect())
 }
