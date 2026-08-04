@@ -7159,6 +7159,38 @@ impl SqliteStorage {
         Ok(result)
     }
 
+    /// Every issue ID strictly beneath `id`, at any depth and in any status.
+    ///
+    /// Ordered deepest-first (longest ID first) because callers rename one node
+    /// at a time: renaming a shallower node first would invalidate every deeper
+    /// ID already read from this list.
+    ///
+    /// Distinct from [`Self::get_open_dot_notation_children`], which is a
+    /// close-time guard and deliberately sees only *open* *direct* children.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn descendant_ids(&self, id: &str) -> Result<Vec<String>> {
+        let escaped = escape_like_pattern(id);
+        // `{escaped}.%` and not `{escaped}%`: the trailing dot is what keeps
+        // `bd-p2` from matching a query for `bd-p`.
+        let subtree_prefix = format!("{escaped}.%");
+        let rows = self.conn.query_with_params(
+            "SELECT id FROM issues \
+             WHERE id LIKE ? ESCAPE '\\' \
+             ORDER BY length(id) DESC, id ASC",
+            &[SqliteValue::from(subtree_prefix.as_str())],
+        )?;
+        let mut result = Vec::with_capacity(rows.len());
+        for row in &rows {
+            if let Some(id) = row.get(0).and_then(SqliteValue::as_text) {
+                result.push(id.to_string());
+            }
+        }
+        Ok(result)
+    }
+
     /// Add a dependency between issues.
     ///
     /// # Errors

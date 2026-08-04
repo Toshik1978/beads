@@ -35,6 +35,8 @@ mod invariants;
 mod list_filters;
 #[path = "storage/ready.rs"]
 mod ready;
+#[path = "storage/rename.rs"]
+mod rename;
 #[path = "storage/schema_shape.rs"]
 mod schema_shape;
 #[path = "storage/sort_spec.rs"]
