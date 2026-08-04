@@ -224,6 +224,18 @@ fn e2e_clearing_the_parent_of_a_flat_id_still_works() {
         "precondition: {flat_id} should be a flat ID"
     );
 
+    // Confirm the fixture actually carries the edge before acting on it --
+    // `update --parent ""` on an already-parentless issue is a documented
+    // no-op, so without this check a JSONL import that silently dropped the
+    // dependency would let this test pass vacuously.
+    let dep_list_before = run_br(&workspace, ["dep", "list", flat_id], "dep_list_before");
+    assert!(dep_list_before.status.success());
+    assert!(
+        dep_list_before.stdout.contains(&epic_id),
+        "precondition: the imported fixture must carry the parent-child edge; got: {}",
+        dep_list_before.stdout
+    );
+
     let clear = run_br(
         &workspace,
         ["update", flat_id, "--parent", ""],
@@ -671,9 +683,21 @@ fn e2e_dep_remove_on_a_flat_child_still_works() {
         "precondition: {flat_id} should be a flat ID"
     );
 
+    // Confirm the fixture actually carries the edge before acting on it --
+    // `dep remove` on a non-existent edge still exits 0 (`status:
+    // "not_found"`), so without this check a JSONL import that silently
+    // dropped the dependency would let this test pass vacuously.
+    let dep_list_before = run_br(&workspace, ["dep", "list", flat_id], "dep_list_before");
+    assert!(dep_list_before.status.success());
+    assert!(
+        dep_list_before.stdout.contains(&epic_id),
+        "precondition: the imported fixture must carry the parent-child edge; got: {}",
+        dep_list_before.stdout
+    );
+
     let remove = run_br(
         &workspace,
-        ["dep", "remove", flat_id, &epic_id],
+        ["dep", "remove", flat_id, &epic_id, "--json"],
         "dep_remove_flat",
     );
     assert!(
@@ -682,12 +706,91 @@ fn e2e_dep_remove_on_a_flat_child_still_works() {
          and must not be refused: {}",
         remove.stderr
     );
+    let remove_payload: Value =
+        serde_json::from_str(&extract_json_payload(&remove.stdout)).expect("parse dep remove json");
+    assert_eq!(
+        remove_payload["action"], "removed",
+        "the edge must actually have been removed, not merely absent already; got: {}",
+        remove.stdout
+    );
 
     let dep_list = run_br(&workspace, ["dep", "list", flat_id], "dep_list");
     assert!(dep_list.status.success());
     assert!(
         !dep_list.stdout.contains(&epic_id),
         "the parent-child edge must be gone; got: {}",
+        dep_list.stdout
+    );
+}
+
+#[test]
+fn e2e_dep_add_parent_child_rejects_metadata_instead_of_silently_dropping_it() {
+    let _log = common::test_log(
+        "e2e_dep_add_parent_child_rejects_metadata_instead_of_silently_dropping_it",
+    );
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(epic.status.success());
+    let epic_id = parse_created_id(&epic.stdout);
+
+    let flat = run_br(
+        &workspace,
+        ["create", "Loose issue", "--type", "task"],
+        "create_flat",
+    );
+    assert!(flat.status.success());
+    let flat_id = parse_created_id(&flat.stdout);
+
+    // `attach_to_parent` sets the edge via `set_parent_in_tx`, which has no
+    // metadata column -- unlike the generic `add_dependency_with_metadata`
+    // path every other `--type` still uses. Silently dropping `--metadata`
+    // here would be silent data loss, so this combination must be refused
+    // rather than accepted with the metadata discarded.
+    let out = run_br(
+        &workspace,
+        [
+            "dep",
+            "add",
+            &flat_id,
+            &epic_id,
+            "--type",
+            "parent-child",
+            "--metadata",
+            "{\"note\":\"should not be silently dropped\"}",
+        ],
+        "dep_add_parent_child_metadata",
+    );
+    assert!(
+        !out.status.success(),
+        "must not silently accept and discard --metadata"
+    );
+    assert!(
+        out.stderr.contains("--metadata"),
+        "the error must name the offending flag; got: {}",
+        out.stderr
+    );
+
+    // And the refusal must be a no-op: no edge, no rename.
+    assert!(
+        !flat_id.contains('.'),
+        "the refused add must not have renumbered the issue"
+    );
+    let dep_list = run_br(
+        &workspace,
+        ["dep", "list", &flat_id],
+        "dep_list_after_refusal",
+    );
+    assert!(dep_list.status.success());
+    assert!(
+        !dep_list.stdout.contains(&epic_id),
+        "the refusal must not have created the edge; got: {}",
         dep_list.stdout
     );
 }

@@ -573,6 +573,7 @@ fn dep_add(
             storage_ctx,
             &issue_id,
             &depends_on_id,
+            args.metadata.as_deref(),
             actor,
             ctx,
             local_beads_dir,
@@ -676,6 +677,7 @@ fn dep_add_parent_child(
     storage_ctx: &mut config::OpenStorageResult,
     issue_id: &str,
     depends_on_id: &str,
+    metadata: Option<&str>,
     actor: &str,
     ctx: &OutputContext,
     local_beads_dir: &Path,
@@ -693,6 +695,27 @@ fn dep_add_parent_child(
                 "{depends_on_id} is an external reference and cannot be a parent-child \
                  target; attaching a parent renumbers the child to match it, which only \
                  makes sense for a local parent"
+            ),
+        ));
+    }
+
+    // `attach_to_parent` sets the `parent-child` edge through
+    // `set_parent_in_tx`, which has no metadata column to write to -- the
+    // generic `add_dependency_with_metadata` path this branch replaces did
+    // store it. Silently discarding `--metadata` here would be silent data
+    // loss, so refuse the combination instead: threading metadata through
+    // `attach_to_parent` would mean widening a helper Task 8 deliberately
+    // hardened down to `(issue_id, parent_id, actor)`, for a combination
+    // (`parent-child` edges do not otherwise carry metadata in this schema)
+    // that has no established meaning to store it under.
+    if let Some(metadata) = metadata {
+        return Err(BeadsError::validation(
+            "metadata",
+            format!(
+                "--metadata '{metadata}' cannot be combined with --type parent-child: \
+                 attaching a parent renumbers the child instead of inserting a plain \
+                 dependency row, and there is nowhere to store metadata on that \
+                 operation. Drop --metadata, or use a different --type."
             ),
         ));
     }

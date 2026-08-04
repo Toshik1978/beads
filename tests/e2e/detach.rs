@@ -2,8 +2,11 @@
 
 use crate::common;
 
+use beads::model::DependencyType;
 use common::cli::{BrWorkspace, extract_json_payload, parse_created_id, run_br};
+use common::fixtures::{IssueBuilder, dependency};
 use serde_json::Value;
+use std::fs;
 
 #[test]
 fn e2e_detaching_every_child_lets_the_epic_close_without_force() {
@@ -205,33 +208,52 @@ fn e2e_detach_drops_the_dep_on_a_flat_child_without_renaming_it() {
     assert!(create_epic.status.success());
     let epic_id = parse_created_id(&create_epic.stdout);
 
-    let create_flat = run_br(
+    // `dep add --type parent-child` now renumbers the same way `update
+    // --parent` does (bds-a23.4.2), so it can no longer produce a flat ID
+    // with a parent-child dependency -- the exact fixture this test needs to
+    // exercise "detach on an already-flat child must not rename it". Build
+    // it the only way that shape can still arise: importing JSONL, which is
+    // also how legacy repositories and hand-edited files reach it. Same
+    // idiom as `tests/e2e/reparent.rs`.
+    let flat_id = "zz-detachflat";
+    let mut flat_child = IssueBuilder::new("Flat child").with_id(flat_id).build();
+    let mut edge = dependency(flat_id, &epic_id);
+    edge.dep_type = DependencyType::ParentChild;
+    flat_child.dependencies.push(edge);
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    let mut contents = fs::read_to_string(&jsonl_path).unwrap_or_default();
+    contents.push_str(&serde_json::to_string(&flat_child).expect("serialize flat child fixture"));
+    contents.push('\n');
+    fs::write(&jsonl_path, contents).expect("write flat child fixture");
+
+    let import = run_br(
         &workspace,
-        ["create", "Flat child", "--type", "task"],
-        "create_flat",
+        ["sync", "--import-only", "--force"],
+        "import_flat_child",
     );
-    assert!(create_flat.status.success());
-    let flat_id = parse_created_id(&create_flat.stdout);
+    assert!(import.status.success(), "import failed: {}", import.stderr);
     assert!(
         !flat_id.contains('.'),
         "precondition: {flat_id} should be a flat ID"
     );
 
-    let dep_add = run_br(
-        &workspace,
-        ["dep", "add", &flat_id, &epic_id, "--type", "parent-child"],
-        "dep_add",
-    );
+    // Confirm the fixture actually carries the edge before acting on it --
+    // otherwise a JSONL import that silently dropped the dependency would
+    // let this test pass vacuously (detach on a parentless issue is already
+    // a documented no-op).
+    let dep_list_before = run_br(&workspace, ["dep", "list", flat_id], "dep_list_before");
+    assert!(dep_list_before.status.success());
     assert!(
-        dep_add.status.success(),
-        "dep add failed: {}",
-        dep_add.stderr
+        dep_list_before.stdout.contains(&epic_id),
+        "precondition: the imported fixture must carry the parent-child edge; got: {}",
+        dep_list_before.stdout
     );
 
-    let detach = run_br(&workspace, ["detach", &flat_id], "detach");
+    let detach = run_br(&workspace, ["detach", flat_id], "detach");
     assert!(detach.status.success(), "detach failed: {}", detach.stderr);
 
-    let shown = run_br(&workspace, ["show", &flat_id], "show_flat");
+    let shown = run_br(&workspace, ["show", flat_id], "show_flat");
     assert!(shown.status.success());
     assert!(
         shown.stdout.contains("Flat child"),
@@ -239,7 +261,23 @@ fn e2e_detach_drops_the_dep_on_a_flat_child_without_renaming_it() {
         shown.stdout
     );
 
-    let dep_list = run_br(&workspace, ["dep", "list", &flat_id], "dep_list");
+    // `show <flat_id>` printing "Flat child" is not, on its own, proof
+    // nothing was renamed: former-id resolution would happily redirect a
+    // stale id to a *different* current id and still print the same title.
+    // Assert on the id `show --json` reports directly, against `flat_id`
+    // itself rather than through resolution.
+    let shown_json_run = run_br(&workspace, ["show", flat_id, "--json"], "show_flat_json");
+    assert!(shown_json_run.status.success());
+    let shown_json: Vec<Value> =
+        serde_json::from_str(&extract_json_payload(&shown_json_run.stdout)).expect("show json");
+    assert_eq!(
+        shown_json[0]["id"].as_str(),
+        Some(flat_id),
+        "detaching an already-flat child must not rename it; got: {}",
+        shown_json_run.stdout
+    );
+
+    let dep_list = run_br(&workspace, ["dep", "list", flat_id], "dep_list");
     assert!(dep_list.status.success());
     assert!(
         !dep_list.stdout.contains(&epic_id),
