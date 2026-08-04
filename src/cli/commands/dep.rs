@@ -325,6 +325,13 @@ struct DepActionResult {
     #[serde(rename = "type")]
     dep_type: String,
     action: String,
+    /// Present only for a `parent-child` add: the id `issue_id` holds after
+    /// [`crate::cli::commands::attach_to_parent`] renumbers it (unchanged
+    /// from `issue_id` when it was already a dotted child of the target).
+    /// An id silently changing under a user is worse than the extra field
+    /// this reports it with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_id: Option<String>,
 }
 
 /// JSON output for dep import operations.
@@ -557,6 +564,22 @@ fn dep_add(
         return Err(BeadsError::SelfDependency { id: issue_id });
     }
 
+    // `dep add X Y --type parent-child` is `update X --parent Y` by another
+    // name: renumber through the same `attach_to_parent` helper rather than
+    // inserting the raw edge, so the invariant (a dotted prefix always names
+    // the real parent) holds no matter which command created the edge.
+    if dep_type == DependencyType::ParentChild {
+        return dep_add_parent_child(
+            storage_ctx,
+            &issue_id,
+            &depends_on_id,
+            actor,
+            ctx,
+            local_beads_dir,
+            auto_flush_external,
+        );
+    }
+
     let added = retry_mutation_with_jsonl_recovery(
         storage_ctx,
         true,
@@ -591,6 +614,7 @@ fn dep_add(
             depends_on_id: depends_on_id.clone(),
             dep_type: dep_type.as_str().to_string(),
             action: if added { "added" } else { "already_exists" }.to_string(),
+            new_id: None,
         };
         ctx.json_pretty(&result);
     } else if matches!(ctx.mode(), OutputMode::Quiet) {
@@ -631,6 +655,107 @@ fn dep_add(
     } else {
         let issue_id_display = dep_display_text(&issue_id);
         let depends_on_id_display = dep_display_text(&depends_on_id);
+        ctx.info(&format!(
+            "Dependency already exists: {issue_id_display} → {depends_on_id_display}"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Handle `dep add <id> <target> --type parent-child`: the same operation as
+/// `br update <id> --parent <target>` under a different name, so it goes
+/// through the same [`crate::cli::commands::attach_to_parent`] helper rather
+/// than inserting a raw `parent-child` edge the way every other dependency
+/// type does. A second renumbering implementation here is exactly the kind of
+/// hole the invariant this project maintains -- a dotted prefix always names
+/// the real parent, and having a parent always implies a dotted ID -- exists
+/// to close.
+#[allow(clippy::too_many_arguments)]
+fn dep_add_parent_child(
+    storage_ctx: &mut config::OpenStorageResult,
+    issue_id: &str,
+    depends_on_id: &str,
+    actor: &str,
+    ctx: &OutputContext,
+    local_beads_dir: &Path,
+    auto_flush_external: bool,
+) -> Result<()> {
+    // `depends_on` may be an `external:` reference -- not a local issue, and
+    // so it cannot be a parent. `validate_dependency_target_route` lets an
+    // `external:` target through unconditionally (it needs no route check),
+    // so this is the only place left to reject one before it would otherwise
+    // reach `attach_to_parent` as a bogus parent id.
+    if depends_on_id.starts_with("external:") {
+        return Err(BeadsError::validation(
+            "depends_on",
+            format!(
+                "{depends_on_id} is an external reference and cannot be a parent-child \
+                 target; attaching a parent renumbers the child to match it, which only \
+                 makes sense for a local parent"
+            ),
+        ));
+    }
+
+    let new_id = retry_mutation_with_jsonl_recovery(
+        storage_ctx,
+        true,
+        "dep add",
+        Some(issue_id),
+        |storage| crate::cli::commands::attach_to_parent(storage, issue_id, depends_on_id, actor),
+    )?;
+    // `attach_to_parent` no-ops (returns `issue_id` unchanged) when the issue
+    // was already a dotted child of `depends_on_id`; anything else means it
+    // actually set the edge and/or renumbered, so the blocked cache and
+    // last-touched bookkeeping need to reflect it.
+    let added = new_id != issue_id;
+
+    finalize_dep_mutation(storage_ctx, added, "dep add")?;
+    if auto_flush_external && let Err(error) = storage_ctx.auto_flush_if_enabled() {
+        report_auto_flush_failure(
+            ctx,
+            &storage_ctx.paths.beads_dir,
+            &storage_ctx.paths.jsonl_path,
+            &error,
+        );
+    }
+    crate::util::set_last_touched_id(local_beads_dir, &new_id);
+
+    if ctx.is_json() {
+        let result = DepActionResult {
+            status: if added { "ok" } else { "exists" }.to_string(),
+            issue_id: new_id.clone(),
+            depends_on_id: depends_on_id.to_string(),
+            dep_type: DependencyType::ParentChild.as_str().to_string(),
+            action: if added { "added" } else { "already_exists" }.to_string(),
+            // Report it: an ID silently changing under a user is worse than
+            // the extra field this prevents.
+            new_id: Some(new_id.clone()),
+        };
+        ctx.json_pretty(&result);
+    } else if matches!(ctx.mode(), OutputMode::Quiet) {
+        return Ok(());
+    } else if added {
+        let issue_id_display = dep_display_text(&new_id);
+        let depends_on_id_display = dep_display_text(depends_on_id);
+        if ctx.is_rich() {
+            ctx.success(&format!(
+                "Added dependency: {} → {}",
+                issue_id_display, depends_on_id_display
+            ));
+            ctx.print_line(&format!(
+                "  {} is parent of {}",
+                depends_on_id_display, issue_id_display
+            ));
+        } else {
+            ctx.success(&format!(
+                "Added dependency: {} -> {} (parent-child)",
+                issue_id_display, depends_on_id_display
+            ));
+        }
+    } else {
+        let issue_id_display = dep_display_text(&new_id);
+        let depends_on_id_display = dep_display_text(depends_on_id);
         ctx.info(&format!(
             "Dependency already exists: {issue_id_display} → {depends_on_id_display}"
         ));
@@ -709,6 +834,25 @@ fn dep_remove(
 
     let dep_type = dependency_type_for_pair(&storage_ctx.storage, &issue_id, &depends_on_id)?
         .unwrap_or_else(|| "unknown".to_string());
+
+    // `dep remove` on a `parent-child` edge is `update --parent ""` by
+    // another name: a dotted ID makes a hierarchy claim just by its shape, so
+    // dropping the edge without renaming would leave it claiming a parent it
+    // no longer has -- the exact divergence this project's invariant exists
+    // to prevent. Checked after `dependency_type_for_pair` above, which
+    // already resolved the edge type, so the refusal costs no extra query. A
+    // flat ID makes no such claim, so removing its parent edge is fine.
+    if dep_type == "parent-child" && issue_id.contains('.') {
+        return Err(BeadsError::validation(
+            "dependency",
+            format!(
+                "{issue_id} is a child of {depends_on_id} by its ID, so removing the edge \
+                 would leave the ID claiming a parent it no longer has. Use `br detach \
+                 {issue_id}` instead, which gives it an independent ID."
+            ),
+        ));
+    }
+
     let removed = retry_mutation_with_jsonl_recovery(
         storage_ctx,
         true,
@@ -735,6 +879,7 @@ fn dep_remove(
             depends_on_id: depends_on_id.clone(),
             dep_type,
             action: if removed { "removed" } else { "not_found" }.to_string(),
+            new_id: None,
         };
         ctx.json_pretty(&result);
     } else if matches!(ctx.mode(), OutputMode::Quiet) {
@@ -2594,6 +2739,7 @@ mod tests {
             depends_on_id: "bd-002".to_string(),
             dep_type: "blocks".to_string(),
             action: "added".to_string(),
+            new_id: None,
         };
 
         let json = serde_json::to_string(&result).unwrap();

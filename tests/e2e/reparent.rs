@@ -8,8 +8,11 @@
 
 use crate::common;
 
+use beads::model::DependencyType;
 use common::cli::{BrWorkspace, extract_json_payload, parse_created_id, run_br};
+use common::fixtures::{IssueBuilder, dependency};
 use serde_json::Value;
+use std::fs;
 
 #[test]
 fn e2e_reparenting_renumbers_under_the_new_parent() {
@@ -193,32 +196,37 @@ fn e2e_clearing_the_parent_of_a_flat_id_still_works() {
     assert!(epic.status.success());
     let epic_id = parse_created_id(&epic.stdout);
 
-    let create_flat = run_br(
+    // `dep add` now renumbers a `parent-child` target the same way `update
+    // --parent` does (that is this task's whole point), so there is no
+    // longer a CLI path that leaves an issue with a flat ID and a parent.
+    // Build that shape the only way it can still arise -- importing JSONL,
+    // which is also how legacy repositories and hand-edited files reach it.
+    let flat_id = "zz-flatparent";
+    let mut flat_child = IssueBuilder::new("Flat child").with_id(flat_id).build();
+    let mut edge = dependency(flat_id, &epic_id);
+    edge.dep_type = DependencyType::ParentChild;
+    flat_child.dependencies.push(edge);
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    let mut contents = fs::read_to_string(&jsonl_path).unwrap_or_default();
+    contents.push_str(&serde_json::to_string(&flat_child).expect("serialize flat child fixture"));
+    contents.push('\n');
+    fs::write(&jsonl_path, contents).expect("write flat child fixture");
+
+    let import = run_br(
         &workspace,
-        ["create", "Flat child", "--type", "task"],
-        "create_flat",
+        ["sync", "--import-only", "--force"],
+        "import_flat_child",
     );
-    assert!(create_flat.status.success());
-    let flat_id = parse_created_id(&create_flat.stdout);
+    assert!(import.status.success(), "import failed: {}", import.stderr);
     assert!(
         !flat_id.contains('.'),
         "precondition: {flat_id} should be a flat ID"
     );
 
-    let dep_add = run_br(
-        &workspace,
-        ["dep", "add", &flat_id, &epic_id, "--type", "parent-child"],
-        "dep_add",
-    );
-    assert!(
-        dep_add.status.success(),
-        "dep add failed: {}",
-        dep_add.stderr
-    );
-
     let clear = run_br(
         &workspace,
-        ["update", &flat_id, "--parent", ""],
+        ["update", flat_id, "--parent", ""],
         "clear_parent",
     );
     assert!(
@@ -227,7 +235,7 @@ fn e2e_clearing_the_parent_of_a_flat_id_still_works() {
         clear.stderr
     );
 
-    let dep_list = run_br(&workspace, ["dep", "list", &flat_id], "dep_list");
+    let dep_list = run_br(&workspace, ["dep", "list", flat_id], "dep_list");
     assert!(dep_list.status.success());
     assert!(
         !dep_list.stdout.contains(&epic_id),
@@ -468,5 +476,218 @@ fn e2e_a_second_reparent_into_the_same_parent_succeeds() {
         second_reparent.status.success(),
         "a second reparent into the same parent must succeed: {}",
         second_reparent.stderr
+    );
+}
+
+// `br dep add X Y --type parent-child` and `br dep remove` on a
+// `parent-child` edge -- the same rule as `br update --parent` above, under
+// the `dep` command's name. They must behave identically or the invariant
+// has a hole with a different spelling.
+
+#[test]
+fn e2e_dep_add_parent_child_renumbers_the_same_way_update_does() {
+    let _log = common::test_log("e2e_dep_add_parent_child_renumbers_the_same_way_update_does");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(epic.status.success());
+    let epic_id = parse_created_id(&epic.stdout);
+
+    let flat = run_br(
+        &workspace,
+        ["create", "Loose issue", "--type", "task"],
+        "create_flat",
+    );
+    assert!(flat.status.success());
+    let flat_id = parse_created_id(&flat.stdout);
+
+    let out = run_br(
+        &workspace,
+        [
+            "dep",
+            "add",
+            &flat_id,
+            &epic_id,
+            "--type",
+            "parent-child",
+            "--json",
+        ],
+        "dep_add",
+    );
+    assert!(out.status.success(), "dep add failed: {}", out.stderr);
+
+    let payload: Value =
+        serde_json::from_str(&extract_json_payload(&out.stdout)).expect("parse dep add json");
+    let new_id = payload["new_id"].as_str().expect("new_id in payload");
+    assert!(
+        new_id.starts_with(&format!("{epic_id}.")),
+        "dep add must renumber exactly as update --parent does; got {new_id}"
+    );
+    assert_eq!(
+        payload["issue_id"].as_str(),
+        Some(new_id),
+        "issue_id must report the post-renumber id, not the requested one; got: {payload}"
+    );
+}
+
+#[test]
+fn e2e_dep_remove_on_a_parent_child_edge_is_refused_and_names_detach() {
+    let _log =
+        common::test_log("e2e_dep_remove_on_a_parent_child_edge_is_refused_and_names_detach");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(epic.status.success());
+    let epic_id = parse_created_id(&epic.stdout);
+
+    let create_child = run_br(
+        &workspace,
+        ["create", "Child", "--type", "task", "--parent", &epic_id],
+        "create_child",
+    );
+    assert!(create_child.status.success());
+    let child_id = parse_created_id(&create_child.stdout);
+    assert!(
+        child_id.contains('.'),
+        "precondition: {child_id} should be a dotted ID"
+    );
+
+    let out = run_br(
+        &workspace,
+        ["dep", "remove", &child_id, &epic_id],
+        "dep_remove_refused",
+    );
+
+    assert!(!out.status.success(), "must not silently drop the edge");
+    assert!(
+        out.stderr.contains("br detach"),
+        "the error must point at the command that does this properly; got: {}",
+        out.stderr
+    );
+
+    // And the refusal must be a no-op: the edge is untouched.
+    let dep_list = run_br(
+        &workspace,
+        ["dep", "list", &child_id],
+        "dep_list_after_refusal",
+    );
+    assert!(dep_list.status.success());
+    assert!(
+        dep_list.stdout.contains(&epic_id),
+        "the parent-child edge must still be there; got: {}",
+        dep_list.stdout
+    );
+}
+
+#[test]
+fn e2e_dep_remove_still_works_on_ordinary_edges() {
+    let _log = common::test_log("e2e_dep_remove_still_works_on_ordinary_edges");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let a = run_br(&workspace, ["create", "A", "--type", "task"], "create_a");
+    assert!(a.status.success());
+    let a_id = parse_created_id(&a.stdout);
+
+    let b = run_br(&workspace, ["create", "B", "--type", "task"], "create_b");
+    assert!(b.status.success());
+    let b_id = parse_created_id(&b.stdout);
+
+    let add = run_br(
+        &workspace,
+        ["dep", "add", &a_id, &b_id, "--type", "blocks"],
+        "dep_add_blocks",
+    );
+    assert!(add.status.success(), "dep add failed: {}", add.stderr);
+
+    let remove = run_br(&workspace, ["dep", "remove", &a_id, &b_id], "dep_remove");
+    assert!(
+        remove.status.success(),
+        "removing an ordinary edge must still work: {}",
+        remove.stderr
+    );
+
+    let dep_list = run_br(&workspace, ["dep", "list", &a_id], "dep_list");
+    assert!(dep_list.status.success());
+    assert!(
+        !dep_list.stdout.contains(&b_id),
+        "the blocks edge must be gone; got: {}",
+        dep_list.stdout
+    );
+}
+
+#[test]
+fn e2e_dep_remove_on_a_flat_child_still_works() {
+    let _log = common::test_log("e2e_dep_remove_on_a_flat_child_still_works");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(epic.status.success());
+    let epic_id = parse_created_id(&epic.stdout);
+
+    // Once `dep add` renumbers, no CLI path can produce a flat issue that has
+    // a parent any more -- so this fixture has to be imported. That is also
+    // the only way this shape arrives in reality: legacy repositories and
+    // hand-edited JSONL.
+    let flat_id = "zz-flatchild";
+    let mut flat_child = IssueBuilder::new("Flat child").with_id(flat_id).build();
+    let mut edge = dependency(flat_id, &epic_id);
+    edge.dep_type = DependencyType::ParentChild;
+    flat_child.dependencies.push(edge);
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    let mut contents = fs::read_to_string(&jsonl_path).unwrap_or_default();
+    contents.push_str(&serde_json::to_string(&flat_child).expect("serialize flat child fixture"));
+    contents.push('\n');
+    fs::write(&jsonl_path, contents).expect("write flat child fixture");
+
+    let import = run_br(
+        &workspace,
+        ["sync", "--import-only", "--force"],
+        "import_flat_child",
+    );
+    assert!(import.status.success(), "import failed: {}", import.stderr);
+    assert!(
+        !flat_id.contains('.'),
+        "precondition: {flat_id} should be a flat ID"
+    );
+
+    let remove = run_br(
+        &workspace,
+        ["dep", "remove", flat_id, &epic_id],
+        "dep_remove_flat",
+    );
+    assert!(
+        remove.status.success(),
+        "a flat ID makes no hierarchy claim, so removing its parent edge is coherent \
+         and must not be refused: {}",
+        remove.stderr
+    );
+
+    let dep_list = run_br(&workspace, ["dep", "list", flat_id], "dep_list");
+    assert!(dep_list.status.success());
+    assert!(
+        !dep_list.stdout.contains(&epic_id),
+        "the parent-child edge must be gone; got: {}",
+        dep_list.stdout
     );
 }

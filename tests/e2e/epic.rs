@@ -556,10 +556,22 @@ fn e2e_epic_nested_epics() {
             &parent_id,
             "--type",
             "parent-child",
+            "--json",
         ],
         "dep_child_to_parent",
     );
     assert!(dep2.status.success());
+    // `dep add --type parent-child` renumbers the same way `update --parent`
+    // does, so the child epic's id changes here (and cascades to the task
+    // attached under it in `dep1` above, per the same rename). Everything
+    // below must compare against the id it landed on, not the one it had
+    // before this attach.
+    let dep2_payload: Value =
+        serde_json::from_str(&extract_json_payload(&dep2.stdout)).expect("parse dep2 json");
+    let child_id = dep2_payload["new_id"]
+        .as_str()
+        .expect("new_id in dep add parent-child payload")
+        .to_string();
 
     // Check status - parent should have child epic as child
     let status = run_br(&workspace, ["epic", "status", "--json"], "epic_status");

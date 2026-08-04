@@ -3327,6 +3327,7 @@ fn e2e_delete_child_with_parent_child_dependency_previews_parent() {
             &parent_id,
             "--type",
             "parent-child",
+            "--json",
         ],
         "dep_add_parent_child",
     );
@@ -3335,6 +3336,15 @@ fn e2e_delete_child_with_parent_child_dependency_previews_parent() {
         "dep add failed: {}",
         dep_add.stderr
     );
+    // `dep add --type parent-child` renumbers the same way `update --parent`
+    // does, so the child's id changes here; the delete preview below must
+    // compare against the id it landed on.
+    let dep_add_payload: Value =
+        serde_json::from_str(&extract_json_payload(&dep_add.stdout)).expect("parse dep add json");
+    let child_id = dep_add_payload["new_id"]
+        .as_str()
+        .expect("new_id in dep add parent-child payload")
+        .to_string();
 
     let delete = run_br(
         &workspace,

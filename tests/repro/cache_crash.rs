@@ -371,14 +371,30 @@ fn repro_dep_add_parent_child_succeeds_no_db_after_blocked_cache_exists() {
         add_parent_child.stderr
     );
 
+    // `dep add --type parent-child` renumbers the child under its new parent
+    // the same way `update --parent` does, so the id it lands on -- reported
+    // as `new_id` in the JSON payload -- is not `child_id` any more; the
+    // JSONL record for `child_id` is a tombstone once this has flushed.
+    let add_payload: serde_json::Value =
+        serde_json::from_str(&extract_json_payload(&add_parent_child.stdout))
+            .expect("parse dep add parent-child json");
+    let new_child_id = add_payload["new_id"]
+        .as_str()
+        .expect("new_id in dep add parent-child payload")
+        .to_string();
+    assert!(
+        new_child_id.starts_with(&format!("{parent_id}.")),
+        "renumbered child must be named under its new parent; got {new_child_id}"
+    );
+
     let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
     let child_record = fs::read_to_string(&jsonl_path)
         .expect("read issues.jsonl")
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse issue json"))
-        .find(|record| record["id"].as_str() == Some(child_id.as_str()))
-        .expect("child issue record in issues.jsonl");
+        .find(|record| record["id"].as_str() == Some(new_child_id.as_str()))
+        .expect("renamed child issue record in issues.jsonl");
     let dependencies = child_record["dependencies"]
         .as_array()
         .expect("jsonl issue should include dependencies array");

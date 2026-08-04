@@ -497,10 +497,20 @@ fn e2e_no_db_show_bypasses_corrupt_db_and_preserves_relations() {
             &parent_id,
             "--type",
             "parent-child",
+            "--json",
         ],
         "dep_add_parent_child",
     );
     assert!(dep.status.success(), "dep add failed: {}", dep.stderr);
+    // `dep add --type parent-child` renumbers the same way `update --parent`
+    // does, so the child's id changes here; everything below must compare
+    // against the id it landed on.
+    let dep_payload: Value =
+        serde_json::from_str(&extract_json_payload(&dep.stdout)).expect("parse dep add json");
+    let child_id = dep_payload["new_id"]
+        .as_str()
+        .expect("new_id in dep add parent-child payload")
+        .to_string();
 
     let sync = run_br(&workspace, ["sync", "--flush-only"], "sync_flush");
     assert!(sync.status.success(), "sync flush failed: {}", sync.stderr);
