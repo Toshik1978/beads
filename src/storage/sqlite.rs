@@ -7181,11 +7181,67 @@ impl SqliteStorage {
         Ok(result)
     }
 
-    /// Read-only access to the underlying connection, for callers that need
-    /// to inspect schema (e.g. `PRAGMA` introspection) rather than issue data.
-    #[must_use]
-    pub fn connection(&self) -> &Connection {
-        &self.conn
+    /// Every table name in the live schema, excluding SQLite's own internal
+    /// `sqlite_%` tables.
+    ///
+    /// Schema introspection only — unlike a raw `&Connection`, nothing
+    /// reachable from this return value can execute a write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn schema_table_names(&self) -> Result<Vec<String>> {
+        let rows = self.conn.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let mut names = Vec::with_capacity(rows.len());
+        for row in &rows {
+            if let Some(name) = row.get(0).and_then(SqliteValue::as_text) {
+                names.push(name.to_string());
+            }
+        }
+        Ok(names)
+    }
+
+    /// Columns of `table` that declare a foreign key referencing `issues`,
+    /// per `PRAGMA foreign_key_list`.
+    ///
+    /// Schema introspection only — see [`Self::schema_table_names`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn columns_referencing_issues(&self, table: &str) -> Result<Vec<String>> {
+        let rows = self
+            .conn
+            .query(&format!("PRAGMA foreign_key_list({table})"))?;
+        let mut columns = Vec::new();
+        for row in &rows {
+            // PRAGMA foreign_key_list columns: id, seq, table, from, to, ...
+            let referenced = row.get(2).and_then(SqliteValue::as_text);
+            let column = row.get(3).and_then(SqliteValue::as_text);
+            if referenced == Some("issues")
+                && let Some(column) = column
+            {
+                columns.push(column.to_string());
+            }
+        }
+        Ok(columns)
+    }
+
+    /// Whether `table.column` exists in the live schema, per `PRAGMA
+    /// table_info`.
+    ///
+    /// Schema introspection only — see [`Self::schema_table_names`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn schema_has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let rows = self.conn.query(&format!("PRAGMA table_info({table})"))?;
+        Ok(rows
+            .iter()
+            .any(|row| row.get(1).and_then(SqliteValue::as_text) == Some(column)))
     }
 
     /// Every issue ID strictly beneath `id`, at any depth and in any status.

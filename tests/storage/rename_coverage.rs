@@ -22,49 +22,48 @@ use std::collections::BTreeSet;
 
 /// `dependencies.depends_on_id` holds an issue ID but declares no foreign key —
 /// removed deliberately at `schema.rs:132` so `external:` references can dangle.
-/// It is the one column the FK sweep cannot find on its own.
+/// It is the one column the FK sweep cannot find on its own, which is exactly
+/// why it gets its own existence check below rather than being trusted blind:
+/// an unchecked exemption is a second hand-written list of schema facts,
+/// hiding inside the guard meant to catch hand-written lists of schema facts.
 const FK_EXEMPT_ID_COLUMNS: &[(&str, &str)] = &[("dependencies", "depends_on_id")];
 
 #[test]
 fn every_id_bearing_column_is_covered_by_rename_issue() {
     let storage = test_db();
-    let conn = storage.connection();
 
-    let mut from_schema: BTreeSet<(String, String)> = FK_EXEMPT_ID_COLUMNS
-        .iter()
-        .map(|(t, c)| ((*t).to_string(), (*c).to_string()))
-        .collect();
+    // Fact-check the exempt list against the live schema before trusting it.
+    // The FK sweep below cannot see these columns at all (that is the reason
+    // they are exempt), so nothing else in this test would notice if one were
+    // dropped or renamed — `covered` and `from_schema` would go on agreeing
+    // with each other while both silently described a column that no longer
+    // exists.
+    let mut from_schema: BTreeSet<(String, String)> = BTreeSet::new();
+    for (table, column) in FK_EXEMPT_ID_COLUMNS {
+        let exists = storage
+            .schema_has_column(table, column)
+            .expect("table_info query");
+        assert!(
+            exists,
+            "FK_EXEMPT_ID_COLUMNS names {table}.{column}, but the live schema has no such \
+             column — it was dropped or renamed out from under the exemption. Update \
+             FK_EXEMPT_ID_COLUMNS (in this file) and ID_BEARING_COLUMNS \
+             (src/storage/sqlite.rs) together."
+        );
+        from_schema.insert(((*table).to_string(), (*column).to_string()));
+    }
 
-    let tables = conn
-        .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-        .expect("list tables");
-
-    for table_row in &tables {
-        let table = table_row
-            .get(0)
-            .and_then(beads::storage::conn::SqliteValue::as_text)
-            .expect("table name")
-            .to_string();
+    let tables = storage.schema_table_names().expect("list tables");
+    for table in &tables {
         if table == "issues" {
             continue; // its own `id` column is rewritten directly, not via the list
         }
 
-        let fks = conn
-            .query(&format!("PRAGMA foreign_key_list({table})"))
-            .expect("foreign key list");
-        for fk in &fks {
-            // PRAGMA foreign_key_list columns: id, seq, table, from, to, ...
-            let referenced = fk
-                .get(2)
-                .and_then(beads::storage::conn::SqliteValue::as_text);
-            let column = fk
-                .get(3)
-                .and_then(beads::storage::conn::SqliteValue::as_text);
-            if referenced == Some("issues")
-                && let Some(column) = column
-            {
-                from_schema.insert((table.clone(), column.to_string()));
-            }
+        for column in storage
+            .columns_referencing_issues(table)
+            .expect("foreign key list")
+        {
+            from_schema.insert((table.clone(), column));
         }
     }
 
