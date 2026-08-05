@@ -133,6 +133,7 @@ All 24 top-level commands, for orientation. Full flags, subcommands, and
 | `dep` | Manage dependencies |
 | `label` | Manage labels |
 | `epic` | Epic management commands |
+| `detach` | Move an issue out from under its parent |
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |

@@ -26,6 +26,7 @@ Comprehensive reference for all `br` commands.
   - [dep](#dep)
   - [label](#label)
   - [epic](#epic)
+  - [detach](#detach)
   - [comments](#comments)
 - [Workflow Commands](#workflow-commands)
   - [defer / undefer](#defer--undefer)
@@ -774,6 +775,50 @@ br epic <COMMAND>
 |---------|-------------|
 | `status [--eligible-only]` | Show epic status with child progress and eligibility |
 | `close-eligible [--dry-run] [--transition-comment <TEXT>]` | Atomically close eligible epics; attach one fresh transition comment to each |
+
+---
+
+### detach
+
+Move an issue out from under its parent.
+
+```bash
+br detach <IDS>...
+```
+
+What happens depends on the ID's own shape, not just on whether a
+`parent-child` dependency exists:
+
+- A **dotted ID** (`ab-xxx.1`) makes a hierarchy claim just by its shape, so
+  detaching one mints a fresh, independent flat ID (via the same generator
+  `br create` uses), renames the issue to it, and drops the `parent-child`
+  dependency. The old dotted ID is folded into `former_ids` and keeps
+  resolving afterward, so references written before the detach — other
+  issues' text, external trackers, scripts — still work.
+- A **flat ID** makes no hierarchy claim by its shape, so detaching one only
+  drops the `parent-child` dependency; the ID itself never changes.
+- An issue with **no parent** by either measure is a successful no-op:
+  detaching the same ID twice in a row is safe to script.
+
+The point of the command is closing epics: an epic can't close without
+`--force` while it still has open children, and `br detach` is how a child
+that should no longer count stops counting, without touching the epic
+itself. `br info --projections` reports it if a dotted ID and its
+`parent-child` dependency ever disagree; `br detach` is the manual fix for
+that divergence.
+
+**Examples:**
+```bash
+# Detach a dotted child - mints a new flat ID, old ID keeps resolving
+br detach ab-abc123.1
+
+# Detach a flat issue that only carries a parent-child dependency
+br detach ab-abc123
+
+# Safe to repeat: the second call is a no-op
+br detach ab-abc123.1
+br detach ab-abc123.1
+```
 
 ---
 

@@ -4,7 +4,7 @@ description: >-
   Use when working inside a directory that has a `.beads/` workspace (or when
   asked to initialize one), and the task involves tracking, creating,
   querying, updating, or closing issues with the `br` CLI. Covers the full
-  23-command surface, the `--json` agent output mode, the
+  24-command surface, the `--json` agent output mode, the
   auto-flush/auto-import sync model, and the claim-work-close loop. Load this
   before shelling out to `br` for the first time in a session.
 ---
@@ -101,6 +101,7 @@ All 24 top-level commands. Flags, subcommands, and exit codes are in
 | `dep` | Manage dependencies |
 | `label` | Manage labels |
 | `epic` | Epic management commands |
+| `detach` | Move an issue out from under its parent |
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |
