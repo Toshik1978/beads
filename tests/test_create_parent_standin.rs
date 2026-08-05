@@ -135,4 +135,41 @@ epic
         }),
         "forward parent stand-in should resolve to epic {epic_id}, got {dependencies:?}"
     );
+
+    // bds-a23.12: a forward `Parent:` reference is resolved through
+    // `execute_import`'s `deferred_parent_deps` path -- the seventh
+    // chokepoint the hierarchical-id invariant closes. Before that fix, this
+    // edge was inserted through the unmodified bulk dependency path, which
+    // left the task's id flat while still recording a `parent-child` edge:
+    // exactly the divergence the invariant forbids. The task must instead be
+    // renumbered under its resolved parent, the same way `--parent` and
+    // `dep add --type parent-child` renumber theirs.
+    let task_id = task["id"].as_str().expect("task id");
+    assert!(
+        task_id.starts_with(&format!("{epic_id}.")),
+        "a forward Parent: reference must renumber the child to a dotted id \
+         under its parent, not leave it flat with a parent-child edge; got \
+         task id {task_id} for epic {epic_id}"
+    );
+
+    let mut projections_cmd = Command::cargo_bin("br").unwrap();
+    let projections = projections_cmd
+        .arg("info")
+        .arg("--projections")
+        .arg("--json")
+        .env("BEADS_DIR", &beads_dir)
+        .output()
+        .unwrap();
+    assert!(
+        projections.status.success(),
+        "br info --projections failed: {}",
+        String::from_utf8_lossy(&projections.stderr)
+    );
+    let info: Value = serde_json::from_slice(&projections.stdout).expect("info json");
+    assert_eq!(
+        info["projections"]["parity_status"].as_str(),
+        Some("matches"),
+        "br info --projections must report no divergence after a forward \
+         Parent: import; got {info}"
+    );
 }

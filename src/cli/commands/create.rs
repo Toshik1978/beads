@@ -1,4 +1,7 @@
-use super::{report_auto_flush_failure, resolve_issue_id, retry_mutation_with_jsonl_recovery};
+use super::{
+    finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error,
+    report_auto_flush_failure, resolve_issue_id, retry_mutation_with_jsonl_recovery,
+};
 use crate::cli::CreateArgs;
 use crate::config;
 use crate::error::{BeadsError, Result};
@@ -1110,6 +1113,19 @@ fn execute_import(
     // Now that all issues exist in storage, we can resolve intra-file references
     // by title or stand-in ID, as well as references to pre-existing issues.
     let mut resolved_import_deps = Vec::new();
+    // A forward or duplicate-key `Parent:` reference cannot be wired inline at
+    // creation time (Phase 1 defers it into `deferred_parent_deps` instead),
+    // so it lands here still needing a parent-child edge. That edge must be
+    // set through `attach_to_parent` -- the same helper `dep_add_parent_child`
+    // and `dep_import` use -- rather than folded into `resolved_import_deps`
+    // and handed to `add_dependencies_bulk_for_import`: that bulk path (like
+    // the one it replaces) inserts a bare `parent-child` dependency row
+    // without renumbering the child to a dotted id, which is precisely the
+    // "flat id with a parent-child edge" state the hierarchical-id invariant
+    // forbids (bds-a23.12). Collect the resolved (child, parent) pairs here,
+    // in file order, and apply them one at a time after the ordinary bulk
+    // dependency insert below -- see the loop after that insert for why.
+    let mut resolved_parent_child_deps: Vec<(String, String)> = Vec::new();
     // #368: count declared edges we fail to resolve so the command can exit
     // non-zero for scripted callers instead of silently reporting success.
     let mut dropped_import_edges = 0usize;
@@ -1139,11 +1155,7 @@ fn execute_import(
                 );
                 continue;
             }
-            resolved_import_deps.push(BulkDependencyInsert {
-                issue_id: issue_id.clone(),
-                depends_on_id: parent_id,
-                dep_type: "parent-child".to_string(),
-            });
+            resolved_parent_child_deps.push((issue_id.clone(), parent_id));
         }
     }
 
@@ -1258,27 +1270,39 @@ fn execute_import(
         }
     }
 
+    // Tracks whether any write below has touched the blocked cache, so a
+    // later failure in the parent-child attach loop knows whether it needs
+    // to leave the cache marked stale rather than silently wrong -- the same
+    // bookkeeping `dep_import` uses (`dep.rs`) for the identical hazard.
+    let mut cache_dirty = false;
     if !resolved_import_deps.is_empty() && !args.dry_run {
         match storage.add_dependencies_bulk_for_import(&resolved_import_deps, &actor) {
-            Ok(_) => {}
+            Ok(inserted) => {
+                if inserted > 0 {
+                    cache_dirty = true;
+                }
+            }
             Err(err) => {
                 eprintln!(
                     "warning: bulk dependency import failed ({err}); retrying dependencies one by one"
                 );
                 let mut dropped_edges = 0usize;
                 for dep in &resolved_import_deps {
-                    if let Err(err) = storage.add_dependency(
+                    match storage.add_dependency(
                         &dep.issue_id,
                         &dep.depends_on_id,
                         &dep.dep_type,
                         &actor,
                     ) {
-                        dropped_edges += 1;
-                        eprintln!(
-                            "warning: failed to add dependency {} → {}: {err}",
-                            create_display_text(&dep.issue_id),
-                            create_display_text(&dep.depends_on_id)
-                        );
+                        Ok(_) => cache_dirty = true,
+                        Err(err) => {
+                            dropped_edges += 1;
+                            eprintln!(
+                                "warning: failed to add dependency {} → {}: {err}",
+                                create_display_text(&dep.issue_id),
+                                create_display_text(&dep.depends_on_id)
+                            );
+                        }
                     }
                 }
                 // #368: The transactional bulk insert detected a cycle (or other
@@ -1294,6 +1318,94 @@ fn execute_import(
                 }
             }
         }
+    }
+
+    // Apply the `Parent:`-field parent-child edges collected above, one at a
+    // time and in file order, through `attach_to_parent` -- never folded into
+    // `resolved_import_deps`'s bulk insert (see the comment where the list is
+    // built). This is the same shape `dep_import` (`dep.rs`) uses for the
+    // identical hazard: `attach_to_parent` can rename the child to a dotted
+    // id, and that rename tombstones its old id, so a later row naming either
+    // endpoint by an id an earlier row just renamed must resolve through the
+    // `former_ids` fallback rather than the raw id captured when the pair was
+    // recorded -- re-resolving both `issue_id` and `parent_id` immediately
+    // before the call is what makes that resolution happen.
+    for (raw_issue_id, raw_parent_id) in &resolved_parent_child_deps {
+        let issue_resolution = resolve_issue_id(storage, &id_resolver, raw_issue_id);
+        let issue_id = match preserve_blocked_cache_on_error(
+            storage,
+            cache_dirty,
+            "create import",
+            issue_resolution,
+        ) {
+            Ok(id) => id,
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to resolve issue {} for parent-child attach: {err}",
+                    create_display_text(raw_issue_id)
+                );
+                dropped_import_edges += 1;
+                continue;
+            }
+        };
+        let parent_resolution = resolve_issue_id(storage, &id_resolver, raw_parent_id);
+        let parent_id = match preserve_blocked_cache_on_error(
+            storage,
+            cache_dirty,
+            "create import",
+            parent_resolution,
+        ) {
+            Ok(id) => id,
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to resolve parent {} for issue {}: {err}",
+                    create_display_text(raw_parent_id),
+                    create_display_text(&issue_id)
+                );
+                dropped_import_edges += 1;
+                continue;
+            }
+        };
+
+        let attach_result = super::attach_to_parent(storage, &issue_id, &parent_id, &actor);
+        match preserve_blocked_cache_on_error(storage, cache_dirty, "create import", attach_result)
+        {
+            Ok(new_id) => {
+                if new_id != issue_id {
+                    cache_dirty = true;
+                    // The child was renamed to a dotted id; keep the id this
+                    // import reports (JSON output, `--silent`, last-touched)
+                    // consistent with what actually landed in storage rather
+                    // than the flat id it was minted with in Phase 1.
+                    for entry in &mut created_ids {
+                        if entry.0 == issue_id {
+                            entry.0.clone_from(&new_id);
+                        }
+                    }
+                    if last_created_id.as_deref() == Some(issue_id.as_str()) {
+                        last_created_id = Some(new_id);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to attach parent-child dependency {} → {}: {err}",
+                    create_display_text(&issue_id),
+                    create_display_text(&parent_id)
+                );
+                dropped_import_edges += 1;
+            }
+        }
+    }
+    // Only force the eager rebuild when this loop actually ran: the ordinary
+    // bulk dependency insert above already leaves the cache correctly
+    // deferred-stale on its own (self-healing on next read), and that
+    // existing behavior for plain (non-parent-child) imports should not
+    // change. `cache_dirty` still carries that insert's contribution so the
+    // `preserve_blocked_cache_on_error` calls above see accurate state on a
+    // first-iteration failure.
+    if !resolved_parent_child_deps.is_empty() {
+        finalize_batched_blocked_cache_refresh(storage, cache_dirty, "create import")?;
     }
 
     // #368: declared dependency edges that couldn't be resolved during Phase 2
