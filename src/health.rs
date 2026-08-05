@@ -1,3 +1,18 @@
+//! Workspace **file-state** classification — is the database readable, is the
+//! JSONL intact, are there stale locks or sidecars lying around.
+//!
+//! **There is no `br health` command, and this module does not back one.** Its
+//! only consumer is `src/cli/commands/sync.rs`, which surfaces these anomalies
+//! through `br sync --status` (and `--json`, as the `anomalies` array and the
+//! `workspace_health` field).
+//!
+//! The scope is deliberately narrow: this classifies the *files*, never the
+//! *data* in them. Drift inside the issue graph — a dotted ID that disagrees
+//! with its `parent-child` dep, a stale projection — is not an anomaly here and
+//! must not be added. Those belong to `br info --projections`
+//! (`src/cli/commands/info.rs`), which reports on graph integrity. The reasoning
+//! behind the split is on [`AnomalyClass`] below.
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
