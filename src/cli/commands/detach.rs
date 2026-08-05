@@ -22,10 +22,10 @@
 //! anything else, the same "not a tombstone" gate every other mutating
 //! command (`remove_dependency`, labels, comments, status) already goes
 //! through. Without it, a tombstoned dotted ID with no live parent dep and no
-//! `former_ids` redirect -- the shape `br info --projections` tells users to
-//! fix by running `br detach` -- would mint a fresh ID, move the tombstone
-//! onto it, and plant a second tombstone at the dotted address, all while
-//! printing "Detached X -> Y" as if a live issue had moved. A
+//! `former_ids` redirect -- a shape the hierarchy-divergence detector cannot
+//! see, since it excludes tombstones -- would mint a fresh ID, move the
+//! tombstone onto it, and plant a second tombstone at the dotted address, all
+//! while printing "Detached X -> Y" as if a live issue had moved. A
 //! rename-vacated ID is unaffected, since the resolver hands `detach_one` the
 //! live successor via `former_ids` rather than the tombstone; a parentless
 //! live issue still passes the check and reaches the no-op above.
@@ -121,7 +121,13 @@ pub fn execute(
     };
 
     if let Some(last) = outcomes.last() {
-        crate::util::set_last_touched_id(&beads_dir, &last.old_id);
+        // Record the post-mutation identity, not the pre-mutation one:
+        // `update.rs` and `dep.rs` deliberately do the same for their own
+        // renumbering paths, since the vacated `old_id` becomes a tombstone
+        // and pointing the next bare-ID command at a tombstone is wrong even
+        // though the resolver's `former_ids` redirect papers over it today.
+        let last_id = last.new_id.as_deref().unwrap_or(&last.old_id);
+        crate::util::set_last_touched_id(&beads_dir, last_id);
     }
 
     if use_structured_output {
@@ -332,10 +338,11 @@ fn detach_one(
     // status) routes through `ensure_issue_mutable_in_tx` before touching a
     // resolved issue; `detach` is the one that did not, and the reachable
     // shape that exposes it is a tombstoned dotted ID with no parent dep and
-    // no `former_ids` redirect -- exactly the legacy divergent shape
-    // `br info --projections` tells users to fix by running `br detach`.
-    // Without this check that advice mints a fresh flat ID, moves the
-    // tombstone onto it, and plants a second tombstone at the dotted
+    // no `former_ids` redirect. `hierarchy_divergences_for` cannot flag this
+    // shape for the user -- it filters out tombstones -- so nothing steers
+    // anyone toward `detach` here; the guard has to hold on its own.
+    // Without this check, resolving such an ID mints a fresh flat ID, moves
+    // the tombstone onto it, and plants a second tombstone at the dotted
     // address, printing "Detached X -> Y" as though a live issue moved.
     //
     // A rename-vacated ID is unaffected: the resolver prefers its
@@ -531,15 +538,16 @@ mod tests {
         );
     }
 
-    /// The reachable shape `br info --projections` tells users to fix with
-    /// `br detach`: a dotted ID that is a tombstone in place, with no live
-    /// `parent-child` dep and no `former_ids` entry redirecting anywhere. The
-    /// resolver's tombstone fallback still resolves the literal string to
-    /// this dead row (there is nothing else for it to redirect to), so the
-    /// only thing standing between this and `detach_one` minting a fresh ID
-    /// and moving the tombstone onto it is the `ensure_issue_mutable` guard
-    /// added at the top of `detach_one`. This asserts that guard fires with
-    /// a clear, ID-naming error instead of a silent no-op or a bogus rename.
+    /// A reachable shape `br info --projections` cannot warn about, because
+    /// `hierarchy_divergences_for` excludes tombstones: a dotted ID that is a
+    /// tombstone in place, with no live `parent-child` dep and no
+    /// `former_ids` entry redirecting anywhere. The resolver's tombstone
+    /// fallback still resolves the literal string to this dead row (there is
+    /// nothing else for it to redirect to), so the only thing standing
+    /// between this and `detach_one` minting a fresh ID and moving the
+    /// tombstone onto it is the `ensure_issue_mutable` guard added at the top
+    /// of `detach_one`. This asserts that guard fires with a clear,
+    /// ID-naming error instead of a silent no-op or a bogus rename.
     #[test]
     fn execute_rejects_a_genuinely_tombstoned_dotted_id_with_no_redirect() {
         let _lock = crate::util::test_helpers::TEST_DIR_LOCK

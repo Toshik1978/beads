@@ -3813,16 +3813,9 @@ impl SqliteStorage {
     /// of legacy or hand-edited data, which is the one door that cannot be
     /// locked.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    pub fn hierarchy_divergences(&self) -> Result<Vec<(String, Option<String>, Option<String>)>> {
-        Self::hierarchy_divergences_for(&self.conn)
-    }
-
-    /// Connection-level implementation of [`Self::hierarchy_divergences`],
-    /// usable by callers (such as `br info --projections`) that only have a
-    /// borrowed [`Connection`] rather than a full `SqliteStorage`.
+    /// Takes a borrowed [`Connection`] rather than `&self` so callers that
+    /// only have one on hand (such as `br info --projections`) can call it
+    /// directly.
     ///
     /// # Errors
     ///
@@ -7066,19 +7059,19 @@ impl SqliteStorage {
         }
     }
 
-    /// Public entry point to the same "not a tombstone, and exists" check
-    /// [`Self::ensure_issue_mutable_in_tx`] gives every in-transaction mutator
-    /// (`remove_dependency`, labels, comments, status). Callers that mutate an
-    /// issue across more than one `mutate()` transaction -- `detach`, notably,
-    /// which resolves and renames outside any single transaction -- cannot
-    /// reach the private, `&Connection`-scoped helper directly, so this thin
-    /// wrapper opens it on `self.conn` instead.
+    /// Crate-visible entry point to the same "not a tombstone, and exists"
+    /// check [`Self::ensure_issue_mutable_in_tx`] gives every in-transaction
+    /// mutator (`remove_dependency`, labels, comments, status). Callers that
+    /// mutate an issue across more than one `mutate()` transaction --
+    /// `detach`, notably, which resolves and renames outside any single
+    /// transaction -- cannot reach the private, `&Connection`-scoped helper
+    /// directly, so this thin wrapper opens it on `self.conn` instead.
     ///
     /// # Errors
     ///
     /// Returns a `Validation` error if `issue_id` resolves to a tombstone, or
     /// `IssueNotFound` if it does not resolve to any row at all.
-    pub fn ensure_issue_mutable(&self, issue_id: &str, action: &str) -> Result<()> {
+    pub(crate) fn ensure_issue_mutable(&self, issue_id: &str, action: &str) -> Result<()> {
         Self::ensure_issue_mutable_in_tx(&self.conn, issue_id, action)
     }
 

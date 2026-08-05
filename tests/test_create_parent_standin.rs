@@ -167,9 +167,18 @@ epic
     );
     let info: Value = serde_json::from_slice(&projections.stdout).expect("info json");
     assert_eq!(
+        info["projections"]["hierarchy_divergence_status"].as_str(),
+        Some("clear"),
+        "br info --projections must report no hierarchy divergence after a \
+         forward Parent: import; got {info}"
+    );
+    // The blocked/ready cache parity check is independently worth asserting
+    // here too: a forward `Parent:` import touches both the deferred-parent
+    // resolution path and the cache it feeds.
+    assert_eq!(
         info["projections"]["parity_status"].as_str(),
         Some("matches"),
-        "br info --projections must report no divergence after a forward \
-         Parent: import; got {info}"
+        "br info --projections must report no cache divergence after a \
+         forward Parent: import; got {info}"
     );
 }

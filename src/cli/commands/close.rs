@@ -791,7 +791,7 @@ fn execute_route(
             let skipped = SkippedIssue {
                 id: id.clone(),
                 reason: format!(
-                    "{label} has {}/{} open children (use --force to close anyway)",
+                    "{label} has {}/{} open children (use `br detach <child-id>` to make a child independent, or --force to close anyway)",
                     total - closed,
                     total
                 ),
@@ -831,7 +831,7 @@ fn execute_route(
                 let skipped = SkippedIssue {
                     id: id.clone(),
                     reason: format!(
-                        "{label} has {} open dot-notation child issue(s): {}{} (use --force to close anyway)",
+                        "{label} has {} open dot-notation child issue(s): {}{} (use `br detach <child-id>` to make a child independent, or --force to close anyway)",
                         unrequested_children.len(),
                         preview.join(", "),
                         suffix

@@ -326,9 +326,9 @@ fn e2e_reparenting_carries_the_grandchildren() {
     // `former_ids` entry, so the old `grandchild_id` would resolve through
     // that redirect too -- but this test looks the grandchild up under its
     // new, spliced id specifically to assert it was physically moved there,
-    // not merely reachable via a resolver hop. See `detach.rs`'s
-    // `execute_marks_the_blocked_cache_stale_when_a_later_id_in_the_batch_fails`
-    // test for that per-descendant redirect in action.
+    // not merely reachable via a resolver hop. See `storage/rename.rs`'s
+    // `rename::a_descendant_old_id_resolves_to_its_new_home` test for that
+    // per-descendant redirect in action.
     let new_grandchild_id = format!("{new_child_id}{grandchild_suffix}");
     let shown = run_br(&workspace, ["show", &new_grandchild_id], "show_grandchild");
     assert!(
