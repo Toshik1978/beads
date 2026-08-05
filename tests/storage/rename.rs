@@ -699,6 +699,105 @@ fn attach_to_parent_is_a_no_op_when_already_a_child_of_the_target() {
     );
 }
 
+/// Regression for bds-a23.8: the no-op guard tested
+/// `issue_id.starts_with(parent_id + ".")`, which also matches a *deeper*
+/// descendant, not just a direct child. `bd-p.1.1` created directly (not via
+/// a real two-level attach) whose `parent-child` dependency names `bd-p`
+/// itself is exactly the diverged shape this epic exists to repair -- the ID
+/// claims `bd-p.1` as its parent while the dependency says `bd-p` -- and the
+/// depth-blind guard would treat it as "already attached" and silently no-op
+/// instead of renumbering it to a real direct child of `bd-p`.
+#[test]
+fn attach_to_parent_renumbers_a_two_level_id_whose_dep_names_the_grandparent_directly() {
+    let mut storage = test_db();
+    create_at(&mut storage, "bd-p");
+    create_at(&mut storage, "bd-p.1.1");
+    storage
+        .add_dependency("bd-p.1.1", "bd-p", "parent-child", "tester")
+        .unwrap();
+
+    let result = storage
+        .attach_to_parent("bd-p.1.1", "bd-p", "tester")
+        .unwrap();
+
+    assert_ne!(
+        result, "bd-p.1.1",
+        "a depth-blind guard treats this as already attached and no-ops; it \
+         must renumber to a direct child of bd-p instead"
+    );
+    let suffix = result
+        .strip_prefix("bd-p.")
+        .expect("the repaired id must be a dotted child of bd-p");
+    assert!(
+        !suffix.is_empty() && !suffix.contains('.'),
+        "the repaired id must be a *direct* child of bd-p (exactly one dotted \
+         segment past the parent), not another multi-level id; got {result}"
+    );
+}
+
+/// Regression for bds-a23.9: `attach_to_parent` calls `rename_issue_in_tx`
+/// directly, bypassing `rename_issue`'s pre-transaction `id_exists(new_id)`
+/// guard. `child_counters` is only ever bumped by `create_issue` (for the
+/// exact id created) and by a full JSONL import's trailing
+/// `rebuild_child_counters_in_tx` sweep -- neither of which runs for a row
+/// written the way a JSONL import actually lands one row at a time,
+/// `SqliteStorage::upsert_issue_for_import` (`src/storage/sqlite.rs:12213`,
+/// the same primitive `process_import_action` calls per line while streaming
+/// an import). Writing a sibling through it, the way an import applies each
+/// line before its own trailing rebuild catches up, leaves
+/// `child_counters["bd-e1"]` at the real first child's count of 1 even
+/// though `bd-e1.2` already exists -- so a later, independent attach into
+/// `bd-e1` computes slot 2 and collides with it. Before the fix that
+/// collision fell through to a raw SQLite PRIMARY KEY constraint error
+/// instead of the same clear `"<id> already exists"` validation error
+/// `rename_issue` would have produced.
+#[test]
+fn attach_to_parent_reports_a_clear_error_when_a_jsonl_imported_child_collides() {
+    let mut storage = test_db();
+    create_at(&mut storage, "bd-e1");
+    // A real first child so `child_counters["bd-e1"]` exists at 1 and
+    // `next_child_number` takes the `child_counters` fast path rather than
+    // the live-row scan fallback (which would see the imported sibling below
+    // and not reproduce the staleness this test targets).
+    create_at(&mut storage, "bd-e1.1");
+    storage
+        .add_dependency("bd-e1.1", "bd-e1", "parent-child", "tester")
+        .unwrap();
+
+    // A second child, `bd-e1.2`, arriving via JSONL import: written through
+    // the same row-level primitive a real import uses, which does not touch
+    // `child_counters` -- the counter stays at 1 even though slot 2 is now
+    // taken, the exact staleness the bug depends on.
+    let mut imported_child = fixtures::issue("Imported child");
+    imported_child.id = "bd-e1.2".to_string();
+    storage.upsert_issue_for_import(&imported_child).unwrap();
+    storage
+        .add_dependency("bd-e1.2", "bd-e1", "parent-child", "tester")
+        .unwrap();
+    assert_eq!(
+        storage.next_child_number("bd-e1").unwrap(),
+        2,
+        "precondition: the counter must still say 2 is free, even though \
+         bd-e1.2 already exists -- that mismatch is the bug"
+    );
+
+    create_at(&mut storage, "bd-movable");
+    let err = storage
+        .attach_to_parent("bd-movable", "bd-e1", "tester")
+        .expect_err("bd-e1.2 is already occupied, so the attach must fail");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("bd-e1.2") && message.contains("already exists"),
+        "the error must be the same clear validation error rename_issue gives, \
+         not a raw SQLite constraint violation; got: {message}"
+    );
+    assert!(
+        !message.to_lowercase().contains("constraint"),
+        "must not leak a raw SQLite constraint error; got: {message}"
+    );
+}
+
 /// bds-a23.10: every renamed node, at any depth, gets the same provenance as
 /// the top-level node -- not just the directly renamed one.
 #[test]

@@ -7663,10 +7663,15 @@ impl SqliteStorage {
     /// bumps the counter it just read, so the next attach into that parent
     /// sees the number this one took.
     ///
-    /// A no-op when `issue_id` is already a dotted child of `parent_id`:
-    /// nothing is renamed and no dependency row is touched. Without this
-    /// guard, reattaching to the current parent would gratuitously mint a
-    /// new ID and leave a tombstone behind for no actual change.
+    /// A no-op when `issue_id` is already a *direct* dotted child of
+    /// `parent_id` — exactly one dotted segment past the parent, not any
+    /// deeper descendant: nothing is renamed and no dependency row is
+    /// touched. Without this guard, reattaching to the current parent would
+    /// gratuitously mint a new ID and leave a tombstone behind for no actual
+    /// change. The depth check matters: `bd-p.1.1` whose `parent-child` dep
+    /// already names `bd-p` is a diverged shape (its dep and its ID disagree
+    /// about who its parent is), and it must renumber to `bd-p.N`, not be
+    /// waved through as "already attached".
     ///
     /// Returns the id `issue_id` holds after the call — the renumbered id,
     /// or `issue_id` unchanged in the no-op case.
@@ -7675,7 +7680,11 @@ impl SqliteStorage {
     ///
     /// Propagates any error from the parent-set step (self-dependency,
     /// cycle, missing target) or the rename step (an ID collision somewhere
-    /// in the subtree), with the whole transaction rolled back.
+    /// in the subtree), with the whole transaction rolled back. A collision
+    /// on the computed slot itself — `child_counters` lagging the real max,
+    /// e.g. because children arrived via JSONL import without bumping it —
+    /// is reported as the same `"<id> already exists"` validation error
+    /// `rename_issue` would give, not a raw constraint violation.
     pub fn attach_to_parent(
         &mut self,
         issue_id: &str,
@@ -7701,9 +7710,18 @@ impl SqliteStorage {
                 .first()
                 .and_then(|row| row.get(0).and_then(SqliteValue::as_text).map(str::to_string));
 
-            if existing_parent.as_deref() == Some(parent_id)
-                && issue_id.starts_with(&dotted_child_prefix)
-            {
+            // Direct child only: exactly one extra dotted segment beyond the
+            // parent. `starts_with` alone also matches a deeper descendant
+            // -- `bd-p.1.1` whose `parent-child` dep names `bd-p` starts
+            // with `bd-p.` too -- which is precisely the diverged shape this
+            // whole epic exists to repair. Treating that as "already
+            // attached" would make `br update bd-p.1.1 --parent bd-p`
+            // silently no-op instead of renumbering to `bd-p.N`.
+            let is_direct_child = issue_id
+                .strip_prefix(&dotted_child_prefix)
+                .is_some_and(|suffix| !suffix.is_empty() && !suffix.contains('.'));
+
+            if existing_parent.as_deref() == Some(parent_id) && is_direct_child {
                 return Ok(issue_id.to_string());
             }
 
@@ -7711,6 +7729,23 @@ impl SqliteStorage {
 
             let next = Self::next_child_number_in_tx(conn, parent_id)?;
             let new_id = crate::util::id::child_id(parent_id, next);
+
+            // `next_child_number_in_tx` prefers `child_counters.last_child`,
+            // which children arriving via JSONL import never bump -- so the
+            // slot it computes can already be taken. `rename_issue` guards
+            // exactly this with a pre-transaction `id_exists(new_id)` check
+            // and a clear validation error; this path calls
+            // `rename_issue_in_tx` directly and skips that guard, so without
+            // this check the collision falls through to a raw SQLite
+            // PRIMARY KEY constraint error instead. Check within the
+            // transaction (`get_issue_from_conn`, not `self.id_exists`,
+            // which would read outside the write lock this closure holds).
+            if Self::get_issue_from_conn(conn, &new_id)?.is_some() {
+                return Err(BeadsError::validation(
+                    "new_id",
+                    format!("{new_id} already exists"),
+                ));
+            }
 
             Self::rename_issue_in_tx(conn, ctx, issue_id, &new_id, &descendants, &pre_rename, actor)?;
             Self::update_child_counter_in_tx(conn, parent_id, next)?;
