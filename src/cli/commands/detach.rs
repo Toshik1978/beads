@@ -246,13 +246,44 @@ mod tests {
     }
 
     /// A later ID in a batch can fail after an earlier one already committed.
-    /// Renaming `child_id` also rewrites every descendant's row in place
-    /// (`rename_issue` cascades to the whole subtree), so once the batch has
-    /// processed `child_id`, the literal string `grandchild_id` no longer
-    /// names any row — it was rewritten to `<new child id>.1`. Detaching both
-    /// in the same batch is therefore a real, reachable way for the second ID
-    /// to fail with `IssueNotFound` after the first ID's mutation has already
-    /// committed, without needing to fake an error.
+    ///
+    /// This used to rely on `grandchild_id` becoming unresolvable simply
+    /// because `rename_issue` cascades a rename to the whole subtree: once
+    /// the batch processed `child_id`, the literal string `grandchild_id`
+    /// stopped naming any *live* row. But bds-a23.10 gave every renamed
+    /// descendant its own `former_ids`-bearing tombstone at the vacated
+    /// address, so `grandchild_id` still named *something* — `get_issue`
+    /// (a plain `WHERE id = ?` with no status filter) found that tombstone
+    /// and `detach_one` happily "detached" it, since it never checks
+    /// `Status::Tombstone` before treating a `get_issue` hit as live. That
+    /// masking is exactly why this test previously stopped failing the way
+    /// it expected to; see bds-a23.13.
+    ///
+    /// The fix here does not lean on that masked path at all. Instead
+    /// `grandchild_id` is tombstoned *in place* (`delete_issue`, which flips
+    /// `status` without moving the ID) before the batch runs. The rename
+    /// cascade's own doc comment spells out what happens next: a descendant
+    /// that is *already* a tombstone when the cascade reaches it is still
+    /// moved (`rewrite_issue_id` relocates its row to `<new child id>.1`
+    /// unconditionally) but is deliberately **not** re-tombstoned at the
+    /// vacated address — re-tombstoning an already-tombstoned node would
+    /// double the dead-row count on every ancestor rename for no new
+    /// information, so `rename_issue_in_tx` skips it whenever
+    /// `pre_move.status == Status::Tombstone`. So after `child_id`'s
+    /// detach commits, `grandchild_id` names *nothing at all* — no live row,
+    /// no tombstone — and the second detach's `get_issue` call genuinely
+    /// returns `None`, giving `IssueNotFound` with no masking to route
+    /// around.
+    ///
+    /// `grandchild_id` still has to resolve at the batch's up-front
+    /// `resolve_issue_ids` step, which runs before either ID is touched: a
+    /// tombstone resolves to itself there (`IdResolver`'s tombstone
+    /// fallback), so passing an already-tombstoned ID into the batch is
+    /// legitimate, not a resolver trick. And `child_id` still commits
+    /// first for the mundane reason that the batch loop is a plain
+    /// sequential `for` over `resolved_ids`: `child_id` is processed and
+    /// its `mutate` transaction commits before `grandchild_id` is looked at
+    /// all.
     #[test]
     fn execute_marks_the_blocked_cache_stale_when_a_later_id_in_the_batch_fails() {
         let _lock = crate::util::test_helpers::TEST_DIR_LOCK
@@ -285,6 +316,13 @@ mod tests {
         storage
             .add_dependency(grandchild_id, child_id, "parent-child", "tester")
             .expect("grandchild -> child dep");
+        // Tombstone the grandchild in place (its ID does not move) so the
+        // rename cascade below carries it along without re-tombstoning it,
+        // vacating `grandchild_id` for real instead of leaving a redirect
+        // that `get_issue` would still find.
+        storage
+            .delete_issue(grandchild_id, "tester", "test setup", None)
+            .expect("tombstone grandchild in place");
         drop(storage);
 
         let args = DetachArgs {
