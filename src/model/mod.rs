@@ -673,6 +673,19 @@ impl Issue {
     /// would also invalidate every stored `content_hash`/`export_hashes`
     /// value in every existing database, forcing a full re-export;
     /// `sync_equals` carries no such stored state to invalidate.
+    ///
+    /// `agent_context` is compared for the identical reason (bds-a23.15):
+    /// it is `#[serde]`-exported (see the field's doc comment above) but was
+    /// never added here, so an `agent_context`-only delta between the local
+    /// row and an incoming JSONL record read as "equal" and `merge_issue`'s
+    /// Case 6 short-circuited to `Keep(left)`, silently dropping the
+    /// incoming value. Unlike `former_ids`, the only production write path
+    /// for this field is the generic `update_issue`/`IssueUpdate` path
+    /// (`storage/sqlite.rs`), which already bumps `updated_at`
+    /// unconditionally whenever any field changes — so, unlike the
+    /// `former_ids` fix, no companion `updated_at` fix was needed here.
+    /// Deliberately not mirrored into `compute_content_hash` for the same
+    /// persisted-state reason as `former_ids` above.
     #[must_use]
     pub fn sync_equals(&self, other: &Self) -> bool {
         if self.id != other.id
@@ -709,6 +722,7 @@ impl Issue {
             || self.pinned != other.pinned
             || self.is_template != other.is_template
             || self.former_ids != other.former_ids
+            || self.agent_context != other.agent_context
         {
             return false;
         }
