@@ -9,6 +9,161 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.4.0 — 2026-08-05
+
+The dotted ID becomes the truth about parentage. Until now an issue's parent
+was recorded twice — once in the `parent-child` dependency row, once in the ID
+itself — and nothing kept the two in agreement. An epic could hold a child that
+had been reparented away from it, refuse to close because of that child, and
+offer no way to move the child out. This release makes the ID authoritative:
+a dotted prefix always names the real parent, having a parent always implies a
+dotted ID, and every path that can set or clear a parent either renumbers the
+issue or refuses and names what to run instead.
+
+Renumbering means renaming, so the rename had to become safe: one transactional
+subtree cascade, a tombstone at the vacated ID, and a `former_ids` array so
+references written before the move keep resolving. `br detach` is the new
+command that makes a child independent, and `br info --projections` reports the
+divergence that JSONL import can still let in.
+
+An existing workspace migrates in place (schema v17 → v18) and imports exactly
+as before. `former_ids` is omitted from the JSONL entirely for issues that were
+never renamed, so a repository that does no renaming exports byte-identical
+records.
+
+### Highlights
+
+- **`br detach` moves an issue out from under its parent.** What happens
+  depends on the ID's own shape, not just on whether a dependency exists. A
+  **dotted** ID makes a hierarchy claim by its shape, so detaching mints a
+  fresh flat ID from the same generator `br create` uses, renames the issue to
+  it, and drops the edge. A **flat** ID makes no such claim, so detaching drops
+  the edge and leaves the ID alone. An issue with **no parent** by either
+  measure is a successful no-op, so detaching twice in a row is safe to script.
+  It takes batch IDs, emits JSON, and routes across workspaces like the other
+  mutating commands. The point of it is closing epics: an epic cannot close
+  without `--force` while it has open children, and this is how a child that
+  should no longer count stops counting, without touching the epic.
+- **An old ID keeps working after a rename.** The moved issue accumulates its
+  previous IDs in `former_ids`, oldest first, and a tombstone is left at the
+  vacated address naming the destination. The two do different jobs: the
+  tombstone is what propagates the move through `issues.jsonl` — without it a
+  clone still holding the old ID merges its copy back as a live issue and
+  quietly undoes the rename — while `former_ids` is permanent provenance that
+  outlives the tombstone, which `br delete --hard` may collect. `br show
+  <old-id>` resolves to whatever now holds it; `br show <new-id> --json` lists
+  the old one. The resolver change was a reordering rather than a new step: the
+  two exact-match lookups now prefer a live issue, the `former_ids` redirect
+  runs next, and a tombstone-tolerant retry follows so a genuinely deleted ID
+  still reports its tombstone. All of it sits ahead of the abbreviation scan,
+  so a fully spelled current ID costs nothing new.
+- **Seven chokepoints, not six.** The invariant is only worth as much as its
+  least-guarded entrance, so every path that can set or clear a parent-child
+  edge was closed. Attaching renumbers: `br update x --parent E` and `br dep add
+  x E --type parent-child` both move `x` to `E.n` and report the new ID.
+  Clearing refuses and names the alternative: `br update x --parent ""` on a
+  dotted ID and `br dep remove` on a parent-child edge both point at `br
+  detach`, which does the rename too, while `br create --dep parent-child:E`
+  points at `--parent`, which mints the child correctly in the first place.
+  Refusing rather than silently detaching is deliberate — a rename is
+  consequential and visible, and should not be a side effect of an update flag.
+  The spec named those six. Implementation found a seventh — the `Parent:`
+  field of a markdown import,
+  when the reference is forward or duplicated, which folded its resolved edge
+  into the ordinary bulk dependency insert and so set the edge without
+  renumbering the child. Parent-child rows in an import are now applied one at
+  a time in file order, each endpoint re-resolved immediately before it is
+  used, so a rename earlier in the same batch is picked up through the
+  `former_ids` fallback instead of hitting a tombstone.
+- **`br info --projections` reports the divergence it cannot prevent.** JSONL
+  import accepts arbitrary data, including repositories that already violate
+  the invariant, so it is the one door that cannot be locked — and the reason
+  `--force` on close stays available. The detector reports every non-tombstone
+  issue whose dotted prefix disagrees with its `parent-child` edge, in human
+  and JSON output, with a capped ID list that states the cap; a single
+  comparison covers all three shapes (prefix naming a different parent, dotted
+  with no edge at all, flat with an edge). It is deliberately *not* a rebuild
+  reason: a cache rebuild cannot fix divergence, which lives in the JSONL and
+  survives a rebuild intact. A failed divergence query now says `unavailable`
+  rather than defaulting to zero and reading as a clean workspace.
+- **The rename primitive is guarded by the schema, not by a maintained list.**
+  `rename_issue` moves an issue and its whole subtree in one transaction,
+  deepest-first, under transaction-scoped `PRAGMA defer_foreign_keys` — no
+  foreign key declares `ON UPDATE`, so the issues row has to move before the
+  rows referencing it. It rewrites nine `(table, column)` pairs, one of which,
+  `dependencies.depends_on_id`, carries no foreign key at all (kept that way so
+  `external:` references can dangle) and would therefore fail *silently* if
+  missed. A test walks the live schema via `PRAGMA foreign_key_list` and fails
+  when an ID-bearing column exists that the list does not cover — the same
+  approach `tests/licensing.rs` takes by enumerating tracked files rather than
+  trusting a list someone has to remember to update. Child counters only ever
+  increase, so a vacated child number is never reissued to a different issue.
+
+
+### Two sync fixes that predate this release
+
+The rename work needed an audit of the merge path, and it turned up two defects
+that have been there since 1.0.0 and have nothing to do with hierarchy.
+
+- **`br sync` no longer drops an incoming `agent_context`.** `sync_equals` —
+  the comparison behind the three-way merge — never looked at the field, so an
+  incoming record whose only delta was `agent_context` read as identical to the
+  stored issue and was short-circuited to the local copy. The value was
+  exported faithfully and discarded on the way back in.
+- **A clock-skewed peer can no longer make a local write invisible.** An issue
+  imported from a machine whose clock runs ahead carries an `updated_at` in the
+  future. Updating that row wrote a bare `Utc::now()`, which sits *before* the
+  stored value and moves the column backwards — and since the import decides
+  what to do purely on `updated_at`, the local edit was then skipped as stale
+  by every subsequent import. Writes that already have the row in hand now
+  clamp to strictly greater than the stored value. The remaining unclamped
+  writes (dependencies, labels, comments, bulk label updates) would each need a
+  new per-row read, and two of them update many rows in one statement, so they
+  are a recorded follow-up rather than a bundled guess.
+
+### Features
+
+- [28c48b6](https://github.com/Toshik1978/beads/commit/28c48b6988f5d39a8cea9e55a4ce5f183a5679aa) feat(storage): add descendant_ids subtree query
+- [96b0dea](https://github.com/Toshik1978/beads/commit/96b0dea5b3a064d0fdd0fc1328827d548b9274fc) feat(storage): add rename_issue with subtree cascade
+- [899225f](https://github.com/Toshik1978/beads/commit/899225f70c65d797e7b1e9766c55290e94f9acec) feat(model): add former_ids to issues
+- [0940c66](https://github.com/Toshik1978/beads/commit/0940c660bf688aa9d6fcc46c0731f4b09cb94a11) feat(storage): record former_ids and tombstone the vacated id on rename
+- [fe46e61](https://github.com/Toshik1978/beads/commit/fe46e61a3c065f44d5ba201ba93833de6413775d) feat(resolver): resolve former ids to the issue that now holds them
+- [d064d83](https://github.com/Toshik1978/beads/commit/d064d83a4b82570e38a6409f8d8a216052769e89) feat(cli): add br detach
+- [75ac85f](https://github.com/Toshik1978/beads/commit/75ac85f90d03928e9f2de9985278fab1438a3d57) feat(info): report hierarchy divergence in --projections
+
+### Bug Fixes
+
+- [1f5c3b0](https://github.com/Toshik1978/beads/commit/1f5c3b0c7426d8b47c01cdd0f3611b2b4e409e96) fix(storage): invalidate blocked cache on rename, add rollback coverage
+- [bf1b4cf](https://github.com/Toshik1978/beads/commit/bf1b4cf554da73fc6842d62da09cec03f54bbae7) fix(storage): narrow schema-introspection accessor and verify the FK-exempt column
+- [f831d8e](https://github.com/Toshik1978/beads/commit/f831d8e5cdfe2fc5663f3f2ebe4f2f4f57b1b4f0) fix(storage): null the tombstone's external_ref and share the issue-insert binder
+- [a768c05](https://github.com/Toshik1978/beads/commit/a768c05776c21f6922de6a26f89f7c18b32126c0) fix(cli): preserve blocked-cache and no-db flush on mid-batch detach failure
+- [d0000b1](https://github.com/Toshik1978/beads/commit/d0000b16b6b1a58f66db237f6c80e1d1336bf12c) fix(update): renumber on reparent and refuse to clear a dotted parent
+- [07de210](https://github.com/Toshik1978/beads/commit/07de2101bd42328ae692a31609d38c6713705443) fix(storage): make attach_to_parent atomic and bump the target's child counter
+- [c672aad](https://github.com/Toshik1978/beads/commit/c672aadd9ab9222b696c92a931d179df77902896) fix(dep): apply the hierarchy invariant to dep add and dep remove
+- [829666e](https://github.com/Toshik1978/beads/commit/829666e913fed950414a4bbaca7a8805a6975999) fix(dep): reject metadata on parent-child adds, retest detach on flat children
+- [734dd4a](https://github.com/Toshik1978/beads/commit/734dd4a53e09d7370cf17c0fc98d726e7ca110c8) fix(create): close the dep-import and create --dep hierarchy chokepoints
+- [008a62d](https://github.com/Toshik1978/beads/commit/008a62d4a0b821ad851b8f5f673e43c2f02d3fbf) fix(dep): resolve depends_on_id per row in a parent-child import batch
+- [c353950](https://github.com/Toshik1978/beads/commit/c353950c41daa312cf1845525ad1e3746cfd20eb) fix(storage): give every renamed node its own tombstone and former id
+- [29f7032](https://github.com/Toshik1978/beads/commit/29f7032a6dd75113f94440fb646861624fa3c643) fix(storage): stop re-tombstoning descendants already tombstoned by an earlier rename
+- [f389150](https://github.com/Toshik1978/beads/commit/f389150223cce2a17d60648cfbab4620916b027a) fix(storage): make attach_to_parent's no-op guard depth-aware and restore clear collision errors
+- [fcc0889](https://github.com/Toshik1978/beads/commit/fcc0889f559fdba2278e21de82fd80f464c21e1b) fix(import): renumber Parent:-field children through attach_to_parent
+- [943cad2](https://github.com/Toshik1978/beads/commit/943cad2907c9724ac8206bd97502060701d27ad8) fix(detach): reject a resolved-to-tombstone target instead of renaming it
+- [46f7bf4](https://github.com/Toshik1978/beads/commit/46f7bf475eb0fc7948c4c192a4c3ba0e0c74e913) fix(detach): route across workspaces like other mutating commands
+- [49a43fc](https://github.com/Toshik1978/beads/commit/49a43fce8d60556457655487ac5f6531f7f6b252) fix(sync): compare former_ids in sync_equals
+- [7aab4dc](https://github.com/Toshik1978/beads/commit/7aab4dc56326ae7ca39e197519c29a0b30342d4c) fix(rename): bump updated_at when former_ids changes
+- [de7d185](https://github.com/Toshik1978/beads/commit/de7d185ac2bd1b0f9898697ecea088df0823bb87) fix(sync): compare agent_context in sync_equals
+- [497d6f1](https://github.com/Toshik1978/beads/commit/497d6f14749d8a49284cb619f22d3aa324ba6e67) fix(storage): clamp updated_at against clock-skewed future timestamps
+- [57d69e8](https://github.com/Toshik1978/beads/commit/57d69e8a94f8de79552f622551fef76a1b483216) fix(hierarchy): apply final review findings from the dot-notation epic
+- [5427f8f](https://github.com/Toshik1978/beads/commit/5427f8f00d6c87471e5baca7ecf3e73de8d71f71) fix(resolver): make a former-id collision resolve the same way every time
+
+### Documentation
+
+- [8bfa3db](https://github.com/Toshik1978/beads/commit/8bfa3db360a394cc8fb50fd96fc4b6508b564349) docs(spec): make the hierarchical id authoritative, add br detach
+- [3c019fb](https://github.com/Toshik1978/beads/commit/3c019fb2aa7e61c8e9d65d7475b9dcb5f122aa13) docs(cli): document br detach across the reference and agent surfaces
+- [0336873](https://github.com/Toshik1978/beads/commit/03368738bd25385add8d8b79222bbe03c1562e59) docs(health): state that this module does not back a br health command
+
+---
+
 ## v1.3.0 — 2026-08-03
 
 `--sort` grows from a single field into a chained specification, and three
