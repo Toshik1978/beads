@@ -3794,6 +3794,60 @@ impl SqliteStorage {
         Ok(ids)
     }
 
+    /// Issues whose dotted prefix disagrees with their `parent-child` dep.
+    ///
+    /// Returns `(issue_id, prefix_implied_parent, actual_parent)`. A prefix of
+    /// `None` in the second position means the ID is flat; `None` in the third
+    /// means there is no `parent-child` dep at all.
+    ///
+    /// This state cannot be produced through the CLI — every path that sets or
+    /// clears a parent maintains the invariant. It arrives through JSONL import
+    /// of legacy or hand-edited data, which is the one door that cannot be
+    /// locked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn hierarchy_divergences(&self) -> Result<Vec<(String, Option<String>, Option<String>)>> {
+        Self::hierarchy_divergences_for(&self.conn)
+    }
+
+    /// Connection-level implementation of [`Self::hierarchy_divergences`],
+    /// usable by callers (such as `br info --projections`) that only have a
+    /// borrowed [`Connection`] rather than a full `SqliteStorage`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub(crate) fn hierarchy_divergences_for(
+        conn: &Connection,
+    ) -> Result<Vec<(String, Option<String>, Option<String>)>> {
+        let rows = conn.query(
+            "SELECT i.id, d.depends_on_id \
+             FROM issues i \
+             LEFT JOIN dependencies d \
+               ON d.issue_id = i.id AND d.type = 'parent-child' \
+             WHERE i.status != 'tombstone' \
+             ORDER BY i.id",
+        )?;
+
+        let mut divergent = Vec::new();
+        for row in &rows {
+            let Some(id) = row.get(0).and_then(SqliteValue::as_text) else {
+                continue;
+            };
+            let actual = row.get(1).and_then(SqliteValue::as_text).map(String::from);
+            // `rsplit_once` and not `split_once`: `bd-e.1.2`'s parent is
+            // `bd-e.1`, not `bd-e`.
+            let implied = id.rsplit_once('.').map(|(head, _)| head.to_string());
+
+            if implied != actual {
+                divergent.push((id.to_string(), implied, actual));
+            }
+        }
+        Ok(divergent)
+    }
+
     /// Get an issue by ID.
     ///
     /// # Errors

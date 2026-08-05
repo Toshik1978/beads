@@ -1102,3 +1102,146 @@ fn e2e_a_grandchild_still_resolves_by_its_old_id_after_the_subtree_moves() {
     );
     assert!(shown.stdout.contains("Grandchild"), "got: {}", shown.stdout);
 }
+
+#[test]
+fn info_projections_reports_an_imported_hierarchy_divergence() {
+    let _log = common::test_log("info_projections_reports_an_imported_hierarchy_divergence");
+    let workspace = BrWorkspace::new();
+
+    // JSONL import is the only way to produce this state -- every CLI path
+    // that sets or clears a parent now maintains the invariant. Same idiom
+    // as the flat-child fixture in `tests/e2e/detach.rs`: hand-write the
+    // records and import them, rather than going through `br create`.
+    let epic = IssueBuilder::new("Epic")
+        .with_id("ab-e")
+        .with_type(beads::model::IssueType::Epic)
+        .build();
+    let other_epic = IssueBuilder::new("Other epic")
+        .with_id("ab-other")
+        .with_type(beads::model::IssueType::Epic)
+        .build();
+    let mut lying_child = IssueBuilder::new("Lying child").with_id("ab-e.1").build();
+    let mut edge = dependency("ab-e.1", "ab-other");
+    edge.dep_type = DependencyType::ParentChild;
+    lying_child.dependencies.push(edge);
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    std::fs::create_dir_all(jsonl_path.parent().expect("beads dir")).expect("create .beads");
+    let records = [&epic, &other_epic, &lying_child]
+        .into_iter()
+        .map(|issue| serde_json::to_string(issue).expect("serialize divergence fixture"))
+        .collect::<Vec<_>>();
+    fs::write(&jsonl_path, records.join("\n") + "\n").expect("write divergence fixture");
+
+    let import = run_br(
+        &workspace,
+        ["sync", "--import-only", "--force"],
+        "import_divergence",
+    );
+    assert!(import.status.success(), "import failed: {}", import.stderr);
+
+    let out = run_br(
+        &workspace,
+        ["info", "--projections", "--json"],
+        "info_projections",
+    );
+    assert!(out.status.success(), "info failed: {}", out.stderr);
+
+    let payload = extract_json_payload(&out.stdout);
+    let json: Value = serde_json::from_str(&payload).expect("parse info json");
+
+    assert_eq!(
+        json["projections"]["hierarchy_divergence_rows"].as_u64(),
+        Some(1),
+        "ab-e.1 claims ab-e by ID but depends on ab-other; got {json}"
+    );
+    let ids = json["projections"]["hierarchy_divergence_ids"]
+        .as_array()
+        .expect("ids array");
+    assert!(
+        ids.iter().any(|v| v.as_str() == Some("ab-e.1")),
+        "got {json}"
+    );
+}
+
+#[test]
+fn info_projections_reports_zero_divergence_on_a_healthy_workspace() {
+    let _log = common::test_log("info_projections_reports_zero_divergence_on_a_healthy_workspace");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let create_epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(create_epic.status.success());
+    let epic_id = parse_created_id(&create_epic.stdout);
+
+    let create_child = run_br(
+        &workspace,
+        ["create", "Child", "--type", "task", "--parent", &epic_id],
+        "create_child",
+    );
+    assert!(create_child.status.success());
+
+    let out = run_br(
+        &workspace,
+        ["info", "--projections", "--json"],
+        "info_projections",
+    );
+    assert!(out.status.success(), "info failed: {}", out.stderr);
+
+    let payload = extract_json_payload(&out.stdout);
+    let json: Value = serde_json::from_str(&payload).expect("parse info json");
+
+    assert_eq!(
+        json["projections"]["hierarchy_divergence_rows"].as_u64(),
+        Some(0),
+        "got {json}"
+    );
+}
+
+#[test]
+fn info_projections_human_output_names_the_diverging_ids() {
+    let _log = common::test_log("info_projections_human_output_names_the_diverging_ids");
+    let workspace = BrWorkspace::new();
+
+    let epic = IssueBuilder::new("Epic")
+        .with_id("ab-e")
+        .with_type(beads::model::IssueType::Epic)
+        .build();
+    // No `parent-child` dep at all -- the legacy shape
+    // `get_open_dot_notation_children` exists to catch.
+    let orphan_child = IssueBuilder::new("Orphan child").with_id("ab-e.1").build();
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    std::fs::create_dir_all(jsonl_path.parent().expect("beads dir")).expect("create .beads");
+    let records = [&epic, &orphan_child]
+        .into_iter()
+        .map(|issue| serde_json::to_string(issue).expect("serialize orphan fixture"))
+        .collect::<Vec<_>>();
+    fs::write(&jsonl_path, records.join("\n") + "\n").expect("write orphan fixture");
+
+    let import = run_br(
+        &workspace,
+        ["sync", "--import-only", "--force"],
+        "import_orphan",
+    );
+    assert!(import.status.success(), "import failed: {}", import.stderr);
+
+    let out = run_br(&workspace, ["info", "--projections"], "info_projections");
+    assert!(out.status.success(), "info failed: {}", out.stderr);
+
+    assert!(
+        out.stdout.contains("ab-e.1"),
+        "a count alone does not tell anyone what to fix; got: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("br detach") || out.stdout.contains("br update"),
+        "the report must say what to do about it; got: {}",
+        out.stdout
+    );
+}
