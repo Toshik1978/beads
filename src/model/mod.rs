@@ -656,6 +656,21 @@ impl Issue {
     /// semantically identical issues look different across import/export
     /// boundaries, while still comparing the full synced payload including
     /// labels, dependencies, comments, and user-visible timestamps like `due_at`.
+    ///
+    /// `former_ids` is compared (order matters — it is an append-only,
+    /// oldest-first history, not a set): without this, a JSONL record whose
+    /// only delta is a new rename hop looks identical to the stored issue
+    /// and `merge_issue`'s 3-way merge (`sync/mod.rs`) short-circuits to
+    /// `Keep(left)` before ever looking at which side actually changed,
+    /// silently dropping the new former ID (bds-a23.6). Deliberately not
+    /// mirrored into `compute_content_hash`: that hash exists to match
+    /// issues by *content* for dedup (`detect_collision`'s phase-3 hash
+    /// match), and `former_ids` is an ID-history field, in the same
+    /// excluded family as `id` itself — see the "Fields excluded" list on
+    /// [`crate::util::hash::content_hash`]. Widening the hash would also
+    /// invalidate every stored `content_hash`/`export_hashes` value in every
+    /// existing database, forcing a full re-export; `sync_equals` carries no
+    /// such stored state to invalidate.
     #[must_use]
     pub fn sync_equals(&self, other: &Self) -> bool {
         if self.id != other.id
@@ -691,6 +706,7 @@ impl Issue {
             || self.ephemeral != other.ephemeral
             || self.pinned != other.pinned
             || self.is_template != other.is_template
+            || self.former_ids != other.former_ids
         {
             return false;
         }
@@ -708,13 +724,7 @@ impl Issue {
         }
 
         // Compare labels (order independent)
-        let mut self_labels = self.labels.clone();
-        self_labels.sort_unstable();
-        self_labels.dedup();
-        let mut other_labels = other.labels.clone();
-        other_labels.sort_unstable();
-        other_labels.dedup();
-        if self_labels != other_labels {
+        if !Self::labels_equal(&self.labels, &other.labels) {
             return false;
         }
 
@@ -769,6 +779,19 @@ impl Issue {
         }
 
         true
+    }
+
+    /// Order-independent, duplicate-insensitive label comparison, factored
+    /// out of [`Self::sync_equals`] to keep that function under clippy's
+    /// line-count lint.
+    fn labels_equal(left: &[String], right: &[String]) -> bool {
+        let mut left = left.to_vec();
+        left.sort_unstable();
+        left.dedup();
+        let mut right = right.to_vec();
+        right.sort_unstable();
+        right.dedup();
+        left == right
     }
 
     /// Check if this issue is a tombstone that has exceeded its TTL.
@@ -1564,6 +1587,45 @@ mod tests {
 
         assert!(!issue1.sync_equals(&issue2));
         assert!(!issue2.sync_equals(&issue1));
+    }
+
+    #[test]
+    fn test_issue_sync_equals_detects_former_ids_only_change() {
+        let issue1 = create_test_issue();
+        let mut issue2 = issue1.clone();
+        issue2.former_ids = vec!["bd-old".to_string()];
+
+        assert!(
+            !issue1.sync_equals(&issue2),
+            "a new former_ids entry must be a semantic change, or a rename \
+             carried by JSONL cannot outrun an equal-but-stale comparison \
+             (bds-a23.6)"
+        );
+        assert!(!issue2.sync_equals(&issue1));
+
+        // Order matters: it is an append-only, oldest-first history, not a set.
+        let mut issue3 = issue1.clone();
+        issue3.former_ids = vec!["bd-a".to_string(), "bd-b".to_string()];
+        let mut issue4 = issue1.clone();
+        issue4.former_ids = vec!["bd-b".to_string(), "bd-a".to_string()];
+        assert!(!issue3.sync_equals(&issue4));
+    }
+
+    #[test]
+    fn test_content_hash_ignores_former_ids_by_design() {
+        // former_ids is ID-history metadata, in the same excluded family as
+        // `id` itself (see the "Fields excluded" list on
+        // crate::util::hash::content_hash) -- content_hash exists to match
+        // issues by *content* for dedup, not by which IDs they used to hold.
+        // This pins that exclusion as deliberate so a future change does not
+        // "fix" it into widening the hash, which would invalidate every
+        // stored content_hash / export_hashes value in every existing
+        // database.
+        let issue1 = create_test_issue();
+        let mut issue2 = issue1.clone();
+        issue2.former_ids = vec!["bd-old".to_string()];
+
+        assert_eq!(issue1.compute_content_hash(), issue2.compute_content_hash());
     }
 
     #[test]

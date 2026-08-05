@@ -481,6 +481,58 @@ fn rename_tombstone_and_former_ids_survive_a_jsonl_export_import_round_trip() {
     );
 }
 
+/// bds-a23.6: `sync_equals` used to ignore `former_ids`, so `merge_issue`'s
+/// 3-way merge (the engine behind `br sync`'s merge path) would find the
+/// local row and the incoming JSONL row "equal" and short-circuit to
+/// `Keep(local)` before ever checking which side actually changed — silently
+/// dropping the new `former_ids` entry a rename recorded elsewhere.
+///
+/// A fresh-database import can't see this bug: with no existing row, the
+/// collision detector inserts unconditionally and `former_ids` rides along
+/// for free (see `rename_tombstone_and_former_ids_survive_a_jsonl_export_import_round_trip`
+/// above). This test instead imports over an *existing* row — the base and
+/// left (local) states both lack the rename, and only right (incoming
+/// JSONL) carries the new `former_ids` hop — which is exactly the shape
+/// `sync_equals` has to get right for the merge to keep the incoming side.
+#[test]
+fn merging_a_former_ids_only_change_over_an_existing_row_propagates_it() {
+    let mut base = fixtures::issue("bd-f");
+    base.id = "bd-f".to_string();
+
+    let left = base.clone(); // local DB: unchanged since base
+
+    let mut right = base.clone(); // incoming JSONL: another clone renamed it
+    right.former_ids = vec!["bd-old".to_string()];
+
+    let mut base_map = std::collections::HashMap::new();
+    base_map.insert(base.id.clone(), base.clone());
+    let mut left_map = std::collections::HashMap::new();
+    left_map.insert(left.id.clone(), left.clone());
+    let mut right_map = std::collections::HashMap::new();
+    right_map.insert(right.id.clone(), right.clone());
+
+    let context = beads::sync::MergeContext::new(base_map, left_map, right_map);
+    let report =
+        beads::sync::three_way_merge(&context, beads::sync::ConflictResolution::PreferNewer, None);
+
+    assert!(
+        report.conflicts.is_empty(),
+        "a former_ids-only delta must not read as a conflict; got {:?}",
+        report.conflicts
+    );
+    let kept = report
+        .kept
+        .iter()
+        .find(|issue| issue.id == "bd-f")
+        .expect("bd-f must be kept by the merge");
+    assert_eq!(
+        kept.former_ids,
+        vec!["bd-old".to_string()],
+        "the incoming former_ids entry must survive the merge over the \
+         existing row, not be silently dropped as 'no change'"
+    );
+}
+
 #[test]
 fn find_id_by_former_id_locates_the_renamed_issue() {
     let mut storage = tree();
