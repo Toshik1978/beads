@@ -61,6 +61,13 @@ struct ProjectionInfo {
     cached_ready_extra_rows: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     child_counter_rows: Option<usize>,
+    /// `"clear"`, `"diverges"`, or `"unavailable"` — mirrors how
+    /// `parity_status`/`ready_parity_status` name an explicit unavailable
+    /// state rather than letting a failed query masquerade as a healthy
+    /// zero. Always present, unlike the `Option` fields below: a consumer
+    /// must be able to tell "checked, found none" from "could not check"
+    /// without cross-referencing anything else.
+    hierarchy_divergence_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     hierarchy_divergence_rows: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -292,7 +299,27 @@ fn build_projection_info(conn: &Connection) -> ProjectionInfo {
     let child_counter_rows = projection_row_count(conn, "child_counters");
     let projection_health = SqliteStorage::blocked_cache_projection_health(conn);
     let ready_health = SqliteStorage::ready_projection_health(conn);
-    let hierarchy_divergences = SqliteStorage::hierarchy_divergences_for(conn).unwrap_or_default();
+    // A failed query must not read as a healthy zero: `hierarchy_divergence_status`
+    // carries "unavailable" separately from "clear" so the two are never
+    // conflated, the same distinction `parity_status`/`ready_parity_status`
+    // already draw for the neighbouring cache-parity checks.
+    let (hierarchy_divergence_status, hierarchy_divergence_rows, hierarchy_divergence_ids) =
+        match SqliteStorage::hierarchy_divergences_for(conn) {
+            Ok(divergences) => {
+                let status = if divergences.is_empty() {
+                    "clear"
+                } else {
+                    "diverges"
+                };
+                let ids = divergences
+                    .iter()
+                    .take(HIERARCHY_DIVERGENCE_ID_CAP)
+                    .map(|(id, _, _)| id.clone())
+                    .collect();
+                (status.to_string(), Some(divergences.len()), ids)
+            }
+            Err(_) => ("unavailable".to_string(), None, Vec::new()),
+        };
 
     let mut rebuild_reasons = Vec::new();
     if blocked_cache_stale {
@@ -334,12 +361,9 @@ fn build_projection_info(conn: &Connection) -> ProjectionInfo {
         cached_ready_missing_rows: ready_health.cached_ready_missing_rows,
         cached_ready_extra_rows: ready_health.cached_ready_extra_rows,
         child_counter_rows,
-        hierarchy_divergence_rows: Some(hierarchy_divergences.len()),
-        hierarchy_divergence_ids: hierarchy_divergences
-            .iter()
-            .take(HIERARCHY_DIVERGENCE_ID_CAP)
-            .map(|(id, _, _)| id.clone())
-            .collect(),
+        hierarchy_divergence_status,
+        hierarchy_divergence_rows,
+        hierarchy_divergence_ids,
     }
 }
 
@@ -555,7 +579,12 @@ fn print_projection_human(projections: &ProjectionInfo) {
     if let Some(count) = projections.child_counter_rows {
         println!("  Child counter rows: {count}");
     }
-    if let Some(count) = projections.hierarchy_divergence_rows
+    if projections.hierarchy_divergence_status == "unavailable" {
+        // Distinct from the "print nothing when clear" branch below: a
+        // failed check is not a healthy workspace, and staying silent here
+        // would make the two indistinguishable.
+        println!("  Hierarchy divergence: unavailable (query failed)");
+    } else if let Some(count) = projections.hierarchy_divergence_rows
         && count > 0
     {
         let shown = projections.hierarchy_divergence_ids.len();

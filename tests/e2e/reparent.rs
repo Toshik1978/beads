@@ -1245,3 +1245,272 @@ fn info_projections_human_output_names_the_diverging_ids() {
         out.stdout
     );
 }
+
+#[test]
+fn info_projections_excludes_a_tombstone_left_by_a_real_rename() {
+    let _log = common::test_log("info_projections_excludes_a_tombstone_left_by_a_real_rename");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic1 = run_br(
+        &workspace,
+        ["create", "Epic one", "--type", "epic"],
+        "create_epic1",
+    );
+    assert!(epic1.status.success());
+    let epic1_id = parse_created_id(&epic1.stdout);
+
+    let epic2 = run_br(
+        &workspace,
+        ["create", "Epic two", "--type", "epic"],
+        "create_epic2",
+    );
+    assert!(epic2.status.success());
+    let epic2_id = parse_created_id(&epic2.stdout);
+
+    let create_child = run_br(
+        &workspace,
+        ["create", "Child", "--type", "task", "--parent", &epic1_id],
+        "create_child",
+    );
+    assert!(create_child.status.success());
+    let child_id = parse_created_id(&create_child.stdout);
+
+    // The rename is the point of this test: it leaves a tombstone at the
+    // vacated dotted id (`child_id`, under `epic1_id`). Its dependency row
+    // moved with the live issue to the new id under `epic2_id`, so the
+    // tombstone itself now carries a dotted id with *no* `parent-child` dep
+    // -- exactly the "legacy shape" pattern this detector looks for. If
+    // `hierarchy_divergences_for` ever stopped filtering `status =
+    // 'tombstone'`, this vacated slot would misreport as divergence on
+    // every workspace that has ever renamed anything, which this epic's
+    // cascading renames now do routinely.
+    let reparent = run_br(
+        &workspace,
+        ["update", &child_id, "--parent", &epic2_id, "--json"],
+        "reparent",
+    );
+    assert!(
+        reparent.status.success(),
+        "reparent failed: {}",
+        reparent.stderr
+    );
+
+    let out = run_br(
+        &workspace,
+        ["info", "--projections", "--json"],
+        "info_projections",
+    );
+    assert!(out.status.success(), "info failed: {}", out.stderr);
+
+    let payload = extract_json_payload(&out.stdout);
+    let json: Value = serde_json::from_str(&payload).expect("parse info json");
+
+    assert_eq!(
+        json["projections"]["hierarchy_divergence_rows"].as_u64(),
+        Some(0),
+        "the tombstone left at the old dotted id must not count as divergence; got {json}"
+    );
+}
+
+#[test]
+fn info_projections_checks_a_grandchild_against_its_immediate_parent() {
+    let _log =
+        common::test_log("info_projections_checks_a_grandchild_against_its_immediate_parent");
+    let workspace = BrWorkspace::new();
+
+    // A healthy three-level chain: `ab-e.1.2`'s prefix-implied parent must be
+    // computed with `rsplit_once('.')` -- `ab-e.1`, not `ab-e` -- or this
+    // correctly-parented grandchild misreports as diverging. Every earlier
+    // fixture in this file is depth 1, where `split_once` and `rsplit_once`
+    // agree; this is depth 2, where they do not.
+    let epic = IssueBuilder::new("Epic")
+        .with_id("ab-e")
+        .with_type(beads::model::IssueType::Epic)
+        .build();
+    let mut child = IssueBuilder::new("Child").with_id("ab-e.1").build();
+    let mut child_edge = dependency("ab-e.1", "ab-e");
+    child_edge.dep_type = DependencyType::ParentChild;
+    child.dependencies.push(child_edge);
+
+    let mut grandchild = IssueBuilder::new("Grandchild").with_id("ab-e.1.2").build();
+    let mut grandchild_edge = dependency("ab-e.1.2", "ab-e.1");
+    grandchild_edge.dep_type = DependencyType::ParentChild;
+    grandchild.dependencies.push(grandchild_edge);
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    std::fs::create_dir_all(jsonl_path.parent().expect("beads dir")).expect("create .beads");
+    let records = [&epic, &child, &grandchild]
+        .into_iter()
+        .map(|issue| serde_json::to_string(issue).expect("serialize grandchild fixture"))
+        .collect::<Vec<_>>();
+    fs::write(&jsonl_path, records.join("\n") + "\n").expect("write grandchild fixture");
+
+    let import = run_br(
+        &workspace,
+        ["sync", "--import-only", "--force"],
+        "import_grandchild",
+    );
+    assert!(import.status.success(), "import failed: {}", import.stderr);
+
+    let out = run_br(
+        &workspace,
+        ["info", "--projections", "--json"],
+        "info_projections",
+    );
+    assert!(out.status.success(), "info failed: {}", out.stderr);
+
+    let payload = extract_json_payload(&out.stdout);
+    let json: Value = serde_json::from_str(&payload).expect("parse info json");
+
+    assert_eq!(
+        json["projections"]["hierarchy_divergence_rows"].as_u64(),
+        Some(0),
+        "ab-e.1.2's implied parent is ab-e.1, not ab-e; got {json}"
+    );
+}
+
+#[test]
+fn info_projections_reports_a_flat_id_carrying_a_parent_child_dep() {
+    let _log = common::test_log("info_projections_reports_a_flat_id_carrying_a_parent_child_dep");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let create_epic = run_br(
+        &workspace,
+        ["create", "The Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(create_epic.status.success());
+    let epic_id = parse_created_id(&create_epic.stdout);
+
+    // `dep add --type parent-child` and `update --parent` both renumber, so
+    // neither can produce a flat id carrying a `parent-child` dep any more --
+    // the exact shape 3 needs. Import is the only way in; same idiom as the
+    // flat-child fixture in `tests/e2e/detach.rs`.
+    let flat_id = "zz-flatwithdep";
+    let mut flat_child = IssueBuilder::new("Flat child").with_id(flat_id).build();
+    let mut edge = dependency(flat_id, &epic_id);
+    edge.dep_type = DependencyType::ParentChild;
+    flat_child.dependencies.push(edge);
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    let mut contents = fs::read_to_string(&jsonl_path).unwrap_or_default();
+    contents.push_str(&serde_json::to_string(&flat_child).expect("serialize flat child fixture"));
+    contents.push('\n');
+    fs::write(&jsonl_path, contents).expect("write flat child fixture");
+
+    let import = run_br(
+        &workspace,
+        ["sync", "--import-only", "--force"],
+        "import_flat_child",
+    );
+    assert!(import.status.success(), "import failed: {}", import.stderr);
+    assert!(
+        !flat_id.contains('.'),
+        "precondition: {flat_id} should be a flat ID"
+    );
+
+    let out = run_br(
+        &workspace,
+        ["info", "--projections", "--json"],
+        "info_projections",
+    );
+    assert!(out.status.success(), "info failed: {}", out.stderr);
+
+    let payload = extract_json_payload(&out.stdout);
+    let json: Value = serde_json::from_str(&payload).expect("parse info json");
+
+    assert_eq!(
+        json["projections"]["hierarchy_divergence_rows"].as_u64(),
+        Some(1),
+        "a parent implies a dotted id; {flat_id} is flat but carries a parent-child dep; got {json}"
+    );
+    let ids = json["projections"]["hierarchy_divergence_ids"]
+        .as_array()
+        .expect("ids array");
+    assert!(
+        ids.iter().any(|v| v.as_str() == Some(flat_id)),
+        "got {json}"
+    );
+}
+
+#[test]
+fn info_projections_announces_the_cap_when_truncating_the_id_list() {
+    let _log = common::test_log("info_projections_announces_the_cap_when_truncating_the_id_list");
+    let workspace = BrWorkspace::new();
+
+    // 25 divergent rows: one more than the 20-id cap can show fully, so the
+    // count and the shown-id count are provably different numbers rather
+    // than a coincidence of the cap matching the fixture size.
+    let epic = IssueBuilder::new("Epic")
+        .with_id("ab-e")
+        .with_type(beads::model::IssueType::Epic)
+        .build();
+    let mut records = vec![serde_json::to_string(&epic).expect("serialize epic fixture")];
+    for i in 0..25 {
+        // No `parent-child` dep at all -- shape 2, cheapest to generate in
+        // bulk.
+        let orphan = IssueBuilder::new(&format!("Orphan {i}"))
+            .with_id(&format!("ab-e.{i}"))
+            .build();
+        records.push(serde_json::to_string(&orphan).expect("serialize orphan fixture"));
+    }
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    std::fs::create_dir_all(jsonl_path.parent().expect("beads dir")).expect("create .beads");
+    fs::write(&jsonl_path, records.join("\n") + "\n").expect("write cap fixture");
+
+    let import = run_br(
+        &workspace,
+        ["sync", "--import-only", "--force"],
+        "import_cap_fixture",
+    );
+    assert!(import.status.success(), "import failed: {}", import.stderr);
+
+    let out_json = run_br(
+        &workspace,
+        ["info", "--projections", "--json"],
+        "info_projections_json",
+    );
+    assert!(
+        out_json.status.success(),
+        "info failed: {}",
+        out_json.stderr
+    );
+
+    let payload = extract_json_payload(&out_json.stdout);
+    let json: Value = serde_json::from_str(&payload).expect("parse info json");
+
+    assert_eq!(
+        json["projections"]["hierarchy_divergence_rows"].as_u64(),
+        Some(25),
+        "got {json}"
+    );
+    let ids = json["projections"]["hierarchy_divergence_ids"]
+        .as_array()
+        .expect("ids array");
+    assert_eq!(
+        ids.len(),
+        20,
+        "the id list must stay capped even though 25 rows diverged; got {json}"
+    );
+
+    let out_human = run_br(
+        &workspace,
+        ["info", "--projections"],
+        "info_projections_human",
+    );
+    assert!(
+        out_human.status.success(),
+        "info failed: {}",
+        out_human.stderr
+    );
+    assert!(
+        out_human.stdout.contains("(showing 20)"),
+        "CLAUDE.md requires a silent cap to say out loud how many were omitted; got: {}",
+        out_human.stdout
+    );
+}
