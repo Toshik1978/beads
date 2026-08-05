@@ -798,6 +798,64 @@ fn find_id_by_former_id_returns_none_for_an_unknown_id() {
     assert_eq!(storage.find_id_by_former_id("bd-never").unwrap(), None);
 }
 
+/// bds-gxm. Two *live* issues claiming one former id is the collision case.
+/// `rename_issue` alone cannot produce it -- the tombstone it leaves holds the
+/// vacated primary key -- but a JSONL merge of two branches that each renamed
+/// their own copy of the same issue can. When it happens the answer must be a
+/// property of the data, not of whichever row the table scan reaches first.
+///
+/// The insertion order below is reverse-sorted deliberately: an unordered
+/// `LIMIT 1` returns `bd-z`, so this test fails on the unfixed query rather
+/// than passing by luck.
+#[test]
+fn find_id_by_former_id_picks_the_lowest_id_when_two_live_issues_collide() {
+    let mut storage = test_db();
+    for id in ["bd-z", "bd-a"] {
+        let mut issue = fixtures::issue(id);
+        issue.id = id.to_string();
+        issue.former_ids = vec!["bd-gone".to_string()];
+        storage.create_issue(&issue, "tester").unwrap();
+    }
+
+    let found = storage.find_id_by_former_id("bd-gone").unwrap();
+
+    assert_eq!(
+        found.as_deref(),
+        Some("bd-a"),
+        "a collision must resolve by a stated rule -- lowest id -- so two \
+         machines reading the same rows agree"
+    );
+    assert_eq!(
+        storage.find_id_by_former_id("bd-gone").unwrap(),
+        found,
+        "and repeating the query must not change the answer"
+    );
+}
+
+/// A tombstone sharing the collision does not get a vote: the live rows are
+/// the only candidates, and the lowest of *those* wins.
+#[test]
+fn find_id_by_former_id_orders_over_live_rows_only() {
+    let mut storage = test_db();
+    let mut stone = fixtures::issue("bd-0stone");
+    stone.id = "bd-0stone".to_string();
+    stone.status = Status::Tombstone;
+    stone.former_ids = vec!["bd-gone".to_string()];
+    storage.create_issue(&stone, "tester").unwrap();
+
+    let mut live = fixtures::issue("bd-live");
+    live.id = "bd-live".to_string();
+    live.former_ids = vec!["bd-gone".to_string()];
+    storage.create_issue(&live, "tester").unwrap();
+
+    assert_eq!(
+        storage.find_id_by_former_id("bd-gone").unwrap().as_deref(),
+        Some("bd-live"),
+        "`bd-0stone` sorts first but is dead; ordering must not override the \
+         tombstone filter"
+    );
+}
+
 #[test]
 fn live_id_exists_ignores_tombstones() {
     let mut storage = tree();

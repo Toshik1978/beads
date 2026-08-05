@@ -941,7 +941,7 @@ fn find_ids_by_hash_in_memory(
         None => (hash_suffix, None),
     };
 
-    issues_by_id
+    let mut matches = issues_by_id
         .keys()
         .filter(|id| {
             crate::util::id::split_prefix_remainder(id).is_some_and(|(_, remainder)| {
@@ -958,19 +958,35 @@ fn find_ids_by_hash_in_memory(
             })
         })
         .cloned()
-        .collect()
+        .collect::<Vec<_>>();
+    // Sorted for the same reason the SQL route is: `find_ids_by_hash` reads
+    // `get_all_ids`, which is `ORDER BY id`. These matches become the
+    // `AmbiguousId` error's list, and an unsorted walk of `HashMap` keys would
+    // reshuffle that report between runs (bds-gxm).
+    matches.sort();
+    matches
 }
 
 /// The live issue currently holding `former_id`, mirroring
 /// [`SqliteStorage::find_id_by_former_id`] for the JSONL-backed path.
+///
+/// The lowest id wins, matching that query's `ORDER BY i.id LIMIT 1`. Picking
+/// the first match instead would mean picking whichever one `HashMap`
+/// iteration reached first — randomized per process, so the same command over
+/// the same file could answer a collision differently on different runs
+/// (bds-gxm).
 fn find_id_by_former_id_in_memory(
     issues_by_id: &HashMap<String, Issue>,
     former_id: &str,
 ) -> Option<String> {
-    issues_by_id.values().find_map(|issue| {
-        (issue.status != Status::Tombstone && issue.former_ids.iter().any(|id| id == former_id))
-            .then(|| issue.id.clone())
-    })
+    issues_by_id
+        .values()
+        .filter(|issue| {
+            issue.status != Status::Tombstone && issue.former_ids.iter().any(|id| id == former_id)
+        })
+        .map(|issue| &issue.id)
+        .min()
+        .cloned()
 }
 
 fn collect_external_dependency_ids(details_list: &[IssueDetails]) -> HashSet<String> {
@@ -1289,7 +1305,8 @@ fn format_issue_details(details: &IssueDetails, use_color: bool, wrap: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_external_dependency_metadata, build_issue_details_from_jsonl, format_issue_details,
+        apply_external_dependency_metadata, build_issue_details_from_jsonl,
+        find_id_by_former_id_in_memory, find_ids_by_hash_in_memory, format_issue_details,
         load_issue_details_from_jsonl, reorder_details_by_requested_inputs,
     };
     use crate::format::show_fields;
@@ -1919,6 +1936,66 @@ mod tests {
         assert_eq!(ordered[2].issue.id, "bd-local-2");
         info!(
             "test_reorder_details_by_requested_inputs_restores_mixed_route_order: assertions passed"
+        );
+    }
+
+    /// bds-gxm. `HashMap` iteration order is randomized per process, so a
+    /// `find_map` over its values answers a former-id collision differently on
+    /// different runs of the same command against the same file. Eight
+    /// colliding rows make that visible: an unfixed implementation returns the
+    /// lowest id one time in eight.
+    #[test]
+    fn former_id_lookup_in_memory_picks_the_lowest_id_when_live_issues_collide() {
+        let mut issues_by_id = HashMap::new();
+        for n in 0..8 {
+            let id = format!("bd-{n}");
+            let mut issue = make_test_issue(&id, "Collides");
+            issue.former_ids = vec!["bd-gone".to_string()];
+            issues_by_id.insert(id, issue);
+        }
+
+        assert_eq!(
+            find_id_by_former_id_in_memory(&issues_by_id, "bd-gone").as_deref(),
+            Some("bd-0"),
+            "the JSONL path must answer a collision by the same stated rule as \
+             the SQL path -- lowest id -- and give that answer every run"
+        );
+    }
+
+    /// The tombstone filter still outranks the ordering: a dead row that sorts
+    /// first is not a candidate at all.
+    #[test]
+    fn former_id_lookup_in_memory_orders_over_live_issues_only() {
+        let mut issues_by_id = HashMap::new();
+        let mut stone = make_test_issue("bd-0stone", "Dead");
+        stone.status = Status::Tombstone;
+        stone.former_ids = vec!["bd-gone".to_string()];
+        issues_by_id.insert(stone.id.clone(), stone);
+        let mut live = make_test_issue("bd-live", "Alive");
+        live.former_ids = vec!["bd-gone".to_string()];
+        issues_by_id.insert(live.id.clone(), live);
+
+        assert_eq!(
+            find_id_by_former_id_in_memory(&issues_by_id, "bd-gone").as_deref(),
+            Some("bd-live")
+        );
+    }
+
+    /// The sibling of the same defect. `find_ids_by_hash` sorts because
+    /// `get_all_ids` is `ORDER BY id`; its in-memory mirror walked `HashMap`
+    /// keys, so the `AmbiguousId` error listed the same matches in a different
+    /// order on every run.
+    #[test]
+    fn hash_lookup_in_memory_returns_matches_in_id_order() {
+        let mut issues_by_id = HashMap::new();
+        for id in ["bd-q9", "bd-q1", "bd-q5", "bd-q3", "bd-q7"] {
+            issues_by_id.insert(id.to_string(), make_test_issue(id, "Match"));
+        }
+
+        assert_eq!(
+            find_ids_by_hash_in_memory(&issues_by_id, "q"),
+            vec!["bd-q1", "bd-q3", "bd-q5", "bd-q7", "bd-q9"],
+            "an ambiguity report must not reshuffle itself between runs"
         );
     }
 }

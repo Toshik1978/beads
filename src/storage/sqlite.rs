@@ -7220,6 +7220,15 @@ impl SqliteStorage {
     /// what makes resolution land on the live row instead of whichever one
     /// `json_each` happens to visit first.
     ///
+    /// `ORDER BY i.id` settles the case the filter cannot: two *live* issues
+    /// claiming one former id. `rename_issue` cannot produce that on its own —
+    /// the tombstone it leaves holds the vacated primary key — but a JSONL
+    /// merge of two branches that each renamed their own copy of the same
+    /// issue can. Without the ordering the answer is whichever row the table
+    /// scan reaches first, which is a property of insertion history rather
+    /// than of the data. `find_id_by_former_id_in_memory` in `show.rs` takes
+    /// the same lowest-id rule, so both routes agree (bds-gxm).
+    ///
     /// # Errors
     ///
     /// Returns an error if the database query fails.
@@ -7227,7 +7236,7 @@ impl SqliteStorage {
         let rows = self.conn.query_with_params(
             "SELECT i.id FROM issues i, json_each(i.former_ids) f \
              WHERE f.value = ? AND i.status != 'tombstone' \
-             LIMIT 1",
+             ORDER BY i.id LIMIT 1",
             &[SqliteValue::from(former_id)],
         )?;
         Ok(rows
