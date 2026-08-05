@@ -665,12 +665,14 @@ impl Issue {
     /// silently dropping the new former ID (bds-a23.6). Deliberately not
     /// mirrored into `compute_content_hash`: that hash exists to match
     /// issues by *content* for dedup (`detect_collision`'s phase-3 hash
-    /// match), and `former_ids` is an ID-history field, in the same
-    /// excluded family as `id` itself — see the "Fields excluded" list on
-    /// [`crate::util::hash::content_hash`]. Widening the hash would also
-    /// invalidate every stored `content_hash`/`export_hashes` value in every
-    /// existing database, forcing a full re-export; `sync_equals` carries no
-    /// such stored state to invalidate.
+    /// match). Its doc comment's "Fields excluded" list
+    /// ([`crate::util::hash::content_hash`]) does not name `former_ids`
+    /// explicitly, but it excludes `id` for the same reason — an issue's
+    /// current or former identity is not "content" — and `former_ids` is
+    /// exactly that: an ID-history field, not content. Widening the hash
+    /// would also invalidate every stored `content_hash`/`export_hashes`
+    /// value in every existing database, forcing a full re-export;
+    /// `sync_equals` carries no such stored state to invalidate.
     #[must_use]
     pub fn sync_equals(&self, other: &Self) -> bool {
         if self.id != other.id

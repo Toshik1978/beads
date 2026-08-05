@@ -322,6 +322,72 @@ fn rename_records_the_old_id_in_former_ids() {
     assert_eq!(moved.former_ids, vec!["bd-p.2"]);
 }
 
+/// bds-a23.6 fix round 1, Finding 2: a rename changes a row's content (it
+/// gains a `former_ids` entry) but `rewrite_issue_id` only ever touched the
+/// `id` column, leaving `updated_at` exactly as it was. `import_from_jsonl`'s
+/// `determine_action` gates purely on `updated_at` -- never on
+/// `sync_equals` -- so a rename that didn't move `updated_at` was invisible
+/// to an importer that already held the pre-rename row at the same
+/// timestamp. Pinning the bump directly, independent of the import-level
+/// consequence covered by
+/// `import_of_a_bumped_former_ids_change_updates_the_row_instead_of_skipping`.
+#[test]
+fn rename_bumps_updated_at_on_the_renamed_row() {
+    let mut storage = tree();
+    let before = storage.get_issue("bd-p.2").unwrap().expect("exists");
+
+    storage.rename_issue("bd-p.2", "bd-new", "tester").unwrap();
+
+    let moved = storage.get_issue("bd-new").unwrap().expect("exists");
+    assert!(
+        moved.updated_at > before.updated_at,
+        "a rename changes former_ids, which is synced content -- updated_at \
+         must move with it or an equal-timestamp importer can never see the \
+         change; before = {:?}, after = {:?}",
+        before.updated_at,
+        moved.updated_at
+    );
+}
+
+/// Only the row whose content actually changed gets its `updated_at`
+/// bumped -- not every id-rewritten row. `rewrite_issue_id` runs on every
+/// descendant in the cascade (bds-a23.10), including ones that were already
+/// tombstoned before this rename and so get no new `former_ids` entry (see
+/// the `pre_move.status != Status::Tombstone` guard around
+/// `record_rename_provenance` in `rename_issue_in_tx`). Bumping `updated_at`
+/// on those too would manufacture sync-visible "changes" for rows whose
+/// content genuinely did not change this hop, with no corresponding
+/// evidence in `former_ids` to justify it.
+#[test]
+fn rename_does_not_bump_updated_at_on_an_already_tombstoned_descendant() {
+    let mut storage = tree();
+    // First rename tombstones bd-p.1 in place at its own id.
+    storage
+        .rename_issue("bd-p.1", "bd-p.1-renamed", "tester")
+        .unwrap();
+    let stone_before = storage
+        .get_issue("bd-p.1")
+        .unwrap()
+        .expect("tombstone exists");
+    assert_eq!(stone_before.status, Status::Tombstone);
+
+    // Second rename moves the ancestor bd-p, whose cascade sweeps up the
+    // already-tombstoned bd-p.1 too (descendant_ids has no status filter).
+    storage.rename_issue("bd-p", "bd-q", "tester").unwrap();
+
+    let stone_after = storage.get_issue("bd-q.1").unwrap().expect(
+        "the tombstone rides along under the new prefix -- it still has to \
+         vacate the id namespace like any other row",
+    );
+    assert_eq!(stone_after.status, Status::Tombstone);
+    assert_eq!(
+        stone_after.updated_at, stone_before.updated_at,
+        "a tombstone carried along by an ancestor rename gets no new \
+         former_ids entry (record_rename_provenance is skipped for it), so \
+         its updated_at must not move either"
+    );
+}
+
 #[test]
 fn former_ids_accumulate_oldest_first_across_repeated_renames() {
     let mut storage = tree();
@@ -530,6 +596,82 @@ fn merging_a_former_ids_only_change_over_an_existing_row_propagates_it() {
         vec!["bd-old".to_string()],
         "the incoming former_ids entry must survive the merge over the \
          existing row, not be silently dropped as 'no change'"
+    );
+}
+
+/// bds-a23.6 fix round 1 review, Finding 1: widening `sync_equals` alone
+/// made things *worse* for a `former_ids`-only delta at equal `updated_at`.
+/// `import_from_jsonl`'s `determine_action` never calls `sync_equals` — it
+/// gates purely on `updated_at` and, on a tie, Skips. Pre-fix, the stale
+/// `Skip`ped row was wrongly *certified* as matching (since `sync_equals`
+/// ignored `former_ids`), so nothing flagged the database as diverged.
+/// Post-round-1, `sync_equals` correctly said "different", which flipped
+/// the certification to "diverged" and set `needs_flush = true` — but the
+/// row was still never updated (still `Skip`ped), so the next flush would
+/// export the *stale local* copy over the JSONL, erasing the incoming
+/// former ID repo-wide instead of merely missing it locally.
+///
+/// Finding 2's fix — `record_rename_provenance` now bumps `updated_at`
+/// alongside `former_ids` — closes this at the root: a real rename can no
+/// longer produce the equal-timestamp tie that sent this down the `Skip`
+/// path in the first place. This test proves that closure directly: an
+/// incoming record whose only content delta is a new `former_ids` entry,
+/// with `updated_at` bumped the way a real rename now bumps it, lands as
+/// an `Update` — not a `Skip` — so there is no stale row left for a later
+/// flush to export back over the JSONL.
+#[test]
+fn import_of_a_bumped_former_ids_change_updates_the_row_instead_of_skipping() {
+    let mut storage = test_db();
+    let mut issue = fixtures::issue("bd-f");
+    issue.id = "bd-f".to_string();
+    storage.create_issue(&issue, "tester").unwrap();
+
+    let existing = storage.get_issue("bd-f").unwrap().unwrap();
+
+    // Mirrors exactly what record_rename_provenance now does: former_ids
+    // gains an entry and updated_at moves forward with it, in the same
+    // write.
+    let mut incoming = existing.clone();
+    incoming.former_ids = vec!["bd-old".to_string()];
+    incoming.updated_at = existing.updated_at + chrono::Duration::seconds(1);
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("issues.jsonl");
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&incoming).unwrap()),
+    )
+    .unwrap();
+
+    let result =
+        import_from_jsonl(&mut storage, &path, &ImportConfig::default(), Some("bd-")).unwrap();
+
+    assert_eq!(
+        result.updated_count, 1,
+        "a former_ids change paired with a bumped updated_at must be an \
+         Update, not a Skip; got {result:?}"
+    );
+    assert_eq!(result.skipped_count, 0);
+
+    let after = storage.get_issue("bd-f").unwrap().unwrap();
+    assert_eq!(
+        after.former_ids,
+        vec!["bd-old".to_string()],
+        "the former_ids entry must land in the row itself, not just get \
+         flagged as diverged"
+    );
+
+    // The row was actually updated to match the incoming JSONL, so there is
+    // nothing stale left for a forced flush to export back over the
+    // incoming file -- needs_flush must not be set from this import.
+    assert_ne!(
+        storage.get_metadata("needs_flush").unwrap().as_deref(),
+        Some("true"),
+        "an applied Update must not also leave the database marked as \
+         needing a corrective flush -- that flush would export the \
+         now-current (and already-correct) row, but the metadata flag \
+         existing at all here would indicate the import still thinks \
+         something is unresolved"
     );
 }
 

@@ -7561,10 +7561,24 @@ impl SqliteStorage {
         let mut former = pre_move.former_ids.clone();
         former.push(old_id.to_string());
         let former_ids_json = serde_json::to_string(&former).unwrap_or_else(|_| "[]".to_string());
+        // `updated_at` must move with this write, not just `former_ids`: this
+        // is the only row whose *content* (as `sync_equals` sees it) actually
+        // changed by this rename, and `import_from_jsonl`'s `determine_action`
+        // gates purely on `updated_at` comparison -- it never calls
+        // `sync_equals`. Leaving the old timestamp made a rename invisible to
+        // an equal-timestamp import, which then *certified* the stale local
+        // row as matching (bds-a23.6 fix round 1) and the next flush erased
+        // the incoming former ID from the JSONL repo-wide instead of merely
+        // missing it locally. Scoped to exactly this UPDATE, not the whole
+        // cascade: `rewrite_issue_id` (called on every descendant, tombstoned
+        // or not) only moves the primary key and touches no synced content,
+        // so bumping there would move timestamps on rows nothing here
+        // actually changed.
         conn.execute_with_params(
-            "UPDATE issues SET former_ids = ? WHERE id = ?",
+            "UPDATE issues SET former_ids = ?, updated_at = ? WHERE id = ?",
             &[
                 SqliteValue::from(former_ids_json.as_str()),
+                SqliteValue::from(Utc::now().to_rfc3339()),
                 SqliteValue::from(new_id),
             ],
         )?;
