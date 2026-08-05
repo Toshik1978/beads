@@ -136,14 +136,19 @@ fn rename_carries_the_whole_subtree() {
     );
     // The top-level node leaves a tombstone behind rather than vanishing —
     // see `rename_leaves_a_tombstone_at_the_vacated_id` below for the
-    // dedicated coverage. Descendants moved only as a consequence of their
-    // ancestor's move get no tombstone of their own and are simply gone.
+    // dedicated coverage. bds-a23.10: every descendant carried along by the
+    // cascade gets the same treatment, not just the directly renamed node —
+    // see `every_vacated_descendant_id_gets_a_tombstone` for that coverage.
     let stone = storage.get_issue("bd-p.1").unwrap();
     assert!(
         stone.is_some_and(|issue| issue.status == Status::Tombstone),
         "the vacated top-level ID keeps a tombstone row"
     );
-    assert!(storage.get_issue("bd-p.1.1").unwrap().is_none());
+    let descendant_stone = storage.get_issue("bd-p.1.1").unwrap();
+    assert!(
+        descendant_stone.is_some_and(|issue| issue.status == Status::Tombstone),
+        "the vacated descendant ID keeps a tombstone row too"
+    );
 }
 
 #[test]
@@ -691,5 +696,96 @@ fn attach_to_parent_is_a_no_op_when_already_a_child_of_the_target() {
         vec!["bd-child".to_string()],
         "the first, real attach recorded `bd-child` as expected, but the \
          second, no-op reattach must not append another hop"
+    );
+}
+
+/// bds-a23.10: every renamed node, at any depth, gets the same provenance as
+/// the top-level node -- not just the directly renamed one.
+#[test]
+fn every_renamed_descendant_records_its_own_former_id() {
+    let mut storage = tree();
+
+    storage.rename_issue("bd-p.1", "bd-q.7", "tester").unwrap();
+
+    let grandchild = storage
+        .get_issue("bd-q.7.1")
+        .unwrap()
+        .expect("bd-p.1.1 moved to bd-q.7.1");
+    assert_eq!(
+        grandchild.former_ids,
+        vec!["bd-p.1.1"],
+        "a descendant carried by the cascade must record where it came from"
+    );
+}
+
+#[test]
+fn every_vacated_descendant_id_gets_a_tombstone() {
+    let mut storage = tree();
+
+    storage.rename_issue("bd-p.1", "bd-q.7", "tester").unwrap();
+
+    let stone = storage
+        .get_issue("bd-p.1.1")
+        .unwrap()
+        .expect("the vacated descendant ID keeps a tombstone");
+    assert_eq!(stone.status, Status::Tombstone);
+    assert!(
+        stone
+            .delete_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bd-q.7.1"),
+        "the tombstone must name where the descendant went; got {:?}",
+        stone.delete_reason
+    );
+}
+
+#[test]
+fn a_descendant_old_id_resolves_to_its_new_home() {
+    let mut storage = tree();
+    storage.rename_issue("bd-p.1", "bd-q.7", "tester").unwrap();
+
+    let found = storage.find_id_by_former_id("bd-p.1.1").unwrap();
+
+    assert_eq!(found.as_deref(), Some("bd-q.7.1"));
+}
+
+#[test]
+fn descendant_tombstones_do_not_block_the_old_parent_closing() {
+    let mut storage = tree();
+
+    storage.rename_issue("bd-p.1", "bd-q.7", "tester").unwrap();
+    storage.rename_issue("bd-p.2", "bd-q.8", "tester").unwrap();
+
+    let blockers = storage.get_open_dot_notation_children("bd-p").unwrap();
+
+    assert!(
+        blockers.is_empty(),
+        "tombstones are terminal and must not count as open children; got {blockers:?}"
+    );
+}
+
+#[test]
+fn a_descendant_carrying_an_external_ref_can_be_renamed() {
+    let mut storage = test_db();
+    for id in ["bd-x", "bd-x.1", "bd-x.1.1"] {
+        let mut issue = fixtures::issue(id);
+        issue.id = id.to_string();
+        if id == "bd-x.1.1" {
+            issue.external_ref = Some("JIRA-777".to_string());
+        }
+        storage.create_issue(&issue, "tester").unwrap();
+    }
+
+    storage
+        .rename_issue("bd-x.1", "bd-y.4", "tester")
+        .expect("a descendant's external_ref must not collide with its own tombstone");
+
+    let moved = storage.get_issue("bd-y.4.1").unwrap().expect("moved");
+    assert_eq!(moved.external_ref.as_deref(), Some("JIRA-777"));
+    let stone = storage.get_issue("bd-x.1.1").unwrap().expect("tombstone");
+    assert_eq!(
+        stone.external_ref, None,
+        "the tombstone must not hold the reference"
     );
 }

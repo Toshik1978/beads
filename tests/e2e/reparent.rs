@@ -1024,3 +1024,81 @@ fn e2e_dep_import_resolves_a_parent_renamed_earlier_in_the_same_file() {
          former_ids; got {new_b_id} (A is now {new_a_id})"
     );
 }
+
+/// bds-a23.10: a descendant carried along by an ancestor's rename gets the
+/// same `former_ids` provenance as the node renamed directly, so a reference
+/// to its pre-move id still resolves after the move.
+#[test]
+fn e2e_a_grandchild_still_resolves_by_its_old_id_after_the_subtree_moves() {
+    let _log =
+        common::test_log("e2e_a_grandchild_still_resolves_by_its_old_id_after_the_subtree_moves");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic1 = run_br(
+        &workspace,
+        ["create", "Epic one", "--type", "epic"],
+        "create_epic1",
+    );
+    assert!(epic1.status.success());
+    let epic1_id = parse_created_id(&epic1.stdout);
+
+    let epic2 = run_br(
+        &workspace,
+        ["create", "Epic two", "--type", "epic"],
+        "create_epic2",
+    );
+    assert!(epic2.status.success());
+    let epic2_id = parse_created_id(&epic2.stdout);
+
+    let create_child = run_br(
+        &workspace,
+        ["create", "Child", "--type", "task", "--parent", &epic1_id],
+        "create_child",
+    );
+    assert!(create_child.status.success());
+    let child_id = parse_created_id(&create_child.stdout);
+
+    let create_grandchild = run_br(
+        &workspace,
+        [
+            "create",
+            "Grandchild",
+            "--type",
+            "task",
+            "--parent",
+            &child_id,
+        ],
+        "create_grandchild",
+    );
+    assert!(create_grandchild.status.success());
+    // Captured before the move: a reference written before the move -- in a
+    // commit message, a PR body, another issue's prose -- must still
+    // resolve, even though the grandchild only moved as a side effect of its
+    // parent's rename.
+    let grandchild_id = parse_created_id(&create_grandchild.stdout);
+
+    let reparent = run_br(
+        &workspace,
+        ["update", &child_id, "--parent", &epic2_id, "--json"],
+        "reparent",
+    );
+    assert!(
+        reparent.status.success(),
+        "reparent failed: {}",
+        reparent.stderr
+    );
+
+    let shown = run_br(
+        &workspace,
+        ["show", &grandchild_id],
+        "show_grandchild_by_old_id",
+    );
+    assert!(
+        shown.status.success(),
+        "the grandchild's pre-move id must still resolve: {}",
+        shown.stderr
+    );
+    assert!(shown.stdout.contains("Grandchild"), "got: {}", shown.stdout);
+}

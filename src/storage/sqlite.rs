@@ -7455,18 +7455,58 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Record provenance for one renamed node: append `old_id` to the
+    /// surviving row's `former_ids` and leave a tombstone at the vacated
+    /// `old_id` naming `new_id`.
+    ///
+    /// Shared by the top-level renamed node and every descendant the cascade
+    /// carries along in [`Self::rename_issue_in_tx`] — bds-a23.10 ruled that
+    /// a descendant moved implicitly by an ancestor's rename gets exactly the
+    /// same provenance as a node renamed directly, not a lesser version of
+    /// it. `pre_move` must be the row's content as read *before*
+    /// [`Self::rewrite_issue_id`] moved it from `old_id` to `new_id`.
+    fn record_rename_provenance(
+        conn: &Connection,
+        pre_move: &Issue,
+        old_id: &str,
+        new_id: &str,
+        actor: &str,
+    ) -> Result<()> {
+        // Appended, not replaced: a node renamed twice (or carried by two
+        // separate ancestor renames) accumulates every hop, oldest first.
+        let mut former = pre_move.former_ids.clone();
+        former.push(old_id.to_string());
+        let former_ids_json = serde_json::to_string(&former).unwrap_or_else(|_| "[]".to_string());
+        conn.execute_with_params(
+            "UPDATE issues SET former_ids = ? WHERE id = ?",
+            &[
+                SqliteValue::from(former_ids_json.as_str()),
+                SqliteValue::from(new_id),
+            ],
+        )?;
+
+        // A tombstone at the vacated ID, so the move propagates through
+        // JSONL. Without it, a clone still holding `old_id` merges its copy
+        // back in as a live issue and silently undoes the rename.
+        Self::insert_rename_tombstone(conn, pre_move, new_id, actor)?;
+
+        Ok(())
+    }
+
     /// Move `old_id` to `new_id`, carrying the entire subtree beneath it.
     ///
     /// Renaming `bd-p.1` to `bd-q.7` also moves `bd-p.1.1` to `bd-q.7.1`, at
     /// every depth and in every status. The whole move is one [`Self::mutate`]
     /// transaction: a failure at any node leaves the tree exactly as it was.
     ///
-    /// The top-level node gains a `former_ids` entry recording `old_id` and
-    /// leaves a tombstone at the vacated ID naming where it went. Descendants
-    /// moved implicitly as a consequence of the top-level move get neither —
-    /// their IDs changed only because an ancestor's did, and tombstoning
-    /// every node of a deep subtree would flood the JSONL for no
-    /// navigational benefit.
+    /// Every node the cascade touches — the top-level node and every
+    /// descendant carried along with it — gains a `former_ids` entry
+    /// recording its own pre-move ID and leaves a tombstone at its own
+    /// vacated ID naming where it went (bds-a23.10). An earlier version of
+    /// this gave that provenance to the top-level node only, on the theory
+    /// that tombstoning a deep subtree would flood the JSONL; the repo owner
+    /// ruled that speculative and the cost is bounded by the subtree
+    /// actually renamed, so descendants now get the same treatment.
     ///
     /// # Errors
     ///
@@ -7527,30 +7567,27 @@ impl SqliteStorage {
                 BeadsError::internal(format!("{descendant} is not beneath {old_id}"))
             })?;
             let new_descendant_id = format!("{new_id}{suffix}");
+
+            // Snapshot before the rewrite, for the same reason `pre_rename`
+            // is captured for the top-level node below: it is the source of
+            // this descendant's own tombstone content and of the
+            // `former_ids` entry it gains via `record_rename_provenance`.
+            // Every node the cascade carries gets the same provenance as
+            // the node renamed directly -- see bds-a23.10.
+            let pre_move = Self::get_issue_from_conn(conn, descendant)?
+                .ok_or_else(|| BeadsError::internal(format!("{descendant} vanished mid-rename")))?;
+
             Self::rewrite_issue_id(conn, descendant, &new_descendant_id)?;
             ctx.mark_dirty(&new_descendant_id);
+
+            Self::record_rename_provenance(conn, &pre_move, descendant, &new_descendant_id, actor)?;
+            ctx.mark_dirty(descendant);
         }
 
         Self::rewrite_issue_id(conn, old_id, new_id)?;
         ctx.mark_dirty(new_id);
 
-        // Provenance on the issue that moved. Appended, not replaced: an
-        // issue renamed twice carries both hops, oldest first.
-        let mut former = pre_rename.former_ids.clone();
-        former.push(old_id.to_string());
-        let former_ids_json = serde_json::to_string(&former).unwrap_or_else(|_| "[]".to_string());
-        conn.execute_with_params(
-            "UPDATE issues SET former_ids = ? WHERE id = ?",
-            &[
-                SqliteValue::from(former_ids_json.as_str()),
-                SqliteValue::from(new_id),
-            ],
-        )?;
-
-        // A tombstone at the vacated ID, so the move propagates through
-        // JSONL. Without it, a clone still holding `old_id` merges its
-        // copy back in as a live issue and silently undoes the rename.
-        Self::insert_rename_tombstone(conn, pre_rename, new_id, actor)?;
+        Self::record_rename_provenance(conn, pre_rename, old_id, new_id, actor)?;
         ctx.mark_dirty(old_id);
 
         // `rewrite_issue_id` only moves the `blocked_issues_cache` row
