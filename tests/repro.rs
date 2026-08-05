@@ -50,6 +50,8 @@ mod mergereport_determinism;
 mod parent_blocking;
 #[path = "repro/pinned_blocker.rs"]
 mod pinned_blocker;
+#[path = "repro/reparent_orphans_old_epic.rs"]
+mod reparent_orphans_old_epic;
 #[path = "repro/source_repo_path_leak.rs"]
 mod source_repo_path_leak;
 #[path = "repro/sync_cycle_fuzz_crashes.rs"]
