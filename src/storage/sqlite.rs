@@ -3576,7 +3576,15 @@ impl SqliteStorage {
         }
 
         // Update updated_at only when a stored field needs rewriting.
-        let updated_at = Utc::now();
+        //
+        // Clamped via `advance_updated_at` against the row's own pre-update
+        // value, not a bare `Utc::now()`: a row seeded via JSONL import from
+        // a clock-skewed peer can already carry an `updated_at` ahead of
+        // this machine's clock, and an unclamped `now` here would write a
+        // *smaller* value -- moving the row backwards in time and making
+        // this edit invisible to `determine_action`'s next comparison. See
+        // bds-a23.16.
+        let updated_at = Self::advance_updated_at(issue.updated_at);
         issue.updated_at = updated_at;
 
         IssueValidator::validate(&issue).map_err(BeadsError::from_validation_errors)?;
@@ -7496,6 +7504,30 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Timestamp to write for a mutation of a row whose current stored
+    /// `updated_at` is `existing`. Ordinarily this is just `Utc::now()`, but
+    /// a row seeded via JSONL import from a clock-skewed peer can carry an
+    /// `updated_at` already ahead of this machine's clock, and `Utc::now()`
+    /// alone would then write a *smaller* value — silently moving the row
+    /// backwards in time. `determine_action` (`src/sync/mod.rs`) gates
+    /// purely on `updated_at`, so a write that does not strictly advance it
+    /// is invisible to the next import: the peer's still-future copy reads
+    /// as newer, the local edit is skipped over, and the next flush exports
+    /// the stale row back over the JSONL. See bds-a23.16.
+    ///
+    /// Always returns a value strictly greater than `existing`, never
+    /// merely equal to it: `determine_action`'s `Equal` arm is `Skip`, so a
+    /// write that only ties the existing timestamp would be exactly as
+    /// invisible as one that falls behind it.
+    fn advance_updated_at(existing: DateTime<Utc>) -> DateTime<Utc> {
+        let now = Utc::now();
+        if now > existing {
+            now
+        } else {
+            existing + chrono::Duration::nanoseconds(1)
+        }
+    }
+
     /// Insert a tombstone row at the vacated `old_id`, recording that the
     /// issue moved to `new_id`.
     ///
@@ -7522,7 +7554,15 @@ impl SqliteStorage {
         tombstone.deleted_by = Some(actor.to_string());
         tombstone.delete_reason = Some(format!("renamed to {new_id}"));
         tombstone.original_type = Some(pre_rename.issue_type.as_str().to_string());
-        tombstone.updated_at = now;
+        // Clamped against `pre_rename.updated_at`, not just set to `now`: if
+        // `pre_rename` itself was seeded (via JSONL import from a
+        // clock-skewed peer) with an `updated_at` already ahead of this
+        // machine's clock, an unclamped `now` here would tombstone `old_id`
+        // at a *lower* timestamp than a peer still holds for its own live
+        // copy of that row -- making the tombstone invisible to that peer's
+        // next import, and the vacated id silently un-renamed from its
+        // perspective. See [`Self::advance_updated_at`] and bds-a23.16.
+        tombstone.updated_at = Self::advance_updated_at(pre_rename.updated_at);
         tombstone.former_ids = Vec::new();
         // `rewrite_issue_id` already carried this value to the live row at
         // `new_id`. `idx_issues_external_ref_unique` (schema.rs:90) is a
@@ -7574,11 +7614,19 @@ impl SqliteStorage {
         // or not) only moves the primary key and touches no synced content,
         // so bumping there would move timestamps on rows nothing here
         // actually changed.
+        //
+        // Clamped via `advance_updated_at`, not a bare `Utc::now()`: `pre_move`
+        // can itself carry an `updated_at` ahead of this machine's clock (a
+        // row seeded via JSONL import from a clock-skewed peer), and writing
+        // an unclamped `now` would then move the timestamp *backwards* --
+        // reinstating the exact invisible-rename shape this comment already
+        // describes, just re-entered through clock skew instead of a missed
+        // bump. See bds-a23.16.
         conn.execute_with_params(
             "UPDATE issues SET former_ids = ?, updated_at = ? WHERE id = ?",
             &[
                 SqliteValue::from(former_ids_json.as_str()),
-                SqliteValue::from(Utc::now().to_rfc3339()),
+                SqliteValue::from(Self::advance_updated_at(pre_move.updated_at).to_rfc3339()),
                 SqliteValue::from(new_id),
             ],
         )?;

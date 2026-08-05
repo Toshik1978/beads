@@ -10,8 +10,10 @@ use crate::common;
 
 use beads::model::{Comment, DependencyType, Issue, IssueType, Priority, Status};
 use beads::storage::{IssueUpdate, SqliteStorage};
+use beads::sync::{ImportConfig, import_from_jsonl};
 use chrono::{Duration, Utc};
 use common::{fixtures, test_db, test_db_with_dir};
+use tempfile::TempDir;
 
 // ============================================================================
 // CREATE ISSUE TESTS
@@ -352,6 +354,60 @@ fn update_issue_marks_dirty() {
 
     let dirty_ids = storage.get_dirty_issue_ids().unwrap();
     assert!(dirty_ids.contains(&issue.id));
+}
+
+/// bds-a23.16: `update_issue` must not move `updated_at` backwards on a row
+/// seeded via JSONL import with a timestamp ahead of this machine's clock
+/// (a clock-skewed peer). Before the clamp, `update_issue_in_tx` wrote a
+/// bare `Utc::now()`, which -- being a real, unskewed reading -- sits
+/// *before* the peer's future stamp already on the row. That leaves the
+/// edit invisible to `determine_action`'s next comparison: the peer's
+/// still-future, unedited copy reads as newer and the local edit is
+/// skipped over, then re-exported away on the next flush.
+#[test]
+fn update_issue_after_a_future_dated_import_still_advances_updated_at() {
+    let mut storage = test_db();
+    let mut issue = fixtures::issue("future-dated");
+    issue.id = "bd-fd".to_string();
+    storage.create_issue(&issue, "tester").unwrap();
+
+    // Simulate a clock-skewed peer: import a copy of this row stamped hours
+    // into the future -- exactly how a row acquires an `updated_at` ahead
+    // of this machine's own clock.
+    let seeded = storage.get_issue(&issue.id).unwrap().expect("exists");
+    let mut future = seeded.clone();
+    future.updated_at = Utc::now() + Duration::hours(6);
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("issues.jsonl");
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&future).unwrap()),
+    )
+    .unwrap();
+    import_from_jsonl(&mut storage, &path, &ImportConfig::default(), Some("bd-")).unwrap();
+
+    let before_update = storage.get_issue(&issue.id).unwrap().expect("exists");
+    assert_eq!(
+        before_update.updated_at, future.updated_at,
+        "import must carry the future timestamp verbatim -- that is the \
+         premise of the bug, not something this test is checking"
+    );
+
+    let update = IssueUpdate {
+        title: Some("Edited after future-dated import".to_string()),
+        ..Default::default()
+    };
+    let updated = storage.update_issue(&issue.id, &update, "updater").unwrap();
+
+    assert!(
+        updated.updated_at > before_update.updated_at,
+        "an update must still move updated_at strictly forward even when \
+         the row's existing value is already ahead of the real clock; \
+         before = {:?}, after = {:?}",
+        before_update.updated_at,
+        updated.updated_at
+    );
 }
 
 #[test]

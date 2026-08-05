@@ -6,6 +6,7 @@ use beads::model::{DependencyType, Status};
 use beads::storage::{IssueUpdate, SqliteStorage};
 use beads::sync::{ExportConfig, ImportConfig, export_to_jsonl, import_from_jsonl};
 use beads::util::id::{IdExistence, IdResolver, ResolverConfig};
+use chrono::{Duration, Utc};
 use common::{fixtures, test_db};
 use tempfile::TempDir;
 
@@ -345,6 +346,58 @@ fn rename_bumps_updated_at_on_the_renamed_row() {
          must move with it or an equal-timestamp importer can never see the \
          change; before = {:?}, after = {:?}",
         before.updated_at,
+        moved.updated_at
+    );
+}
+
+/// bds-a23.16: a row seeded via JSONL import with an `updated_at` in the
+/// *future* (a clock-skewed peer) must not have that timestamp moved
+/// backwards by a later local rename. Before the clamp,
+/// `record_rename_provenance` wrote a bare `Utc::now()` -- a real, unskewed
+/// reading of this machine's clock, which sits *before* the peer's future
+/// stamp already sitting on the row. That reinstates exactly the
+/// invisible-rename shape bds-a23.6 fixed, re-entered through clock skew
+/// instead of a missed bump: `determine_action` would see the local row as
+/// older than the still-future JSONL copy and skip re-applying the rename.
+#[test]
+fn rename_after_a_future_dated_import_still_advances_updated_at() {
+    let mut storage = test_db();
+    let mut issue = fixtures::issue("bd-f");
+    issue.id = "bd-f".to_string();
+    storage.create_issue(&issue, "tester").unwrap();
+
+    // Simulate a clock-skewed peer: import a copy of this row stamped hours
+    // into the future -- exactly how a row acquires an `updated_at` ahead of
+    // this machine's own clock.
+    let seeded = storage.get_issue("bd-f").unwrap().expect("exists");
+    let mut future = seeded.clone();
+    future.updated_at = Utc::now() + Duration::hours(6);
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("issues.jsonl");
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&future).unwrap()),
+    )
+    .unwrap();
+    import_from_jsonl(&mut storage, &path, &ImportConfig::default(), Some("bd-")).unwrap();
+
+    let before_rename = storage.get_issue("bd-f").unwrap().expect("exists");
+    assert_eq!(
+        before_rename.updated_at, future.updated_at,
+        "import must carry the future timestamp verbatim -- that is the \
+         premise of the bug, not something this test is checking"
+    );
+
+    storage.rename_issue("bd-f", "bd-new", "tester").unwrap();
+
+    let moved = storage.get_issue("bd-new").unwrap().expect("exists");
+    assert!(
+        moved.updated_at > before_rename.updated_at,
+        "a rename must still move updated_at strictly forward even when the \
+         row's existing value is already ahead of the real clock; \
+         before = {:?}, after = {:?}",
+        before_rename.updated_at,
         moved.updated_at
     );
 }
