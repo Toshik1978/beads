@@ -17,6 +17,18 @@
 //! only fires when the ID is already flat) and falls through to complete the
 //! rename. Detaching the same ID any number of times converges to the same
 //! end state.
+//!
+//! `detach_one` checks `SqliteStorage::ensure_issue_mutable` before doing
+//! anything else, the same "not a tombstone" gate every other mutating
+//! command (`remove_dependency`, labels, comments, status) already goes
+//! through. Without it, a tombstoned dotted ID with no live parent dep and no
+//! `former_ids` redirect -- the shape `br info --projections` tells users to
+//! fix by running `br detach` -- would mint a fresh ID, move the tombstone
+//! onto it, and plant a second tombstone at the dotted address, all while
+//! printing "Detached X -> Y" as if a live issue had moved. A
+//! rename-vacated ID is unaffected, since the resolver hands `detach_one` the
+//! live successor via `former_ids` rather than the tombstone; a parentless
+//! live issue still passes the check and reaches the no-op above.
 
 use crate::cli::DetachArgs;
 use crate::cli::commands::{
@@ -170,6 +182,23 @@ fn detach_one(
     issue_id: &str,
     actor: &str,
 ) -> Result<DetachOutcome> {
+    // Every other mutating command (`remove_dependency`, labels, comments,
+    // status) routes through `ensure_issue_mutable_in_tx` before touching a
+    // resolved issue; `detach` is the one that did not, and the reachable
+    // shape that exposes it is a tombstoned dotted ID with no parent dep and
+    // no `former_ids` redirect -- exactly the legacy divergent shape
+    // `br info --projections` tells users to fix by running `br detach`.
+    // Without this check that advice mints a fresh flat ID, moves the
+    // tombstone onto it, and plants a second tombstone at the dotted
+    // address, printing "Detached X -> Y" as though a live issue moved.
+    //
+    // A rename-vacated ID is unaffected: the resolver prefers its
+    // `former_ids` redirect over the tombstone left behind, so `issue_id`
+    // here already names the live successor. And an issue with no parent at
+    // all still resolves to itself and passes this check (`Some(_) => Ok`),
+    // so the no-op path below stays a safe, repeatable no-op.
+    storage.ensure_issue_mutable(issue_id, "detach")?;
+
     let parent = current_parent(storage, issue_id)?;
     let is_dotted = issue_id.contains('.');
 
@@ -354,5 +383,159 @@ mod tests {
             child_after.is_some_and(|issue| issue.status == Status::Tombstone),
             "child_id should have been renamed away by the first, successful iteration"
         );
+    }
+
+    /// The reachable shape `br info --projections` tells users to fix with
+    /// `br detach`: a dotted ID that is a tombstone in place, with no live
+    /// `parent-child` dep and no `former_ids` entry redirecting anywhere. The
+    /// resolver's tombstone fallback still resolves the literal string to
+    /// this dead row (there is nothing else for it to redirect to), so the
+    /// only thing standing between this and `detach_one` minting a fresh ID
+    /// and moving the tombstone onto it is the `ensure_issue_mutable` guard
+    /// added at the top of `detach_one`. This asserts that guard fires with
+    /// a clear, ID-naming error instead of a silent no-op or a bogus rename.
+    #[test]
+    fn execute_rejects_a_genuinely_tombstoned_dotted_id_with_no_redirect() {
+        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let ctx = OutputContext::from_flags(false, false, true);
+        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
+
+        let beads_dir = temp.path().join(".beads");
+        let db_path = beads_dir.join("beads.db");
+        let mut storage = SqliteStorage::open(&db_path).expect("storage");
+
+        let dotted_id = "bd-orphan.1";
+        storage
+            .create_issue(&make_issue(dotted_id, "Orphaned dotted issue"), "tester")
+            .expect("create dotted issue");
+        // Tombstone in place -- no rename, so no `former_ids` entry is ever
+        // written. This is the legacy divergent shape: dotted, dead, and
+        // with nothing for the resolver to redirect to but itself.
+        storage
+            .delete_issue(dotted_id, "tester", "test setup", None)
+            .expect("tombstone in place");
+        drop(storage);
+
+        let args = DetachArgs {
+            ids: vec![dotted_id.to_string()],
+        };
+        let overrides = CliOverrides {
+            db: Some(db_path.clone()),
+            ..CliOverrides::default()
+        };
+        let err = execute(&args, false, &overrides, &ctx).expect_err("tombstone must be rejected");
+        match &err {
+            BeadsError::Validation { field, reason } => {
+                assert_eq!(field, "issue_id");
+                assert!(
+                    reason.contains("tombstone") && reason.contains(dotted_id),
+                    "error should name the tombstone and the id, got: {reason}"
+                );
+            }
+            other => panic!("expected Validation error naming the tombstone, got: {other:?}"),
+        }
+
+        // Nothing moved: still a tombstone at the same dotted address, no
+        // fresh ID minted anywhere.
+        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
+        let issue = storage
+            .get_issue(dotted_id)
+            .unwrap()
+            .expect("dotted id still names the tombstone");
+        assert_eq!(issue.status, Status::Tombstone);
+    }
+
+    /// The other half of the guard: a rename-vacated ID must keep working.
+    /// After a first `detach` renames a dotted child to a flat ID, the old
+    /// dotted address becomes exactly the shape the previous test rejects --
+    /// a tombstone in place -- except this one *does* carry a `former_ids`
+    /// entry pointing at the live successor. The resolver prefers that
+    /// redirect over the raw tombstone hit, so `ensure_issue_mutable` sees
+    /// the live issue, not the tombstone, and a second `br detach` on the
+    /// old id must still succeed.
+    #[test]
+    fn execute_still_detaches_a_rename_vacated_id_through_its_redirect() {
+        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let ctx = OutputContext::from_flags(false, false, true);
+        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
+
+        let beads_dir = temp.path().join(".beads");
+        let db_path = beads_dir.join("beads.db");
+        let mut storage = SqliteStorage::open(&db_path).expect("storage");
+
+        let epic_id = "bd-epic3";
+        let child_id = "bd-epic3.1";
+        storage
+            .create_issue(&make_issue(epic_id, "Epic"), "tester")
+            .expect("create epic");
+        storage
+            .create_issue(&make_issue(child_id, "Child"), "tester")
+            .expect("create child");
+        storage
+            .add_dependency(child_id, epic_id, "parent-child", "tester")
+            .expect("child -> epic dep");
+        drop(storage);
+
+        let overrides = CliOverrides {
+            db: Some(db_path.clone()),
+            ..CliOverrides::default()
+        };
+
+        // First detach: dotted with a live parent -> renamed to a flat id,
+        // leaving a `former_ids` redirect at `child_id`.
+        let args = DetachArgs {
+            ids: vec![child_id.to_string()],
+        };
+        execute(&args, false, &overrides, &ctx).expect("first detach renames the child");
+
+        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
+        let tombstone = storage
+            .get_issue(child_id)
+            .unwrap()
+            .expect("old dotted id still names a row");
+        assert_eq!(
+            tombstone.status,
+            Status::Tombstone,
+            "the vacated dotted id is a tombstone, same shape as a dead-end orphan"
+        );
+        let new_id = storage
+            .find_id_by_former_id(child_id)
+            .unwrap()
+            .expect("former_ids must redirect the old dotted id to the live successor");
+        let successor = storage
+            .get_issue(&new_id)
+            .unwrap()
+            .expect("the live successor exists");
+        assert_ne!(
+            successor.status,
+            Status::Tombstone,
+            "the redirect target must be the live issue, not another tombstone"
+        );
+        drop(storage);
+
+        // Second detach, on the same now-vacated dotted id: the resolver
+        // must follow `former_ids` to the live flat successor rather than
+        // stopping at the tombstone, so this must succeed -- not the
+        // Validation error the previous test asserts for a genuine dead end.
+        let args = DetachArgs {
+            ids: vec![child_id.to_string()],
+        };
+        execute(&args, false, &overrides, &ctx)
+            .expect("detach on a rename-vacated id must resolve through its redirect and succeed");
+
+        // The live successor already has no parent, so the second detach
+        // converges on the no-op: it is still live and unrenamed.
+        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
+        let successor_after = storage
+            .get_issue(&new_id)
+            .unwrap()
+            .expect("the live successor is untouched by the no-op");
+        assert_ne!(successor_after.status, Status::Tombstone);
     }
 }

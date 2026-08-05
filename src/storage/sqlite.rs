@@ -7058,6 +7058,22 @@ impl SqliteStorage {
         }
     }
 
+    /// Public entry point to the same "not a tombstone, and exists" check
+    /// [`Self::ensure_issue_mutable_in_tx`] gives every in-transaction mutator
+    /// (`remove_dependency`, labels, comments, status). Callers that mutate an
+    /// issue across more than one `mutate()` transaction -- `detach`, notably,
+    /// which resolves and renames outside any single transaction -- cannot
+    /// reach the private, `&Connection`-scoped helper directly, so this thin
+    /// wrapper opens it on `self.conn` instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `Validation` error if `issue_id` resolves to a tombstone, or
+    /// `IssueNotFound` if it does not resolve to any row at all.
+    pub fn ensure_issue_mutable(&self, issue_id: &str, action: &str) -> Result<()> {
+        Self::ensure_issue_mutable_in_tx(&self.conn, issue_id, action)
+    }
+
     fn ensure_dependency_target_exists_in_tx(conn: &Connection, depends_on_id: &str) -> Result<()> {
         if depends_on_id.starts_with("external:") {
             return Ok(());

@@ -321,11 +321,14 @@ fn e2e_reparenting_carries_the_grandchildren() {
     let new_child_id = json[0]["id"].as_str().expect("id in payload").to_string();
 
     // `rename_issue` cascades through the whole subtree: the grandchild's
-    // row is rewritten in place to `<new_child_id><suffix>` rather than
-    // resolved via `former_ids` (that fallback only redirects the directly
-    // renamed issue, not every descendant carried along with it -- see
-    // `detach.rs`'s equivalent test). So the grandchild moved with its
-    // parent, but it must now be looked up under its new, spliced id.
+    // row is rewritten in place to `<new_child_id><suffix>`. Since
+    // bds-a23.10, every descendant the cascade carries also gains its own
+    // `former_ids` entry, so the old `grandchild_id` would resolve through
+    // that redirect too -- but this test looks the grandchild up under its
+    // new, spliced id specifically to assert it was physically moved there,
+    // not merely reachable via a resolver hop. See `detach.rs`'s
+    // `execute_marks_the_blocked_cache_stale_when_a_later_id_in_the_batch_fails`
+    // test for that per-descendant redirect in action.
     let new_grandchild_id = format!("{new_child_id}{grandchild_suffix}");
     let shown = run_br(&workspace, ["show", &new_grandchild_id], "show_grandchild");
     assert!(
