@@ -789,3 +789,66 @@ fn a_descendant_carrying_an_external_ref_can_be_renamed() {
         "the tombstone must not hold the reference"
     );
 }
+
+/// bds-a23.10 fix round 1: `descendant_ids` has no status filter, so a
+/// subtree already containing a tombstone (left behind by an earlier direct
+/// rename of one of its members) gets that tombstone carried along by every
+/// later ancestor rename too. `record_rename_provenance` must not run again
+/// for a descendant that is already a tombstone -- doing so mints a second,
+/// semantically empty tombstone every hop, and the row count compounds
+/// instead of growing by a fixed amount per rename.
+#[test]
+fn repeated_ancestor_renames_do_not_compound_an_already_tombstoned_descendant() {
+    let mut storage = test_db();
+    create_at(&mut storage, "bd-p");
+    create_at(&mut storage, "bd-p.1");
+
+    // A direct rename of the child leaves exactly one tombstone behind, at
+    // bd-p.1, alongside the live row now at bd-p.5.
+    storage.rename_issue("bd-p.1", "bd-p.5", "tester").unwrap();
+    let after_direct_rename = storage.get_all_issues_metadata().unwrap().len();
+
+    // Ancestor rename #1: bd-p's subtree carries both the live bd-p.5 and
+    // the already-dead bd-p.1 tombstone.
+    storage.rename_issue("bd-p", "bd-q", "tester").unwrap();
+    let after_first_ancestor_rename = storage.get_all_issues_metadata().unwrap().len();
+
+    // Ancestor rename #2: the same shape, one hop further out. If the
+    // already-tombstoned descendant were being re-tombstoned each time, this
+    // hop's growth would be larger than the first hop's, not equal to it.
+    storage.rename_issue("bd-q", "bd-r", "tester").unwrap();
+    let after_second_ancestor_rename = storage.get_all_issues_metadata().unwrap().len();
+
+    let first_hop_growth = after_first_ancestor_rename - after_direct_rename;
+    let second_hop_growth = after_second_ancestor_rename - after_first_ancestor_rename;
+
+    // Fixed shape: each ancestor rename mints exactly one tombstone for the
+    // top-level node and one for the live descendant (bd-p.5); the already-
+    // tombstoned descendant (bd-p.1, carried along) contributes zero new
+    // rows per hop, no matter how many further ancestor renames it rides.
+    assert_eq!(
+        first_hop_growth, 2,
+        "an ancestor rename over a subtree with one live and one already- \
+         tombstoned descendant must add exactly 2 rows (one tombstone for \
+         the renamed ancestor, one for the live descendant) -- got {first_hop_growth}"
+    );
+    assert_eq!(
+        second_hop_growth, first_hop_growth,
+        "growth per ancestor rename must stay constant, not compound -- \
+         hop 1 added {first_hop_growth} rows, hop 2 added {second_hop_growth}; \
+         a growing delta means the already-tombstoned descendant is being \
+         re-tombstoned on every further ancestor rename"
+    );
+
+    // The already-tombstoned descendant's lineage still resolves, moved but
+    // never duplicated: it occupies exactly one row, now at bd-r.1.
+    let carried_tombstone = storage
+        .get_issue("bd-r.1")
+        .unwrap()
+        .expect("the pre-existing tombstone must have moved with the subtree");
+    assert_eq!(carried_tombstone.status, Status::Tombstone);
+    assert!(
+        storage.get_issue("bd-q.1").unwrap().is_none(),
+        "the tombstone must have moved on, not been left behind a second time"
+    );
+}

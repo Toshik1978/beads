@@ -7135,6 +7135,20 @@ impl SqliteStorage {
     /// already performs a full scan for abbreviation matching — so this costs
     /// nothing on the hot path of a fully spelled current ID.
     ///
+    /// The `i.status != 'tombstone'` filter is **load-bearing**, not merely
+    /// tidy. `rename_issue_in_tx` deliberately skips recording a fresh
+    /// `former_ids` entry when a descendant caught up in an ancestor rename
+    /// is already a tombstone (bds-a23.10, fix round 1) — re-tombstoning an
+    /// already-dead row would double the dead-row count on every further
+    /// ancestor rename. Before that fix existed, the same code path *did*
+    /// append to an already-tombstoned row's `former_ids`, so a tombstone and
+    /// the live descendant it originally belonged to could both end up
+    /// listing the same former id — a real live issue and its own discarded
+    /// tombstone claiming the same history. A clone that synced before the
+    /// fix shipped can still hold JSONL rows with that shape. This filter is
+    /// what makes resolution land on the live row instead of whichever one
+    /// `json_each` happens to visit first.
+    ///
     /// # Errors
     ///
     /// Returns an error if the database query fails.
@@ -7580,8 +7594,28 @@ impl SqliteStorage {
             Self::rewrite_issue_id(conn, descendant, &new_descendant_id)?;
             ctx.mark_dirty(&new_descendant_id);
 
-            Self::record_rename_provenance(conn, &pre_move, descendant, &new_descendant_id, actor)?;
-            ctx.mark_dirty(descendant);
+            // `descendant_ids` has no status filter, so a subtree that
+            // already contains a tombstone from an earlier rename carries
+            // that tombstone along too -- it still has to vacate the ID
+            // namespace like any other row. But it must not be re-tombstoned:
+            // the provenance ruling covers a node that was *live* at the
+            // vacated ID, propagating its disappearance through JSONL. A
+            // tombstone is already the propagated disappearance; minting a
+            // second tombstone whose `delete_reason` points at the first
+            // tombstone's new address announces nothing new, and doing this
+            // on every ancestor rename doubles the dead-row count each time
+            // (bd-p.1 tombstoned once, then carried through k more ancestor
+            // renames, would otherwise leave 2^k rows instead of 1).
+            if pre_move.status != Status::Tombstone {
+                Self::record_rename_provenance(
+                    conn,
+                    &pre_move,
+                    descendant,
+                    &new_descendant_id,
+                    actor,
+                )?;
+                ctx.mark_dirty(descendant);
+            }
         }
 
         Self::rewrite_issue_id(conn, old_id, new_id)?;
