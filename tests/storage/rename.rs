@@ -599,26 +599,20 @@ fn merging_a_former_ids_only_change_over_an_existing_row_propagates_it() {
     );
 }
 
-/// bds-a23.6 fix round 1 review, Finding 1: widening `sync_equals` alone
-/// made things *worse* for a `former_ids`-only delta at equal `updated_at`.
-/// `import_from_jsonl`'s `determine_action` never calls `sync_equals` — it
-/// gates purely on `updated_at` and, on a tie, Skips. Pre-fix, the stale
-/// `Skip`ped row was wrongly *certified* as matching (since `sync_equals`
-/// ignored `former_ids`), so nothing flagged the database as diverged.
-/// Post-round-1, `sync_equals` correctly said "different", which flipped
-/// the certification to "diverged" and set `needs_flush = true` — but the
-/// row was still never updated (still `Skip`ped), so the next flush would
-/// export the *stale local* copy over the JSONL, erasing the incoming
-/// former ID repo-wide instead of merely missing it locally.
-///
-/// Finding 2's fix — `record_rename_provenance` now bumps `updated_at`
-/// alongside `former_ids` — closes this at the root: a real rename can no
-/// longer produce the equal-timestamp tie that sent this down the `Skip`
-/// path in the first place. This test proves that closure directly: an
-/// incoming record whose only content delta is a new `former_ids` entry,
-/// with `updated_at` bumped the way a real rename now bumps it, lands as
-/// an `Update` — not a `Skip` — so there is no stale row left for a later
-/// flush to export back over the JSONL.
+/// Mechanics-level check of `import_from_jsonl`'s existing last-write-wins
+/// behaviour: a record with a strictly later `updated_at` is applied as an
+/// `Update`, not a `Skip`, and an applied `Update` never leaves `needs_flush`
+/// set. **This does not exercise `record_rename_provenance`'s fix and is
+/// not discriminating for it** — `incoming.updated_at` is hand-set to
+/// `existing.updated_at + 1s` rather than produced by a real
+/// `rename_issue` call, so this test passes identically whether or not that
+/// function bumps `updated_at`. (An earlier version of this comment claimed
+/// otherwise; that claim was wrong — see
+/// `rename_export_import_over_an_existing_row_propagates_former_ids` below
+/// for the test that actually calls `rename_issue` and is confirmed to fail
+/// without the fix.) Kept because the last-write-wins assertion is still
+/// worth pinning on its own: it is the mechanism the real fix relies on to
+/// take effect once `updated_at` is genuinely bumped.
 #[test]
 fn import_of_a_bumped_former_ids_change_updates_the_row_instead_of_skipping() {
     let mut storage = test_db();
@@ -672,6 +666,65 @@ fn import_of_a_bumped_former_ids_change_updates_the_row_instead_of_skipping() {
          now-current (and already-correct) row, but the metadata flag \
          existing at all here would indicate the import still thinks \
          something is unresolved"
+    );
+}
+
+/// The actual end-to-end composition Finding 1 described, driven by a real
+/// `rename_issue` call and a real `export_to_jsonl` -- not a hand-crafted
+/// `updated_at`. Confirmed (by reverting the `record_rename_provenance`
+/// timestamp bump and re-running this test) to fail before the fix and pass
+/// after it; see the fix report for the observed pre-fix output.
+///
+/// A single real rename cannot, by itself, produce an existing target row
+/// that collides on *id* with the renamed issue's new id -- the id and
+/// `former_ids` change together in the same write, so nothing in this
+/// repository ever holds a live row at the post-rename id with pre-rename
+/// content. The target side of this test is therefore constructed directly
+/// rather than produced by a second real rename: it stands in for a clone
+/// that already knows the issue by its new id (e.g. from an earlier,
+/// differently-shaped sync) but has not yet caught up on this rename's
+/// `former_ids` entry -- the exact "existing row, former_ids-only delta"
+/// shape `sync_equals` and the `updated_at` bump both exist to get right.
+#[test]
+fn rename_export_import_over_an_existing_row_propagates_former_ids() {
+    // Source clone: a real rename_issue call, then a real export_to_jsonl.
+    // Nothing about the incoming record's updated_at is hand-set.
+    let mut source = test_db();
+    let mut issue = fixtures::issue("bd-f");
+    issue.id = "bd-f".to_string();
+    source.create_issue(&issue, "tester").unwrap();
+    let pre_rename = source.get_issue("bd-f").unwrap().expect("exists");
+
+    source.rename_issue("bd-f", "bd-new", "tester").unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("issues.jsonl");
+    export_to_jsonl(&source, &path, &ExportConfig::default()).unwrap();
+
+    // Target clone: already has a live row at "bd-new" holding the
+    // pre-rename content (same fields as pre_rename, just under the new
+    // id) -- the "existing row" this import must update in place, matched
+    // by id, not inserted.
+    let mut target = test_db();
+    let mut target_issue = pre_rename.clone();
+    target_issue.id = "bd-new".to_string();
+    target.create_issue(&target_issue, "tester").unwrap();
+
+    let result =
+        import_from_jsonl(&mut target, &path, &ImportConfig::default(), Some("bd-")).unwrap();
+
+    assert_eq!(
+        result.updated_count, 1,
+        "the matched existing row at bd-new must be updated, not skipped \
+         or inserted-around; got {result:?}"
+    );
+
+    let moved = target.get_issue("bd-new").unwrap().expect("exists");
+    assert_eq!(
+        moved.former_ids,
+        vec!["bd-f".to_string()],
+        "the former_ids entry a real rename recorded must survive import \
+         over an existing row holding the pre-rename state"
     );
 }
 
