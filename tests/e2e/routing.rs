@@ -3352,3 +3352,231 @@ fn describe_exit_distinguishes_a_signal_death_from_a_nonzero_exit() {
         "an ordinary non-zero exit must not be reported as a signal, got: {exited}"
     );
 }
+
+/// `br detach` on a dotted external issue, routed from the main workspace.
+///
+/// Mirrors `e2e_routing_reopen_external_issue_via_main_workspace`: detach was
+/// the one ID-taking mutating command that never called
+/// `group_issue_inputs_by_route` (bds-a23.7), so a routed dotted id used to
+/// fail resolution against the *local* db with a plain not-found error
+/// before ever reaching the external workspace. This exercises the fixed
+/// path end to end -- routing, the flat-id rename, and the `former_ids`
+/// redirect left behind -- against the real external db, not just the
+/// in-process unit tests in `detach.rs`.
+#[test]
+fn e2e_routing_detach_external_issue_via_main_workspace() {
+    let _log = common::test_log("e2e_routing_detach_external_issue_via_main_workspace");
+
+    let main_workspace = BrWorkspace::new();
+    let external_workspace = BrWorkspace::new();
+
+    init_workspace(&main_workspace, "init_detach_main");
+    init_workspace(&external_workspace, "init_detach_external");
+    configure_external_route(&main_workspace, &external_workspace);
+
+    let epic_id = create_issue_and_get_id(
+        &external_workspace,
+        "External detach epic",
+        "create_external_detach_epic",
+    );
+    let create_child = run_br(
+        &external_workspace,
+        [
+            "create",
+            "External detach child",
+            "--parent",
+            &epic_id,
+            "--json",
+        ],
+        "create_external_detach_child",
+    );
+    assert!(
+        create_child.status.success(),
+        "create child failed: {}",
+        create_child.stderr
+    );
+    let child: Value =
+        serde_json::from_str(&extract_json_payload(&create_child.stdout)).expect("child json");
+    let child_id = child["id"].as_str().expect("child id").to_string();
+    assert!(
+        child_id.contains('.'),
+        "expected a dotted child id, got {child_id}"
+    );
+
+    let routed_input = routed_partial_id(&external_workspace, &child_id);
+
+    let detach = run_br(
+        &main_workspace,
+        ["detach", &routed_input, "--json"],
+        "detach_external_via_route",
+    );
+    assert!(detach.status.success(), "detach failed: {}", detach.stderr);
+    let outcomes: Vec<Value> =
+        serde_json::from_str(&extract_json_payload(&detach.stdout)).expect("detach json");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0]["old_id"].as_str(), Some(child_id.as_str()));
+    assert_eq!(outcomes[0]["action"].as_str(), Some("renamed"));
+    let new_id = outcomes[0]["new_id"]
+        .as_str()
+        .expect("new id present")
+        .to_string();
+    assert!(
+        !new_id.contains('.'),
+        "detaching a dotted child must mint a flat id, got {new_id}"
+    );
+
+    // The old dotted address is a tombstone with a `former_ids` redirect, so
+    // `show` on the literal old id follows the resolver's redirect to the
+    // live successor -- proving the rename actually landed in the external
+    // db, not just in this process's in-memory outcome list.
+    let shown = show_issue_json(
+        &external_workspace,
+        &child_id,
+        "show_external_after_routed_detach",
+    );
+    assert_eq!(shown[0]["id"].as_str(), Some(new_id.as_str()));
+    assert_eq!(shown[0]["status"].as_str(), Some("open"));
+}
+
+/// A later workspace's failed detach must not undo an earlier workspace's
+/// already-committed one.
+///
+/// `close`/`reopen` establish the answer this repo uses for a routed batch
+/// that spans two workspaces: each workspace's `execute_route` resolves,
+/// mutates, and fully flushes (JSONL debt + blocked cache) before the next
+/// workspace is even opened, so a later workspace's failure has nothing to
+/// roll back in an earlier one -- there is no cross-database transaction
+/// spanning them to roll back into in the first place. `update`/`label`
+/// instead validate every route before mutating any of them, but that shape
+/// does not fit detach: the failure this test recreates (a target that
+/// resolves to a tombstone) can only be discovered while mutating that
+/// specific workspace, not during an up-front cross-workspace validation
+/// pass, so detach follows `close`/`reopen` instead. The single-workspace
+/// version of this property is pinned by
+/// `detach::tests::execute_marks_the_blocked_cache_stale_when_a_later_id_in_the_batch_fails`;
+/// this is the same property across a workspace boundary.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_routing_detach_failure_in_second_workspace_preserves_earlier_committed_workspace() {
+    let _log = common::test_log(
+        "e2e_routing_detach_failure_in_second_workspace_preserves_earlier_committed_workspace",
+    );
+
+    let main_workspace = BrWorkspace::new();
+    let external_workspace = BrWorkspace::new();
+
+    init_workspace(&main_workspace, "init_detach_failure_main");
+    init_workspace(&external_workspace, "init_detach_failure_external");
+    configure_external_route(&main_workspace, &external_workspace);
+
+    // Local batch: an ordinary dotted child of a local epic. Its route is
+    // processed first (first-seen batch order), and detaching it is a real,
+    // committable rename.
+    let local_epic_id = create_issue_and_get_id(
+        &main_workspace,
+        "Local detach epic",
+        "create_local_detach_epic",
+    );
+    let create_local_child = run_br(
+        &main_workspace,
+        [
+            "create",
+            "Local detach child",
+            "--parent",
+            &local_epic_id,
+            "--json",
+        ],
+        "create_local_detach_child",
+    );
+    assert!(
+        create_local_child.status.success(),
+        "create local child failed: {}",
+        create_local_child.stderr
+    );
+    let local_child: Value =
+        serde_json::from_str(&extract_json_payload(&create_local_child.stdout))
+            .expect("local child json");
+    let local_child_id = local_child["id"]
+        .as_str()
+        .expect("local child id")
+        .to_string();
+
+    // External batch: a dotted issue tombstoned *in place* (no rename, so no
+    // `former_ids` redirect) -- the exact shape `detach_one`'s
+    // `ensure_issue_mutable` guard rejects before touching storage. Plain
+    // `br delete` (no --cascade rename involved) produces it directly.
+    let external_epic_id = create_issue_and_get_id(
+        &external_workspace,
+        "External failure epic",
+        "create_external_failure_epic",
+    );
+    let create_external_child = run_br(
+        &external_workspace,
+        [
+            "create",
+            "External failure child",
+            "--parent",
+            &external_epic_id,
+            "--json",
+        ],
+        "create_external_failure_child",
+    );
+    assert!(
+        create_external_child.status.success(),
+        "create external child failed: {}",
+        create_external_child.stderr
+    );
+    let external_child: Value =
+        serde_json::from_str(&extract_json_payload(&create_external_child.stdout))
+            .expect("external child json");
+    let external_child_id = external_child["id"]
+        .as_str()
+        .expect("external child id")
+        .to_string();
+
+    let delete_external_child = run_br(
+        &external_workspace,
+        ["delete", &external_child_id, "--force"],
+        "tombstone_external_child_in_place",
+    );
+    assert!(
+        delete_external_child.status.success(),
+        "tombstoning external child failed: {}",
+        delete_external_child.stderr
+    );
+
+    let routed_external_child = routed_partial_id(&external_workspace, &external_child_id);
+
+    let detach = run_br(
+        &main_workspace,
+        ["detach", &local_child_id, &routed_external_child, "--json"],
+        "detach_two_workspaces_second_fails",
+    );
+    assert!(
+        !detach.status.success(),
+        "expected the routed detach to fail on the tombstoned external target"
+    );
+
+    // The local batch is processed first and its rename is real: the local
+    // epic must show it as gone (renamed away), not still present as an open
+    // dotted child.
+    let local_epic_after = show_issue_json(
+        &main_workspace,
+        &local_epic_id,
+        "show_local_epic_after_failed_routed_detach",
+    );
+    let local_child_after = show_issue_json(
+        &main_workspace,
+        &local_child_id,
+        "show_local_child_after_failed_routed_detach",
+    );
+    assert_ne!(
+        local_child_after[0]["id"].as_str(),
+        Some(local_child_id.as_str()),
+        "the local child's committed rename must survive the later external failure"
+    );
+    assert!(
+        local_epic_after[0]["status"].as_str().is_some(),
+        "local epic must still be readable"
+    );
+}

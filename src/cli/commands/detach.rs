@@ -33,7 +33,8 @@
 use crate::cli::DetachArgs;
 use crate::cli::commands::{
     acquire_routed_workspace_write_lock, auto_import_storage_ctx_if_stale,
-    finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error, resolve_issue_ids,
+    finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error,
+    report_auto_flush_failure, resolve_issue_ids,
 };
 use crate::config;
 use crate::error::{BeadsError, Result};
@@ -43,6 +44,8 @@ use crate::output::OutputContext;
 use crate::storage::SqliteStorage;
 use crate::util::id::{IdGenerator, IdResolver, ResolverConfig};
 use serde::Serialize;
+use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 
 /// What happened to one requested ID.
 #[derive(Debug, Clone, Serialize)]
@@ -74,14 +77,108 @@ pub fn execute(
     }
 
     let beads_dir = config::discover_beads_dir_with_cli(cli)?;
+    let routed_batches = config::routing::group_issue_inputs_by_route(&args.ids, &beads_dir)?;
 
-    // Detach never routes to an external workspace today: every ID it acts on
-    // is resolved against the local DB. `acquire_routed_workspace_write_lock`
-    // with `is_external = false` is a cheap no-op that keeps this command's
-    // shape consistent with the other ID-taking mutating commands.
+    // Detach follows the same routing shape as `reopen`/`close`/`update`: each
+    // route is opened, mutated and fully flushed (JSONL debt + blocked cache)
+    // before the next route is even opened. A failure in a later route's
+    // `execute_route` therefore propagates via `?` without touching what an
+    // earlier, already-finalized route committed -- there is nothing left to
+    // roll back there, and nothing else in this repo's routed commands rolls
+    // an earlier workspace back either. See `execute_route` for the mid-batch
+    // (single-workspace) staleness handling this relies on per route.
+    let outcomes = if routed_batches.iter().any(|batch| batch.is_external) {
+        let normalized_local_beads_dir =
+            dunce::canonicalize(&beads_dir).unwrap_or_else(|_| beads_dir.clone());
+        let mut routed_outcomes = Vec::new();
+
+        for batch in routed_batches {
+            let mut batch_args = args.clone();
+            batch_args.ids.clone_from(&batch.issue_inputs);
+
+            let normalized_batch_beads_dir =
+                dunce::canonicalize(&batch.beads_dir).unwrap_or_else(|_| batch.beads_dir.clone());
+            let mut batch_cli = cli.clone();
+            batch_cli.db = if normalized_batch_beads_dir == normalized_local_beads_dir {
+                cli.db.clone()
+            } else {
+                None
+            };
+
+            let batch_outcomes = execute_route(
+                &batch_args,
+                &batch_cli,
+                ctx,
+                &batch.beads_dir,
+                batch.is_external,
+            )?;
+            routed_outcomes.push((batch.issue_inputs.clone(), batch_outcomes));
+        }
+
+        reorder_routed_items_by_requested_inputs(&args.ids, routed_outcomes, "detach routing")?
+    } else {
+        execute_route(args, cli, ctx, &beads_dir, false)?
+    };
+
+    if let Some(last) = outcomes.last() {
+        crate::util::set_last_touched_id(&beads_dir, &last.old_id);
+    }
+
+    if use_structured_output {
+        if ctx.is_json() {
+            ctx.json_pretty(&outcomes);
+        } else {
+            let json_ctx = OutputContext::from_flags(true, false, true);
+            json_ctx.json_pretty(&outcomes);
+        }
+    } else {
+        for outcome in &outcomes {
+            let old_id = sanitize_terminal_inline(&outcome.old_id);
+            match (outcome.action.as_str(), outcome.new_id.as_deref()) {
+                ("renamed", Some(new_id)) => {
+                    let new_id = sanitize_terminal_inline(new_id);
+                    ctx.success(&format!("Detached {old_id} -> {new_id}"));
+                }
+                ("dep_removed", _) => {
+                    ctx.success(&format!("Detached {old_id} (parent link removed)"));
+                }
+                _ => {
+                    ctx.print_line(&format!("  {old_id} has no parent -- nothing to detach"));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Detach every resolved ID against a single, already-routed workspace.
+///
+/// Mirrors `reopen`/`close`'s `execute_route`: open storage for `beads_dir`,
+/// resolve `args.ids` against it, and mutate each one in a plain sequential
+/// loop. A later ID can fail after an earlier one in the same route already
+/// committed (a descendant renamed out from under it -- see the module
+/// test), so the same three things `execute` used to do inline before
+/// routing existed still have to happen here, per route, not just once
+/// globally:
+///
+/// 1. `preserve_blocked_cache_on_error` marks the blocked cache stale on
+///    error instead of leaving it silently wrong.
+/// 2. `flush_no_db_if_dirty` runs on the error path too, so no-db JSONL debt
+///    from the earlier, committed IDs in this route is not lost.
+/// 3. `detach_one`'s tombstone guard (`ensure_issue_mutable`) is untouched --
+///    routing only changes which storage is opened, not what each ID goes
+///    through once it is resolved.
+fn execute_route(
+    args: &DetachArgs,
+    cli: &config::CliOverrides,
+    ctx: &OutputContext,
+    beads_dir: &Path,
+    auto_flush_external: bool,
+) -> Result<Vec<DetachOutcome>> {
     let _routed_write_lock =
-        acquire_routed_workspace_write_lock(&beads_dir, false, cli.lock_timeout)?;
-    let mut storage_ctx = config::open_storage_with_cli(&beads_dir, cli)?;
+        acquire_routed_workspace_write_lock(beads_dir, auto_flush_external, cli.lock_timeout)?;
+    let mut storage_ctx = config::open_storage_with_cli(beads_dir, cli)?;
     auto_import_storage_ctx_if_stale(&mut storage_ctx, cli)?;
 
     let config_layer = storage_ctx.load_config(cli)?;
@@ -129,37 +226,86 @@ pub fn execute(
 
     finalize_batched_blocked_cache_refresh(&mut storage_ctx.storage, cache_dirty, "detach")?;
     storage_ctx.flush_no_db_if_dirty()?;
-
-    if let Some(last) = outcomes.last() {
-        crate::util::set_last_touched_id(&beads_dir, &last.old_id);
+    if auto_flush_external && let Err(error) = storage_ctx.auto_flush_if_enabled() {
+        report_auto_flush_failure(
+            ctx,
+            &storage_ctx.paths.beads_dir,
+            &storage_ctx.paths.jsonl_path,
+            &error,
+        );
     }
 
-    if use_structured_output {
-        if ctx.is_json() {
-            ctx.json_pretty(&outcomes);
-        } else {
-            let json_ctx = OutputContext::from_flags(true, false, true);
-            json_ctx.json_pretty(&outcomes);
+    Ok(outcomes)
+}
+
+/// Restore the order of routed results to match `requested_inputs`.
+///
+/// Each route processes its own subset of the requested IDs, so a
+/// two-workspace batch comes back as two separate `(inputs, outcomes)` lists
+/// that must be interleaved back into the order the caller asked for --
+/// otherwise `Detached A -> A'` / `Detached B -> B'` output could print in
+/// the wrong order relative to the command line, and `set_last_touched_id`
+/// would record the wrong "last" issue. Identical to the same-named helper in
+/// `reopen.rs`/`close.rs`/`update.rs`/`label.rs`; duplicated per file rather
+/// than shared, matching this repo's existing convention for that helper.
+fn reorder_routed_items_by_requested_inputs<T>(
+    requested_inputs: &[String],
+    routed_items: Vec<(Vec<String>, Vec<T>)>,
+    context: &str,
+) -> Result<Vec<T>> {
+    fn issue_input_text(input: &str) -> String {
+        sanitize_terminal_inline(input).into_owned()
+    }
+
+    let mut positions_by_input: HashMap<&str, VecDeque<usize>> = HashMap::new();
+    for (index, input) in requested_inputs.iter().enumerate() {
+        positions_by_input
+            .entry(input.as_str())
+            .or_default()
+            .push_back(index);
+    }
+
+    let mut ordered_items: Vec<Option<T>> = (0..requested_inputs.len()).map(|_| None).collect();
+    for (batch_inputs, batch_items) in routed_items {
+        if batch_inputs.len() != batch_items.len() {
+            return Err(BeadsError::internal(format!(
+                "{context} produced mismatched issue/result counts"
+            )));
         }
-    } else {
-        for outcome in &outcomes {
-            let old_id = sanitize_terminal_inline(&outcome.old_id);
-            match (outcome.action.as_str(), outcome.new_id.as_deref()) {
-                ("renamed", Some(new_id)) => {
-                    let new_id = sanitize_terminal_inline(new_id);
-                    ctx.success(&format!("Detached {old_id} -> {new_id}"));
-                }
-                ("dep_removed", _) => {
-                    ctx.success(&format!("Detached {old_id} (parent link removed)"));
-                }
-                _ => {
-                    ctx.print_line(&format!("  {old_id} has no parent -- nothing to detach"));
-                }
-            }
+
+        for (input, item) in batch_inputs.into_iter().zip(batch_items) {
+            let Some(index) = positions_by_input
+                .get_mut(input.as_str())
+                .and_then(VecDeque::pop_front)
+            else {
+                let input = issue_input_text(&input);
+                return Err(BeadsError::internal(format!(
+                    "{context} returned unexpected issue input {input}"
+                )));
+            };
+            let Some(slot) = ordered_items.get_mut(index) else {
+                let input = issue_input_text(&input);
+                return Err(BeadsError::internal(format!(
+                    "{context} returned out-of-range issue input {input}"
+                )));
+            };
+            *slot = Some(item);
         }
     }
 
-    Ok(())
+    ordered_items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            item.ok_or_else(|| {
+                let input = requested_inputs
+                    .get(index)
+                    .map(|input| issue_input_text(input))
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                BeadsError::internal(format!("{context} did not produce a result for {input}"))
+            })
+        })
+        .collect()
 }
 
 /// Find the immediate `parent-child` parent of `issue_id`, if any.
