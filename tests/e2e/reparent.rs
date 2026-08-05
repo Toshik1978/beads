@@ -940,3 +940,87 @@ fn e2e_dep_import_renumbers_parent_child_rows() {
         "dep import must renumber the child under its new parent; got {new_id}"
     );
 }
+
+#[test]
+fn e2e_dep_import_resolves_a_parent_renamed_earlier_in_the_same_file() {
+    let _log =
+        common::test_log("e2e_dep_import_resolves_a_parent_renamed_earlier_in_the_same_file");
+    let workspace = BrWorkspace::new();
+
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+
+    let epic = run_br(
+        &workspace,
+        ["create", "Epic", "--type", "epic"],
+        "create_epic",
+    );
+    assert!(epic.status.success());
+    let epic_id = parse_created_id(&epic.stdout);
+
+    let a = run_br(&workspace, ["create", "A", "--type", "task"], "create_a");
+    assert!(a.status.success());
+    let a_id = parse_created_id(&a.stdout);
+
+    let b = run_br(&workspace, ["create", "B", "--type", "task"], "create_b");
+    assert!(b.status.success());
+    let b_id = parse_created_id(&b.stdout);
+
+    // Row 1 renumbers A under the epic, leaving a rename tombstone at the
+    // old `a_id`. Row 2 names that now-stale `a_id` as *its own* parent --
+    // not just the child side of the batch getting renamed, the target side
+    // does too. `depends_on_id` must be re-resolved through the same
+    // `former_ids` fallback as `issue_id`, or row 2 hits
+    // `ensure_dependency_target_exists_in_tx` on a tombstone and aborts the
+    // batch after row 1 already committed.
+    let import_path = workspace.root.join("chained_parent_child.jsonl");
+    fs::write(
+        &import_path,
+        format!(
+            "{{\"issue_id\":\"{a_id}\",\"depends_on_id\":\"{epic_id}\",\"type\":\"parent-child\"}}\n\
+             {{\"issue_id\":\"{b_id}\",\"depends_on_id\":\"{a_id}\",\"type\":\"parent-child\"}}\n"
+        ),
+    )
+    .expect("write chained parent-child dependency import jsonl");
+
+    let import_arg = import_path.to_string_lossy().to_string();
+    let import = run_br(
+        &workspace,
+        ["dep", "import", import_arg.as_str(), "--json"],
+        "dep_import_chained_parent_child",
+    );
+    assert!(
+        import.status.success(),
+        "dep import must not abort mid-batch when a later row's parent was \
+         renamed by an earlier row: {}",
+        import.stderr
+    );
+
+    let import_result: Value =
+        serde_json::from_str(&extract_json_payload(&import.stdout)).expect("parse dep import json");
+    assert_eq!(
+        import_result["imported"].as_u64(),
+        Some(2),
+        "both rows must count as imported; got: {import_result}"
+    );
+
+    let show_a = run_br(&workspace, ["show", &a_id, "--json"], "show_a_after_import");
+    assert!(show_a.status.success(), "show a failed: {}", show_a.stderr);
+    let a_payload: Vec<Value> =
+        serde_json::from_str(&extract_json_payload(&show_a.stdout)).expect("parse show a json");
+    let new_a_id = a_payload[0]["id"].as_str().expect("id in show a payload");
+    assert!(
+        new_a_id.starts_with(&format!("{epic_id}.")),
+        "row 1 must renumber A under the epic; got {new_a_id}"
+    );
+
+    let show_b = run_br(&workspace, ["show", &b_id, "--json"], "show_b_after_import");
+    assert!(show_b.status.success(), "show b failed: {}", show_b.stderr);
+    let b_payload: Vec<Value> =
+        serde_json::from_str(&extract_json_payload(&show_b.stdout)).expect("parse show b json");
+    let new_b_id = b_payload[0]["id"].as_str().expect("id in show b payload");
+    assert!(
+        new_b_id.starts_with(&format!("{new_a_id}.")),
+        "row 2 must renumber B under A's *post-rename* id, resolved via \
+         former_ids; got {new_b_id} (A is now {new_a_id})"
+    );
+}

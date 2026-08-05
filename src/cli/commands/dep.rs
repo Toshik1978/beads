@@ -797,6 +797,25 @@ fn dep_add_parent_child(
     Ok(())
 }
 
+/// A mid-batch `dep import` error can follow one or more `attach_to_parent`
+/// calls that already committed. Any no-db JSONL debt those calls left
+/// behind must still be flushed before the error propagates, the same
+/// window `detach` guards (`detach.rs:88-114`) -- returns the *original*
+/// error so a flush failure never masks it, only warns alongside it.
+fn flush_after_partial_dep_import(
+    storage_ctx: &mut config::OpenStorageResult,
+    err: BeadsError,
+) -> BeadsError {
+    if let Err(flush_err) = storage_ctx.flush_no_db_if_dirty() {
+        tracing::warn!(
+            error = %flush_err,
+            original_error = %err,
+            "failed to flush no-db JSONL after a mid-batch dep import error"
+        );
+    }
+    err
+}
+
 #[allow(clippy::too_many_lines)]
 fn dep_import(
     args: &DepImportArgs,
@@ -847,26 +866,43 @@ fn dep_import(
 
     for row in &parent_child_rows {
         // A rename caused by an earlier row in this same loop is only
-        // visible through the `former_ids` fallback, so re-resolve
-        // `issue_id` immediately before applying this row rather than
-        // trusting the id as parsed from the file.
-        let resolved = resolve_issue_id(&storage_ctx.storage, resolver, &row.issue_id);
+        // visible through the `former_ids` fallback, so re-resolve *both*
+        // ends of the edge immediately before applying this row rather than
+        // trusting the ids as parsed from the file. It is not just the
+        // child side: an earlier row can just as easily have renamed the
+        // issue a later row names as `depends_on_id` (its parent), and
+        // `attach_to_parent` -> `ensure_dependency_target_exists_in_tx`
+        // rejects a target that resolves to the rename tombstone left
+        // behind at the old id.
+        let resolved_issue = resolve_issue_id(&storage_ctx.storage, resolver, &row.issue_id);
         let issue_id = match preserve_blocked_cache_on_error(
             &mut storage_ctx.storage,
             cache_dirty,
             "dep import",
-            resolved,
+            resolved_issue,
         ) {
             Ok(id) => id,
-            Err(err) => {
-                if let Err(flush_err) = storage_ctx.flush_no_db_if_dirty() {
-                    tracing::warn!(
-                        error = %flush_err,
-                        original_error = %err,
-                        "failed to flush no-db JSONL after a mid-batch dep import error"
-                    );
-                }
-                return Err(err);
+            Err(err) => return Err(flush_after_partial_dep_import(storage_ctx, err)),
+        };
+
+        // `external:` targets are not local issues and cannot be resolved
+        // (or renamed) -- the same carve-out `dep_remove` uses elsewhere in
+        // this file. `attach_to_parent` still refuses one as a parent via
+        // `validate_parent_child_endpoints`, so skipping resolution here
+        // does not skip that check.
+        let depends_on_id = if row.depends_on_id.starts_with("external:") {
+            row.depends_on_id.clone()
+        } else {
+            let resolved_parent =
+                resolve_issue_id(&storage_ctx.storage, resolver, &row.depends_on_id);
+            match preserve_blocked_cache_on_error(
+                &mut storage_ctx.storage,
+                cache_dirty,
+                "dep import",
+                resolved_parent,
+            ) {
+                Ok(id) => id,
+                Err(err) => return Err(flush_after_partial_dep_import(storage_ctx, err)),
             }
         };
 
@@ -876,12 +912,7 @@ fn dep_import(
             "dep import",
             Some(issue_id.as_str()),
             |storage| {
-                crate::cli::commands::attach_to_parent(
-                    storage,
-                    &issue_id,
-                    &row.depends_on_id,
-                    actor,
-                )
+                crate::cli::commands::attach_to_parent(storage, &issue_id, &depends_on_id, actor)
             },
         );
         let new_id = match preserve_blocked_cache_on_error(
@@ -891,16 +922,7 @@ fn dep_import(
             attach_result,
         ) {
             Ok(id) => id,
-            Err(err) => {
-                if let Err(flush_err) = storage_ctx.flush_no_db_if_dirty() {
-                    tracing::warn!(
-                        error = %flush_err,
-                        original_error = %err,
-                        "failed to flush no-db JSONL after a mid-batch dep import error"
-                    );
-                }
-                return Err(err);
-            }
+            Err(err) => return Err(flush_after_partial_dep_import(storage_ctx, err)),
         };
 
         if new_id != issue_id {
