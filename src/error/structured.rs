@@ -22,7 +22,6 @@ use crate::error::BeadsError;
 use crate::format::sanitize_terminal_text;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashSet;
 use std::sync::LazyLock;
 
 const PRIORITY_SHORT_HINT: &str = "Priority must be 0-4 (0=critical, 4=backlog).";
@@ -65,10 +64,6 @@ pub enum ErrorCode {
     // === Validation Errors (exit code 4) ===
     /// Field validation failed
     ValidationFailed,
-    /// Invalid status value
-    InvalidStatus,
-    /// Invalid issue type value
-    InvalidType,
     /// Priority out of range (0-4)
     InvalidPriority,
     /// Required field missing
@@ -152,8 +147,6 @@ impl ErrorCode {
             Self::InvalidId => "INVALID_ID",
             // Validation
             Self::ValidationFailed => "VALIDATION_FAILED",
-            Self::InvalidStatus => "INVALID_STATUS",
-            Self::InvalidType => "INVALID_TYPE",
             Self::InvalidPriority => "INVALID_PRIORITY",
             Self::RequiredField => "REQUIRED_FIELD",
             // Dependency
@@ -199,8 +192,6 @@ impl ErrorCode {
             self,
             Self::DatabaseLocked
                 | Self::ValidationFailed
-                | Self::InvalidStatus
-                | Self::InvalidType
                 | Self::InvalidPriority
                 | Self::RequiredField
                 | Self::AmbiguousId
@@ -240,8 +231,6 @@ impl ErrorCode {
             Self::ShuttingDown => 130,
             // Validation (4)
             Self::ValidationFailed
-            | Self::InvalidStatus
-            | Self::InvalidType
             | Self::InvalidPriority
             | Self::RequiredField
             | Self::PolicyViolation
@@ -499,30 +488,6 @@ impl StructuredError {
                         .collect::<Vec<_>>()
                 })),
             ),
-            BeadsError::InvalidStatus { status } => {
-                let hint = detect_status_intent(status)
-                    .map(|detected| flag_value_hint("status", detected));
-
-                (
-                    ErrorCode::InvalidStatus,
-                    Some(serde_json::json!({
-                        "status": status,
-                        "hint": hint
-                    })),
-                )
-            }
-            BeadsError::InvalidType { issue_type } => {
-                let hint = detect_type_intent(issue_type)
-                    .map(|detected| flag_value_hint("type", detected));
-
-                (
-                    ErrorCode::InvalidType,
-                    Some(serde_json::json!({
-                        "issue_type": issue_type,
-                        "hint": hint
-                    })),
-                )
-            }
             BeadsError::InvalidPriority { priority } => {
                 let hint = Some(detect_priority_intent(priority).map_or_else(
                     || PRIORITY_SHORT_HINT.to_string(),
@@ -670,12 +635,6 @@ impl StructuredError {
             // an arm that always answers cannot be overridden by anything.
             BeadsError::InvalidPriority { priority } => detect_priority_intent(priority)
                 .map(|detected| flag_value_hint("priority", detected)),
-            BeadsError::InvalidStatus { status } => {
-                detect_status_intent(status).map(|detected| flag_value_hint("status", detected))
-            }
-            BeadsError::InvalidType { issue_type } => {
-                detect_type_intent(issue_type).map(|detected| flag_value_hint("type", detected))
-            }
             BeadsError::HasDependents { id, .. } => {
                 if let Some(ctx) = context
                     && let Some(count) = ctx.get("dependent_count")
@@ -720,85 +679,6 @@ impl StructuredError {
 
 // === Precomputed Valid Values (O(1) lookup) ===
 
-/// Valid status values.
-static VALID_STATUSES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        "open",
-        "in_progress",
-        "blocked",
-        "deferred",
-        "draft",
-        "closed",
-        "tombstone",
-        "pinned",
-    ]
-    .into_iter()
-    .collect()
-});
-
-/// Valid issue type values (matching bd conformance).
-static VALID_TYPES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        "task", "bug", "feature", "epic", "chore", "docs", "question",
-    ]
-    .into_iter()
-    .collect()
-});
-
-/// Status synonyms for intent detection.
-static STATUS_SYNONYMS: LazyLock<std::collections::HashMap<&'static str, &'static str>> =
-    LazyLock::new(|| {
-        [
-            ("done", "closed"),
-            ("complete", "closed"),
-            ("completed", "closed"),
-            ("finished", "closed"),
-            ("resolved", "closed"),
-            ("wontfix", "closed"),
-            ("wip", "in_progress"),
-            ("working", "in_progress"),
-            ("active", "in_progress"),
-            ("started", "in_progress"),
-            ("new", "open"),
-            ("todo", "open"),
-            ("pending", "open"),
-            ("waiting", "blocked"),
-            ("hold", "deferred"),
-            ("later", "deferred"),
-            ("postponed", "deferred"),
-        ]
-        .into_iter()
-        .collect()
-    });
-
-/// Type synonyms for intent detection.
-static TYPE_SYNONYMS: LazyLock<std::collections::HashMap<&'static str, &'static str>> =
-    LazyLock::new(|| {
-        [
-            ("story", "feature"),
-            ("enhancement", "feature"),
-            ("improvement", "feature"),
-            ("issue", "bug"),
-            ("defect", "bug"),
-            ("problem", "bug"),
-            ("ticket", "task"),
-            ("item", "task"),
-            ("work", "task"),
-            ("documentation", "docs"),
-            ("doc", "docs"),
-            ("readme", "docs"),
-            ("cleanup", "chore"),
-            ("refactor", "chore"),
-            ("maintenance", "chore"),
-            ("parent", "epic"),
-            ("initiative", "epic"),
-            ("ask", "question"),
-            ("help", "question"),
-        ]
-        .into_iter()
-        .collect()
-    });
-
 /// Priority synonyms for intent detection.
 static PRIORITY_SYNONYMS: LazyLock<std::collections::HashMap<&'static str, &'static str>> =
     LazyLock::new(|| {
@@ -823,54 +703,6 @@ static PRIORITY_SYNONYMS: LazyLock<std::collections::HashMap<&'static str, &'sta
     });
 
 // === Intent Detection ===
-
-/// Detect what status the user likely meant.
-fn detect_status_intent(input: &str) -> Option<&'static str> {
-    let lower = input.to_lowercase();
-
-    // Direct match (case-insensitive)
-    if VALID_STATUSES.contains(lower.as_str()) {
-        return VALID_STATUSES.get(lower.as_str()).copied();
-    }
-
-    // Synonym lookup
-    if let Some(&canonical) = STATUS_SYNONYMS.get(lower.as_str()) {
-        return Some(canonical);
-    }
-
-    // Prefix match
-    for &status in VALID_STATUSES.iter() {
-        if status.starts_with(&lower) {
-            return Some(status);
-        }
-    }
-
-    None
-}
-
-/// Detect what type the user likely meant.
-fn detect_type_intent(input: &str) -> Option<&'static str> {
-    let lower = input.to_lowercase();
-
-    // Direct match
-    if VALID_TYPES.contains(lower.as_str()) {
-        return VALID_TYPES.get(lower.as_str()).copied();
-    }
-
-    // Synonym lookup
-    if let Some(&canonical) = TYPE_SYNONYMS.get(lower.as_str()) {
-        return Some(canonical);
-    }
-
-    // Prefix match
-    for &t in VALID_TYPES.iter() {
-        if t.starts_with(&lower) {
-            return Some(t);
-        }
-    }
-
-    None
-}
 
 /// Detect what priority the user likely meant.
 fn detect_priority_intent(input: &str) -> Option<&'static str> {
@@ -1214,25 +1046,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_status_intent() {
-        assert_eq!(detect_status_intent("done"), Some("closed"));
-        assert_eq!(detect_status_intent("wip"), Some("in_progress"));
-        assert_eq!(detect_status_intent("OPEN"), Some("open"));
-        assert_eq!(detect_status_intent("draft"), Some("draft"));
-        assert_eq!(detect_status_intent("op"), Some("open")); // Prefix match
-        assert_eq!(detect_status_intent("xyz"), None);
-    }
-
-    #[test]
-    fn test_detect_type_intent() {
-        assert_eq!(detect_type_intent("story"), Some("feature"));
-        assert_eq!(detect_type_intent("defect"), Some("bug"));
-        assert_eq!(detect_type_intent("TASK"), Some("task"));
-        assert_eq!(detect_type_intent("docs"), Some("docs"));
-        assert_eq!(detect_type_intent("xyz"), None);
-    }
-
-    #[test]
     fn test_detect_priority_intent() {
         assert_eq!(detect_priority_intent("high"), Some("1"));
         assert_eq!(detect_priority_intent("critical"), Some("0"));
@@ -1320,21 +1133,6 @@ mod tests {
         assert_eq!(
             err.hint.as_deref(),
             Some("Use a priority between 0 (critical) and 4 (backlog)")
-        );
-    }
-
-    #[test]
-    fn invalid_status_error_lists_the_valid_statuses() {
-        let err = StructuredError::from_error(&BeadsError::InvalidStatus {
-            status: "done".to_string(),
-        });
-        assert_eq!(err.code, ErrorCode::InvalidStatus);
-        // "done" is detectable, so the human hint names the value; the
-        // machine-readable context carries the same answer, as it always did.
-        assert_eq!(err.hint.as_deref(), Some("Did you mean --status closed?"));
-        assert_eq!(
-            err.context.as_ref().unwrap()["hint"],
-            "Did you mean --status closed?"
         );
     }
 

@@ -748,6 +748,15 @@ impl Workflow {
     /// the set. Returns a [`BeadsError::Validation`] naming the allowed values
     /// otherwise.
     ///
+    /// This is the *only* surface that rejects a status, and it is deliberately
+    /// project-specific: [`Status::Custom`] exists because accepting an
+    /// arbitrary status is a feature, so the only thing that can make one wrong
+    /// is a `policy.yaml` that enumerates the permitted set. A generic
+    /// "invalid status" error naming a built-in vocabulary once existed
+    /// alongside this and was removed unconstructed (bds-npo): in a strict
+    /// workspace its list would have been the wrong list, and in an ordinary
+    /// one there is nothing to reject.
+    ///
     /// # Errors
     ///
     /// Returns a validation error when strict enforcement is configured and

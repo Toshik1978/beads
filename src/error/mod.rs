@@ -70,14 +70,6 @@ pub enum BeadsError {
     #[error("Validation errors: {errors:?}")]
     ValidationErrors { errors: Vec<ValidationError> },
 
-    /// Invalid status value.
-    #[error("Invalid status: {status}")]
-    InvalidStatus { status: String },
-
-    /// Invalid issue type value.
-    #[error("Invalid issue type: {issue_type}")]
-    InvalidType { issue_type: String },
-
     /// Priority out of valid range (0-4).
     #[error("Priority must be 0-4, got: {priority}")]
     InvalidPriority { priority: String },
@@ -252,8 +244,6 @@ impl BeadsError {
                 | Self::NotInitialized
                 | Self::IssueNotFound { .. }
                 | Self::Validation { .. }
-                | Self::InvalidStatus { .. }
-                | Self::InvalidType { .. }
                 | Self::InvalidPriority { .. }
                 | Self::PrefixMismatch { .. }
                 | Self::AmbiguousId { .. }
@@ -287,12 +277,6 @@ impl BeadsError {
             Self::AlreadyInitialized { .. } => Some("Use --force to reinitialize"),
             Self::InvalidPriority { .. } => {
                 Some("Use a priority between 0 (critical) and 4 (backlog)")
-            }
-            Self::InvalidStatus { .. } => Some(
-                "Valid statuses: open, in_progress, blocked, deferred, draft, closed, tombstone, pinned",
-            ),
-            Self::InvalidType { .. } => {
-                Some("Valid types: task, bug, feature, epic, chore, docs, question")
             }
             Self::PolicyViolation { .. } => Some(
                 "Fix the violation(s) above, or pass --bypass-policy --bypass-reason \"<text>\" if your project's policy.yaml allows bypass.",
@@ -415,16 +399,6 @@ mod tests {
             matches: vec!["bd-abc".to_string(), "bd-abd".to_string()],
         };
         assert_eq!(err.suggestion(), Some("Provide more characters of the ID"));
-
-        let err = BeadsError::InvalidStatus {
-            status: "dra".to_string(),
-        };
-        assert_eq!(
-            err.suggestion(),
-            Some(
-                "Valid statuses: open, in_progress, blocked, deferred, draft, closed, tombstone, pinned",
-            )
-        );
     }
 
     #[test]
