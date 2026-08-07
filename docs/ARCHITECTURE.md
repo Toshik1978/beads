@@ -31,6 +31,18 @@ the rest of the design:
   import/export implementation and `src/sync/path.rs` for the path-allowlist
   rules that keep sync from writing outside `.beads/`.
 
+Import is last-write-wins on `updated_at`, with one rule that follows from
+the durability asymmetry above rather than from the timestamps: **when both
+sides carry the same `updated_at` but disagree on content, the JSONL wins.**
+Equal timestamps mean both sides claim to be the same revision, and a
+difference at the same revision is not a conflict to arbitrate — it is a
+hand edit to the file that never bumped the timestamp. Since every local
+write advances `updated_at` strictly, a database row that differs from the
+file at an identical timestamp cannot be unflushed local work. Editing
+`.beads/issues.jsonl` by hand and running `br sync --import-only` therefore
+does what it looks like it does; it used to report the record as
+"up-to-date" and then write the unedited row back over the file.
+
 ## Storage engine: `rusqlite` with `bundled` C SQLite
 
 The storage engine is `rusqlite` (see the `[dependencies]` block in

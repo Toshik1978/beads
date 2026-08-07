@@ -40,6 +40,8 @@ mod import_collision_remap;
 mod issue_256_update_diff_target;
 #[path = "repro/issue_not_found_suggestions.rs"]
 mod issue_not_found_suggestions;
+#[path = "repro/jsonl_field_removal.rs"]
+mod jsonl_field_removal;
 #[path = "repro/list_sort.rs"]
 mod list_sort;
 #[path = "repro/list_sort_alias.rs"]

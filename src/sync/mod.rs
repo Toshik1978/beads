@@ -3389,6 +3389,14 @@ pub enum CollisionAction {
     Update { existing_id: String },
     /// Skip this issue (existing is newer or it's a tombstone).
     Skip { reason: String },
+    /// Both sides carry the same `updated_at`, so they claim to be the same
+    /// revision — but claiming it and being it are different things, and
+    /// the metadata `determine_action` sees cannot tell them apart. The
+    /// caller resolves this against the stored row: equal content is an
+    /// ordinary no-op, unequal content means the JSONL was edited without
+    /// its timestamp moving, and the JSONL wins. See bds-n8d and
+    /// [`resolve_timestamp_tie`].
+    ResolveTimestampTie { existing_id: String },
 }
 
 /// Detect collision for an incoming issue using the 4-phase algorithm with preloaded metadata maps.
@@ -3462,8 +3470,8 @@ fn determine_action(
                 std::cmp::Ordering::Greater => Ok(CollisionAction::Update {
                     existing_id: existing_id.clone(),
                 }),
-                std::cmp::Ordering::Equal => Ok(CollisionAction::Skip {
-                    reason: format!("Equal timestamps: {existing_id}"),
+                std::cmp::Ordering::Equal => Ok(CollisionAction::ResolveTimestampTie {
+                    existing_id: existing_id.clone(),
                 }),
                 std::cmp::Ordering::Less => Ok(CollisionAction::Skip {
                     reason: format!("Existing is newer: {existing_id}"),
@@ -3941,6 +3949,49 @@ fn skipped_import_matches_stored_issue(
     Ok(stored.sync_equals(&expected))
 }
 
+/// Settle a [`CollisionAction::ResolveTimestampTie`] against the stored row.
+///
+/// Equal `updated_at` on both sides used to mean an unconditional skip
+/// reported as "up-to-date". It is not: a hand edit to `.beads/issues.jsonl`
+/// changes content without touching the timestamp, and the old rule ignored
+/// the edit, called the record up-to-date, and — because the skip left the
+/// export hash unrecorded — set `needs_flush`, so the next flush wrote the
+/// unedited database row back over the file. Deleting a field from the JSONL
+/// therefore appeared to work and then silently undid itself (bds-n8d).
+///
+/// The rule now is: at equal timestamps the JSONL wins. That is not a
+/// preference for one side, it is what the two artefacts *are* — the JSONL is
+/// the committed source of truth and `.beads/*.db` is a gitignored,
+/// rebuildable cache of it. It is also safe in a way it would not have been
+/// before bds-6nz: every local write now advances `updated_at` strictly, so a
+/// database row that differs from the file at the *same* timestamp cannot be
+/// an unflushed local edit. It can only be the file having been edited
+/// out-of-band.
+///
+/// Any other action passes through untouched. In particular a
+/// "existing is newer" skip stays a skip — that is ordinary last-write-wins,
+/// not a tie.
+fn resolve_timestamp_tie(
+    storage: &SqliteStorage,
+    action: CollisionAction,
+    issue: &Issue,
+) -> Result<CollisionAction> {
+    let CollisionAction::ResolveTimestampTie { existing_id } = action else {
+        return Ok(action);
+    };
+
+    // The same comparison `export_hash_entry_for_import_action` runs a few
+    // lines later for every skip, so resolving the tie this way costs no
+    // extra hydration in the common case.
+    if skipped_import_matches_stored_issue(storage, &existing_id, issue)? {
+        Ok(CollisionAction::Skip {
+            reason: format!("Equal timestamps: {existing_id}"),
+        })
+    } else {
+        Ok(CollisionAction::Update { existing_id })
+    }
+}
+
 fn export_hash_entry_for_import_action(
     storage: &SqliteStorage,
     action: &CollisionAction,
@@ -3959,7 +4010,19 @@ fn export_hash_entry_for_import_action(
                 Ok(None)
             }
         }
+        CollisionAction::ResolveTimestampTie { .. } => Err(unresolved_timestamp_tie(target_id)),
     }
+}
+
+/// A [`CollisionAction::ResolveTimestampTie`] that reached a consumer means
+/// [`resolve_timestamp_tie`] was not called on the path that produced it.
+/// Reported rather than assumed away: the variant exists precisely because
+/// the decision cannot be made from metadata, so guessing here would be
+/// guessing at whether an edit is applied or dropped.
+fn unresolved_timestamp_tie(id: &str) -> BeadsError {
+    BeadsError::Config(format!(
+        "internal: timestamp tie for {id} reached import processing unresolved"
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4012,6 +4075,7 @@ fn stream_import_actions_in_tx(
         };
 
         apply_collision_renames(&mut issue, collision_renames);
+        let action = resolve_timestamp_tie(storage, action, &issue)?;
         process_import_action(storage, &action, &issue, &mut tx_result)?;
 
         if let Some((export_id, export_hash)) = export_hash_entry_for_import_action(
@@ -4241,6 +4305,9 @@ fn process_import_action(
             } else {
                 result.skipped_count += 1;
             }
+        }
+        CollisionAction::ResolveTimestampTie { existing_id } => {
+            return Err(unresolved_timestamp_tie(existing_id));
         }
     }
     Ok(())
@@ -7303,15 +7370,16 @@ mod tests {
             "expected update action"
         );
 
+        // Equal timestamps are deliberately *not* decided here: metadata
+        // cannot tell a genuine no-op from a JSONL edit that never bumped
+        // the timestamp, so the verdict is deferred to
+        // `resolve_timestamp_tie`, which has the stored row. See bds-n8d.
         let equal = make_issue_at("bd-1", "Incoming", fixed_time(100));
         let action = determine_action(&collision, &equal, &meta_by_id, false).unwrap();
         assert!(
-            matches!(action, CollisionAction::Skip { .. }),
-            "expected equal timestamp skip"
+            matches!(action, CollisionAction::ResolveTimestampTie { .. }),
+            "expected an equal-timestamp tie to be deferred, got {action:?}"
         );
-        if let CollisionAction::Skip { reason } = action {
-            assert!(reason.contains("Equal timestamps"));
-        }
 
         let older = make_issue_at("bd-1", "Incoming", fixed_time(50));
         let action = determine_action(&collision, &older, &meta_by_id, false).unwrap();
@@ -7322,6 +7390,86 @@ mod tests {
         if let CollisionAction::Skip { reason } = action {
             assert!(reason.contains("Existing is newer"));
         }
+    }
+
+    /// bds-n8d: at equal timestamps the JSONL wins when the two sides
+    /// disagree. A field deleted by hand from `.beads/issues.jsonl` used to
+    /// be ignored, reported as "up-to-date", and then written back over the
+    /// file by the next flush.
+    #[test]
+    fn timestamp_tie_with_differing_content_adopts_the_jsonl() {
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let mut seed = make_issue_at("bd-1", "Existing", fixed_time(100));
+        seed.assignee = Some("alice".to_string());
+        storage.create_issue(&seed, "test").unwrap();
+
+        // Read the row back rather than reusing `seed`: `create_issue`
+        // stamps fields of its own (`created_by` from the actor), so the
+        // stored issue is what a JSONL record round-trips through, not the
+        // struct handed in.
+        let mut incoming = storage.get_issue_for_export("bd-1").unwrap().unwrap();
+        // The same revision by timestamp, but the assignee has been removed
+        // from the record -- the hand edit the bead reported.
+        incoming.assignee = None;
+
+        let action = resolve_timestamp_tie(
+            &storage,
+            CollisionAction::ResolveTimestampTie {
+                existing_id: "bd-1".to_string(),
+            },
+            &incoming,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(action, CollisionAction::Update { ref existing_id } if existing_id == "bd-1"),
+            "a differing record at an equal timestamp must be applied, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn timestamp_tie_with_identical_content_stays_a_skip() {
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let seed = make_issue_at("bd-1", "Existing", fixed_time(100));
+        storage.create_issue(&seed, "test").unwrap();
+        let unchanged = storage.get_issue_for_export("bd-1").unwrap().unwrap();
+
+        let action = resolve_timestamp_tie(
+            &storage,
+            CollisionAction::ResolveTimestampTie {
+                existing_id: "bd-1".to_string(),
+            },
+            &unchanged,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(action, CollisionAction::Skip { ref reason } if reason.contains("Equal timestamps")),
+            "an unchanged record must still skip, got {action:?}"
+        );
+    }
+
+    /// Only ties are resolved here. An "existing is newer" skip is ordinary
+    /// last-write-wins and must pass through untouched, or every import
+    /// against a stale file would overwrite newer local work.
+    #[test]
+    fn resolve_timestamp_tie_passes_other_actions_through() {
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let existing = make_issue_at("bd-1", "Existing", fixed_time(100));
+        storage.create_issue(&existing, "test").unwrap();
+
+        let stale = make_issue_at("bd-1", "Stale", fixed_time(50));
+        let skip = CollisionAction::Skip {
+            reason: "Existing is newer: bd-1".to_string(),
+        };
+        let action = resolve_timestamp_tie(&storage, skip, &stale).unwrap();
+        assert!(
+            matches!(action, CollisionAction::Skip { ref reason } if reason.contains("Existing is newer")),
+            "got {action:?}"
+        );
+
+        let action = resolve_timestamp_tie(&storage, CollisionAction::Insert, &stale).unwrap();
+        assert!(matches!(action, CollisionAction::Insert), "got {action:?}");
     }
 
     #[test]
