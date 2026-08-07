@@ -7530,6 +7530,119 @@ impl SqliteStorage {
         }
     }
 
+    /// Bump `updated_at` on one issue for a write that changed synced content
+    /// living *outside* the `issues` row itself — a label, a dependency edge,
+    /// a comment. See [`Self::touch_updated_at_bulk_in_tx`] for why this is
+    /// not a bare `SET updated_at = <now>`.
+    fn touch_updated_at_in_tx(conn: &Connection, issue_id: &str) -> Result<()> {
+        Self::touch_updated_at_bulk_in_tx(conn, std::slice::from_ref(&issue_id))
+    }
+
+    /// The many-row form of [`Self::touch_updated_at_in_tx`].
+    ///
+    /// Every id gets a timestamp strictly greater than the value that row
+    /// already stores, rather than one `Utc::now()` shared across the batch.
+    /// The reason is [`Self::advance_updated_at`]'s: `labels` and
+    /// `dependencies` are compared by `sync_equals` and exported to JSONL,
+    /// but `determine_action` gates on `updated_at` alone, so a label or
+    /// dependency write against a row seeded from a clock-skewed peer would
+    /// otherwise *lower* the timestamp while changing synced content — the
+    /// next import skips the row as older and the following flush exports
+    /// the stale copy back over the JSONL. See bds-6nz.
+    ///
+    /// Two things this deliberately does not do:
+    ///
+    /// - It does not clamp with SQL `MAX(updated_at, ?)`. That yields
+    ///   *equality* when the stored value is already ahead, and
+    ///   `determine_action` treats Equal as Skip, so the write would still
+    ///   be invisible. The strict advance has to be computed per row.
+    /// - It does not compare the stored value as a string. Timestamps are
+    ///   parsed before comparison, so a non-`Z` offset or an integer epoch
+    ///   in the column (both accepted by `parse_datetime_value`) orders
+    ///   correctly rather than lexically.
+    ///
+    /// The common case — every row already behind this machine's clock —
+    /// still costs one `UPDATE ... WHERE id IN (...)` per chunk; only rows
+    /// actually at or ahead of `now` fall back to a statement each.
+    fn touch_updated_at_bulk_in_tx(conn: &Connection, issue_ids: &[&str]) -> Result<()> {
+        if issue_ids.is_empty() {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        let mut ahead: Vec<(String, DateTime<Utc>)> = Vec::new();
+
+        for chunk in issue_ids.chunks(SQLITE_VAR_LIMIT) {
+            let placeholders = vec!["?"; chunk.len()];
+            let params = chunk
+                .iter()
+                .map(|id| SqliteValue::from(*id))
+                .collect::<Vec<_>>();
+            let rows = conn.query_with_params(
+                &format!(
+                    "SELECT id, updated_at FROM issues WHERE id IN ({})",
+                    placeholders.join(",")
+                ),
+                &params,
+            )?;
+            for row in &rows {
+                let Some(id) = row.get(0).and_then(SqliteValue::as_text) else {
+                    continue;
+                };
+                let stored = parse_datetime_value(row.get(1))?;
+                if stored >= now {
+                    ahead.push((id.to_string(), stored));
+                }
+            }
+        }
+
+        let now_str = now.to_rfc3339();
+        if ahead.is_empty() {
+            Self::set_updated_at_bulk_in_tx(conn, issue_ids, &now_str)?;
+        } else {
+            let ahead_ids: HashSet<&str> = ahead.iter().map(|(id, _)| id.as_str()).collect();
+            let behind = issue_ids
+                .iter()
+                .copied()
+                .filter(|id| !ahead_ids.contains(id))
+                .collect::<Vec<_>>();
+            Self::set_updated_at_bulk_in_tx(conn, &behind, &now_str)?;
+
+            for (id, stored) in &ahead {
+                conn.execute_with_params(
+                    "UPDATE issues SET updated_at = ? WHERE id = ?",
+                    &[
+                        SqliteValue::from(Self::advance_updated_at(*stored).to_rfc3339()),
+                        SqliteValue::from(id.as_str()),
+                    ],
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write one already-decided timestamp across many ids, chunked to stay
+    /// under the SQLite parameter limit. Only ever called with a value the
+    /// caller has established is an advance for every id in `issue_ids`.
+    fn set_updated_at_bulk_in_tx(conn: &Connection, issue_ids: &[&str], stamp: &str) -> Result<()> {
+        // One slot is reserved for the timestamp itself.
+        for chunk in issue_ids.chunks(SQLITE_VAR_LIMIT - 1) {
+            let placeholders = vec!["?"; chunk.len()];
+            let mut params = Vec::with_capacity(chunk.len() + 1);
+            params.push(SqliteValue::from(stamp));
+            params.extend(chunk.iter().map(|id| SqliteValue::from(*id)));
+            conn.execute_with_params(
+                &format!(
+                    "UPDATE issues SET updated_at = ? WHERE id IN ({})",
+                    placeholders.join(",")
+                ),
+                &params,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Insert a tombstone row at the vacated `old_id`, recording that the
     /// issue moved to `new_id`.
     ///
@@ -8016,13 +8129,7 @@ impl SqliteStorage {
                 return Ok(false);
             }
 
-            conn.execute_with_params(
-                "UPDATE issues SET updated_at = ? WHERE id = ?",
-                &[
-                    SqliteValue::from(Utc::now().to_rfc3339()),
-                    SqliteValue::from(issue_id),
-                ],
-            )?;
+            Self::touch_updated_at_in_tx(conn, issue_id)?;
 
             ctx.mark_dirty(issue_id);
             // Defer the blocked-cache rebuild to the next read rather than
@@ -8199,15 +8306,11 @@ impl SqliteStorage {
                 ctx.mark_dirty(&dep.issue_id);
             }
 
-            for issue_id in &touched_issue_ids {
-                conn.execute_with_params(
-                    "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    &[
-                        SqliteValue::from(now.as_str()),
-                        SqliteValue::from(issue_id.as_str()),
-                    ],
-                )?;
-            }
+            let touched = touched_issue_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            Self::touch_updated_at_bulk_in_tx(conn, &touched)?;
 
             if inserted_count > 0 {
                 ctx.invalidate_cache_deferred();
@@ -8235,13 +8338,7 @@ impl SqliteStorage {
             )?;
 
             if rows > 0 {
-                conn.execute_with_params(
-                    "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    &[
-                        SqliteValue::from(Utc::now().to_rfc3339()),
-                        SqliteValue::from(issue_id),
-                    ],
-                )?;
+                Self::touch_updated_at_in_tx(conn, issue_id)?;
 
                 ctx.mark_dirty(issue_id);
                 // Defer rebuild for the same reason as add_dependency_with_metadata.
@@ -8279,24 +8376,10 @@ impl SqliteStorage {
             let total = outgoing + incoming;
 
             if total > 0 {
-                let now = Utc::now().to_rfc3339();
-
-                conn.execute_with_params(
-                    "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    &[SqliteValue::from(now.as_str()), SqliteValue::from(issue_id)],
-                )?;
-
-                for chunk in affected.chunks(400) {
-                    for id in chunk {
-                        conn.execute_with_params(
-                            "UPDATE issues SET updated_at = ? WHERE id = ?",
-                            &[
-                                SqliteValue::from(now.as_str()),
-                                SqliteValue::from(id.as_str()),
-                            ],
-                        )?;
-                    }
-                }
+                let mut touched: Vec<&str> = Vec::with_capacity(affected.len() + 1);
+                touched.push(issue_id);
+                touched.extend(affected.iter().map(String::as_str));
+                Self::touch_updated_at_bulk_in_tx(conn, &touched)?;
 
                 ctx.mark_dirty(issue_id);
                 for affected_id in &affected {
@@ -8416,13 +8499,7 @@ impl SqliteStorage {
             )?;
         }
 
-        conn.execute_with_params(
-            "UPDATE issues SET updated_at = ? WHERE id = ?",
-            &[
-                SqliteValue::from(Utc::now().to_rfc3339()),
-                SqliteValue::from(issue_id),
-            ],
-        )?;
+        Self::touch_updated_at_in_tx(conn, issue_id)?;
 
         ctx.mark_dirty(issue_id);
         if skip_cache_rebuild {
@@ -8499,13 +8576,7 @@ impl SqliteStorage {
 
             ctx.mark_dirty(issue_id);
 
-            conn.execute_with_params(
-                "UPDATE issues SET updated_at = ? WHERE id = ?",
-                &[
-                    SqliteValue::from(Utc::now().to_rfc3339()),
-                    SqliteValue::from(issue_id),
-                ],
-            )?;
+            Self::touch_updated_at_in_tx(conn, issue_id)?;
 
             Ok(true)
         })
@@ -8535,7 +8606,6 @@ impl SqliteStorage {
 
         self.mutate("add_label_to_issues_bulk", |conn, ctx| {
             let mut changed_ids = HashSet::new();
-            let now_str = Utc::now().to_rfc3339();
 
             // The existing-label probe binds one label plus every issue id, so
             // reserve one parameter slot for the label value.
@@ -8675,23 +8745,11 @@ impl SqliteStorage {
                     changed_ids.insert((*issue_id).clone());
                 }
 
-                for update_chunk in missing_ids.chunks(SQLITE_VAR_LIMIT - 1) {
-                    let update_placeholders = vec!["?"; update_chunk.len()];
-                    let mut update_params = Vec::with_capacity(update_chunk.len() + 1);
-                    update_params.push(SqliteValue::from(now_str.as_str()));
-                    update_params.extend(
-                        update_chunk
-                            .iter()
-                            .map(|issue_id| SqliteValue::from(issue_id.as_str())),
-                    );
-                    conn.execute_with_params(
-                        &format!(
-                            "UPDATE issues SET updated_at = ? WHERE id IN ({})",
-                            update_placeholders.join(",")
-                        ),
-                        &update_params,
-                    )?;
-                }
+                let touched = missing_ids
+                    .iter()
+                    .map(|issue_id| issue_id.as_str())
+                    .collect::<Vec<_>>();
+                Self::touch_updated_at_bulk_in_tx(conn, &touched)?;
             }
 
             Ok(changed_ids)
@@ -8728,13 +8786,7 @@ impl SqliteStorage {
             )?;
 
             if rows > 0 {
-                conn.execute_with_params(
-                    "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    &[
-                        SqliteValue::from(Utc::now().to_rfc3339()),
-                        SqliteValue::from(issue_id),
-                    ],
-                )?;
+                Self::touch_updated_at_in_tx(conn, issue_id)?;
 
                 ctx.mark_dirty(issue_id);
             }
@@ -8766,7 +8818,6 @@ impl SqliteStorage {
 
         self.mutate("remove_label_from_issues_bulk", |conn, ctx| {
             let mut changed_ids = HashSet::new();
-            let now_str = Utc::now().to_rfc3339();
 
             // Label lookups/deletes bind one label plus every issue id, so
             // reserve one parameter slot for the label value.
@@ -8869,23 +8920,11 @@ impl SqliteStorage {
                     changed_ids.insert((*issue_id).clone());
                 }
 
-                for update_chunk in removable_ids.chunks(SQLITE_VAR_LIMIT - 1) {
-                    let update_placeholders = vec!["?"; update_chunk.len()];
-                    let mut update_params = Vec::with_capacity(update_chunk.len() + 1);
-                    update_params.push(SqliteValue::from(now_str.as_str()));
-                    update_params.extend(
-                        update_chunk
-                            .iter()
-                            .map(|issue_id| SqliteValue::from(issue_id.as_str())),
-                    );
-                    conn.execute_with_params(
-                        &format!(
-                            "UPDATE issues SET updated_at = ? WHERE id IN ({})",
-                            update_placeholders.join(",")
-                        ),
-                        &update_params,
-                    )?;
-                }
+                let touched = removable_ids
+                    .iter()
+                    .map(|issue_id| issue_id.as_str())
+                    .collect::<Vec<_>>();
+                Self::touch_updated_at_bulk_in_tx(conn, &touched)?;
             }
 
             Ok(changed_ids)
@@ -8954,13 +8993,7 @@ impl SqliteStorage {
             if removed_any || added_any || db_has_duplicate_labels {
                 ctx.mark_dirty(issue_id);
 
-                conn.execute_with_params(
-                    "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    &[
-                        SqliteValue::from(Utc::now().to_rfc3339()),
-                        SqliteValue::from(issue_id),
-                    ],
-                )?;
+                Self::touch_updated_at_in_tx(conn, issue_id)?;
             }
 
             Ok(())
@@ -9284,18 +9317,11 @@ impl SqliteStorage {
                 &[SqliteValue::from(new_name), SqliteValue::from(old_name)],
             )?;
 
-            let now = Utc::now().to_rfc3339();
             for issue_id in &issue_ids {
                 ctx.mark_dirty(issue_id);
-
-                conn.execute_with_params(
-                    "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    &[
-                        SqliteValue::from(now.as_str()),
-                        SqliteValue::from(issue_id.as_str()),
-                    ],
-                )?;
             }
+            let touched = issue_ids.iter().map(String::as_str).collect::<Vec<_>>();
+            Self::touch_updated_at_bulk_in_tx(conn, &touched)?;
 
             Ok(renamed + conflicts.len())
         })
@@ -9376,13 +9402,7 @@ impl SqliteStorage {
 
             let comment_id = insert_comment_row(conn, issue_id, author, text)?;
 
-            conn.execute_with_params(
-                "UPDATE issues SET updated_at = ? WHERE id = ?",
-                &[
-                    SqliteValue::from(Utc::now().to_rfc3339()),
-                    SqliteValue::from(issue_id),
-                ],
-            )?;
+            Self::touch_updated_at_in_tx(conn, issue_id)?;
 
             ctx.mark_dirty(issue_id);
 

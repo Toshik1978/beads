@@ -45,3 +45,5 @@ mod rename_coverage;
 mod schema_shape;
 #[path = "storage/sort_spec.rs"]
 mod sort_spec;
+#[path = "storage/updated_at_clamp.rs"]
+mod updated_at_clamp;
