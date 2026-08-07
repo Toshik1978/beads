@@ -308,7 +308,51 @@ SPDX identifier; `tests/licensing.rs` pins both of those facts.
 - `env -u RUSTUP_TOOLCHAIN task format` / `task format:check` — apply or check `cargo fmt`.
 - `env -u RUSTUP_TOOLCHAIN task lint` — clippy over every target (pedantic + nursery, see `[lints.clippy]` in `Cargo.toml`).
 - `env -u RUSTUP_TOOLCHAIN task test:report` — run the suite and print `passed=N failed=N` plus failing test names; a diagnostic, not a gate.
+- `env -u RUSTUP_TOOLCHAIN task lint:dead` — report items in `src/` that nothing reachable from the `br` binary uses; **a diagnostic, not a gate**, for the same reason as `test:report` above. See the next section.
 - `env -u RUSTUP_TOOLCHAIN task test:linux` — the same suite in a `linux/arm64` container, catching macOS-only assumptions (notably `/tmp` symlink resolution). Needs Docker; not run by `task check`.
+
+## `cargo check` cannot see dead public code here
+
+`cargo check --workspace --all-targets` exits 0 with zero warnings no matter how
+much unreferenced `pub` code accumulates in `src/`, and that is not a lint bug.
+`dead_code` fires only on items rustc can prove unreachable *from outside the
+crate too*; a `pub fn` in a `pub mod` of a lib target is reachable by hypothesis,
+so the lint correctly declines and stays silent forever. The hypothesis is false
+here — `publish = false`, and the only consumers are the `br` binary in the same
+package and this repository's own tests — but nothing in the build knows that.
+
+`task lint:dead` (`scripts/dead_code_report.sh`) makes it true for the length of
+two compiles: it rewrites a scratch copy of the tree so every module is
+`pub(crate)` and the binary is a module of the library, giving rustc a real root
+set. `src/` is never touched. Because that is reachability rather than
+identifier counting, it sees clusters an ad-hoc grep sweep cannot — most
+notably a wrapper forwarding to an identically-named inner function, where each
+name inflates the other's occurrence count and the dead pair reads as live.
+`task lint:dead -- --self-check` demonstrates exactly that case on a synthetic
+pair and fails if the tool stops reporting it.
+
+Output is three buckets, and only the first is a to-do list:
+
+| Bucket | Meaning |
+| --- | --- |
+| referenced nowhere | Not from `main`, not from a unit test, not from `tests/`. |
+| unit-test-only | Reached only from a `#[cfg(test)]` block inside `src/`. Dead product code with passing tests attached — deleting it deletes tests that pass, so each one wants a written reason. |
+| test-facing | Reached from `tests/` or `test-support/`. Usually correct as it stands. |
+
+**It is advisory on purpose, and should stay that way.** The test-facing bucket
+is large and legitimate: read-back accessors exist so a test can check that a
+production write was correct, and they are unreachable from `main` precisely
+because `main` writes and the tests read. Deleting one deletes the check. Making
+this block `task check` would turn a judgement into a reflex. Run it when
+sweeping, read it, and decide per item.
+
+Two caveats worth knowing before acting on a hit. The first two buckets come
+from rustc and are exact; the third is a word-boundary grep over `tests/` and
+`test-support/`, because those targets cannot link a `pub(crate)` library and so
+cannot take part in the instrumented compile — that grep can over-report a
+reference but never miss one, so "referenced nowhere" is trustworthy. And
+removing a subsystem leaves prose pointing at it long after the symbols are
+gone: when taking an item, grep for its name as text, not just as an identifier.
 
 ## Releasing
 

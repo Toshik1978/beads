@@ -322,6 +322,16 @@ tasks:
           | sed -E 's/^ +([A-Z]+) +\[[^]]*\] +/\1 /' | sort -u > "{{.TEST_FAILURES}}"
         echo "failing test names -> {{.TEST_FAILURES}} ($(wc -l < "{{.TEST_FAILURES}}" | tr -d ' ') entries)"
 
+  # The other diagnostic that is deliberately not a gate. `cargo check` cannot
+  # see dead public code in this crate at all — see the header of the script for
+  # why the lint is structurally blind and what the report does about it. Not in
+  # `task check`: most of what it finds is reached only from `tests/`, and
+  # deleting a read-back accessor deletes the check that a write was correct.
+  lint:dead:
+    desc: Report items in src/ that nothing reachable from the br binary uses (advisory)
+    cmds:
+      - ./scripts/dead_code_report.sh {{.CLI_ARGS}}
+
   check:
     desc: Everything CI runs
     cmds:
