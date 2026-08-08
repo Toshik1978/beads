@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use beads::model::{Dependency, DependencyType, Issue, IssueType, Priority, Status};
 use chrono::{Duration, TimeZone, Utc};
 

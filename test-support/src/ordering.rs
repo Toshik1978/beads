@@ -10,8 +10,6 @@
 //! **Use these helpers instead of `assert_eq!(ids[N], expected_id)`** when
 //! the invariant under test is the relative ordering, not the specific IDs.
 
-#![allow(dead_code)]
-
 use beads::model::{Issue, Priority};
 use std::fmt::Debug;
 

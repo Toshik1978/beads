@@ -346,13 +346,16 @@ because `main` writes and the tests read. Deleting one deletes the check. Making
 this block `task check` would turn a judgement into a reflex. Run it when
 sweeping, read it, and decide per item.
 
-Two caveats worth knowing before acting on a hit. The first two buckets come
+Three caveats worth knowing before acting on a hit. The first two buckets come
 from rustc and are exact; the third is a word-boundary grep over `tests/` and
 `test-support/`, because those targets cannot link a `pub(crate)` library and so
 cannot take part in the instrumented compile — that grep can over-report a
-reference but never miss one, so "referenced nowhere" is trustworthy. And
-removing a subsystem leaves prose pointing at it long after the symbols are
-gone: when taking an item, grep for its name as text, not just as an identifier.
+reference but never miss one, so "referenced nowhere" is trustworthy. The report
+covers `src/` only: `test-support` is blind to `dead_code` for the same reason
+but has no `main` to serve as a root, so nothing here would be meaningful about
+it. And removing a subsystem leaves prose pointing at it long after the symbols
+are gone: when taking an item, grep for its name as text, not just as an
+identifier.
 
 ## Releasing
 

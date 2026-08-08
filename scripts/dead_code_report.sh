@@ -49,6 +49,12 @@
 # The rewrite happens in a scratch copy under `target/`; `src/` is never
 # touched, so an interrupted run cannot leave the tree modified.
 #
+# Scope: `src/` only. `test-support` is a separate lib crate and is blind to
+# `dead_code` for exactly the same structural reason, but it has no equivalent
+# of `main` to act as a root — its callers are the integration binaries, which
+# cannot take part in this compile — so nothing here would be meaningful about
+# it.
+#
 # Usage:
 #   scripts/dead_code_report.sh              classified report
 #   scripts/dead_code_report.sh --quiet      one line: the three bucket counts

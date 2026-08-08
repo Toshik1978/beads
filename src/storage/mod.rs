@@ -18,6 +18,9 @@ pub mod sqlite;
 
 pub(crate) use sqlite::BulkDependencyInsert;
 pub use sqlite::{
-    CloseMetadataRow, ID_BEARING_COLUMNS, IssueUpdate, ListFilters, ReadyFilters, ReadySortPolicy,
-    SqliteStorage, StatsIssueRow,
+    ID_BEARING_COLUMNS, IssueUpdate, ListFilters, ReadyFilters, ReadySortPolicy, SqliteStorage,
+    StatsIssueRow,
 };
+// Gated with the accessor that returns it; see `SqliteStorage::get_close_metadata`.
+#[cfg(test)]
+pub use sqlite::CloseMetadataRow;

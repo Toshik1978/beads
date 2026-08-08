@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use beads::model::Status;
 use beads::storage::SqliteStorage;
 use tracing::info;

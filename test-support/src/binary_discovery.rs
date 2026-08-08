@@ -3,8 +3,6 @@
 //! Locates the `br` binary a benchmark should measure and records its version
 //! metadata so a results file says which build produced the numbers.
 
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

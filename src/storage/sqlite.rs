@@ -442,7 +442,7 @@ pub struct SqliteStorage {
     temp_db_path: Option<PathBuf>,
     /// Repository-level workflow capacity policy loaded by the command/config
     /// layer.  Direct storage users default to an inactive policy and may opt
-    /// in with [`SqliteStorage::set_workflow_capacity_policy`].  Enforcement
+    /// in with [`SqliteStorage::set_workflow_policy`].  Enforcement
     /// happens inside the same `BEGIN IMMEDIATE` transaction as the status
     /// mutation, closing the count-then-transition race from GitHub #384.
     workflow_capacity_policy: crate::close_policy::CapacityPolicy,
@@ -1569,48 +1569,6 @@ impl SqliteStorage {
         u64::try_from(result.max(1)).unwrap_or(u64::MAX)
     }
 
-    /// Set export hashes using the caller's active transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub(crate) fn set_export_hashes_in_tx(&self, exports: &[(String, String)]) -> Result<usize> {
-        let unique_exports = Self::dedupe_export_hash_batch(exports);
-        if unique_exports.is_empty() {
-            return Ok(0);
-        }
-
-        let now = Utc::now().to_rfc3339();
-        let mut count = 0;
-
-        for chunk in unique_exports.chunks(EXPORT_HASH_CHUNK_SIZE) {
-            // Delete existing entries row-by-row to avoid the previous engine's IN-clause bugs
-            for (id, _) in chunk {
-                self.conn.execute_with_params(
-                    "DELETE FROM export_hashes WHERE issue_id = ?",
-                    &[SqliteValue::from(id.as_str())],
-                )?;
-            }
-
-            // The previous engine could report a false primary-key conflict when many
-            // existing rows are reinserted via one VALUES list, so keep each
-            // insert isolated after the chunk delete.
-            for (issue_id, content_hash) in chunk {
-                self.conn.execute_with_params(
-                    "INSERT INTO export_hashes (issue_id, content_hash, exported_at) VALUES (?, ?, ?)",
-                    &[
-                        SqliteValue::from(issue_id.as_str()),
-                        SqliteValue::from(content_hash.as_str()),
-                        SqliteValue::from(now.as_str()),
-                    ],
-                )?;
-                count += 1;
-            }
-        }
-
-        Ok(count)
-    }
-
     /// Insert export hashes after the caller has already cleared the table.
     ///
     /// Import starts by deleting all export hashes, so it does not need the
@@ -1891,12 +1849,19 @@ impl SqliteStorage {
     }
 
     /// Read a previously-stored close-metadata row, or `None` when no policy
-    /// metadata was recorded for this close. Used by tests + future
-    /// observability commands.
+    /// metadata was recorded for this close.
+    ///
+    /// `#[cfg(test)]` because it has no production caller and never had one:
+    /// nothing displays close metadata, and the writer beside it is live. Its
+    /// job is to let the close tests check that the write was correct, so
+    /// gating states that intent and keeps it out of the shipped binary rather
+    /// than leaving it to read as an unfinished feature (bds-cn6). Ungate it
+    /// the day a command reads close metadata back.
     ///
     /// # Errors
     ///
     /// Returns an error if the database query fails.
+    #[cfg(test)]
     pub fn get_close_metadata(&self, issue_id: &str) -> Result<Option<CloseMetadataRow>> {
         if !crate::storage::schema::table_exists(&self.conn, "close_metadata") {
             return Ok(None);
@@ -1932,12 +1897,6 @@ impl SqliteStorage {
                 .map(String::from)
                 .unwrap_or_default(),
         }))
-    }
-
-    /// Install the already-validated repository workflow-capacity policy used
-    /// by subsequent creates and status changes.
-    pub fn set_workflow_capacity_policy(&mut self, policy: crate::close_policy::CapacityPolicy) {
-        self.workflow_capacity_policy = policy;
     }
 
     /// Install the full, already-validated workflow policy. Capacity is cloned
@@ -9458,9 +9417,14 @@ impl SqliteStorage {
 
     /// Get parent issue ID.
     ///
+    /// `#[cfg(test)]`: commands read parentage through the dependency graph,
+    /// not through this. It exists so `set_parent`'s tests can read back what
+    /// the write did, which is the check, not spare API (bds-cn6).
+    ///
     /// # Errors
     ///
     /// Returns an error if the database query fails.
+    #[cfg(test)]
     pub fn get_parent_id(&self, issue_id: &str) -> Result<Option<String>> {
         match self.conn.query_row_with_params(
             "SELECT depends_on_id FROM dependencies WHERE issue_id = ? AND type = 'parent-child' ORDER BY rowid DESC LIMIT 1",
@@ -10076,11 +10040,17 @@ impl SqliteStorage {
         Ok(total_deleted)
     }
 
-    /// Clear all dirty flags.
+    /// Clear every dirty flag at once.
+    ///
+    /// `#[cfg(test)]`: production always clears by id list, through
+    /// `clear_dirty_issues`, because it only ever clears what it just
+    /// exported. This is the blunt reset a test uses to establish "nothing is
+    /// pending" before asserting what a write marks (bds-cn6).
     ///
     /// # Errors
     ///
     /// Returns an error if the database update fails.
+    #[cfg(test)]
     pub fn clear_all_dirty_issues(&mut self) -> Result<usize> {
         let count = self.conn.execute("DELETE FROM dirty_issues")?;
         Ok(count)
@@ -10122,17 +10092,53 @@ impl SqliteStorage {
 
     /// Batch set export hashes for multiple issues after successful export.
     ///
-    /// More efficient than calling `set_export_hash` in a loop.
+    /// No production caller: the export paths seed this table through
+    /// `set_changed_export_hashes_in_tx` and
+    /// `insert_export_hashes_after_clear_in_tx`, both of which need a
+    /// transaction the caller already owns. This is the seam a test uses to
+    /// stand an incremental-export scenario up from outside one, and
+    /// `tests/jsonl_import_export.rs` is among its callers, so it stays `pub`.
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
     pub fn set_export_hashes(&mut self, exports: &[(String, String)]) -> Result<usize> {
-        if exports.is_empty() {
+        let unique_exports = Self::dedupe_export_hash_batch(exports);
+        if unique_exports.is_empty() {
             return Ok(0);
         }
 
-        self.with_write_transaction(|storage| storage.set_export_hashes_in_tx(exports))
+        self.with_write_transaction(|storage| {
+            let now = Utc::now().to_rfc3339();
+            let mut count = 0;
+
+            for chunk in unique_exports.chunks(EXPORT_HASH_CHUNK_SIZE) {
+                // Delete existing entries row-by-row to avoid the previous engine's IN-clause bugs
+                for (id, _) in chunk {
+                    storage.conn.execute_with_params(
+                        "DELETE FROM export_hashes WHERE issue_id = ?",
+                        &[SqliteValue::from(id.as_str())],
+                    )?;
+                }
+
+                // The previous engine could report a false primary-key conflict when many
+                // existing rows are reinserted via one VALUES list, so keep each
+                // insert isolated after the chunk delete.
+                for (issue_id, content_hash) in chunk {
+                    storage.conn.execute_with_params(
+                        "INSERT INTO export_hashes (issue_id, content_hash, exported_at) VALUES (?, ?, ?)",
+                        &[
+                            SqliteValue::from(issue_id.as_str()),
+                            SqliteValue::from(content_hash.as_str()),
+                            SqliteValue::from(now.as_str()),
+                        ],
+                    )?;
+                    count += 1;
+                }
+            }
+
+            Ok(count)
+        })
     }
 
     /// Get a metadata value by key.
@@ -10959,6 +10965,10 @@ pub struct ListFilters {
 ///
 /// One row per terminal close that carried any opt-in policy data — Tier 1
 /// attribution, a `--bypass-policy` waiver, or the list of gates that fired.
+///
+/// `#[cfg(test)]` with [`SqliteStorage::get_close_metadata`], the only thing
+/// that constructs it; the rows themselves are written by live code.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseMetadataRow {
     pub bypassed_policy: bool,
@@ -13057,6 +13067,21 @@ mod tests {
         }
     }
 
+    /// A `Workflow` carrying only a capacity policy.
+    ///
+    /// `set_workflow_policy` is the setter production installs policy through;
+    /// a narrower capacity-only setter beside it had no production caller and
+    /// was removed (bds-cn6). Tests that only care about capacity build the
+    /// surrounding `Workflow` here instead.
+    fn capacity_only(
+        capacity: crate::close_policy::CapacityPolicy,
+    ) -> crate::close_policy::Workflow {
+        crate::close_policy::Workflow {
+            capacity,
+            ..crate::close_policy::Workflow::default()
+        }
+    }
+
     fn hard_status_capacity(status: &str, hard: u32) -> crate::close_policy::CapacityPolicy {
         let mut policy = crate::close_policy::CapacityPolicy::default();
         policy.statuses.insert(
@@ -13216,7 +13241,7 @@ mod tests {
     #[test]
     fn workflow_capacity_create_reaches_hard_limit_then_rolls_back_next_insert() {
         let mut storage = SqliteStorage::open_memory().unwrap();
-        storage.set_workflow_capacity_policy(hard_status_capacity("in_progress", 1));
+        storage.set_workflow_policy(capacity_only(hard_status_capacity("in_progress", 1)));
         let now = Utc::now();
         storage
             .create_issue(
@@ -13280,7 +13305,7 @@ mod tests {
                 "tester",
             )
             .unwrap();
-        storage.set_workflow_capacity_policy(hard_status_capacity("in_progress", 1));
+        storage.set_workflow_policy(capacity_only(hard_status_capacity("in_progress", 1)));
 
         let update = IssueUpdate {
             status: Some(Status::InProgress),
@@ -13308,7 +13333,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        storage.set_workflow_capacity_policy(hard_status_capacity("in_progress", 1));
+        storage.set_workflow_policy(capacity_only(hard_status_capacity("in_progress", 1)));
         let update = IssueUpdate {
             status: Some(Status::Closed),
             ..IssueUpdate::default()
@@ -13344,7 +13369,7 @@ mod tests {
                 hard: Some(2),
             },
         );
-        storage.set_workflow_capacity_policy(policy);
+        storage.set_workflow_policy(capacity_only(policy));
         let update = IssueUpdate {
             status: Some(Status::Custom("in_review".to_string())),
             ..IssueUpdate::default()
@@ -13388,7 +13413,7 @@ mod tests {
                     groups: BTreeMap::new(),
                 },
             });
-        storage.set_workflow_capacity_policy(policy);
+        storage.set_workflow_policy(capacity_only(policy));
         let update = IssueUpdate {
             status: Some(Status::InProgress),
             ..IssueUpdate::default()
@@ -13435,7 +13460,7 @@ mod tests {
             let barrier = std::sync::Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
                 let mut storage = SqliteStorage::open(&db_path).unwrap();
-                storage.set_workflow_capacity_policy(hard_status_capacity("in_progress", 1));
+                storage.set_workflow_policy(capacity_only(hard_status_capacity("in_progress", 1)));
                 let update = IssueUpdate {
                     status: Some(Status::InProgress),
                     ..IssueUpdate::default()
@@ -13480,7 +13505,7 @@ mod tests {
                 .create_issue(&make_issue(id, id, status, 1, None, now, None), "tester")
                 .unwrap();
         }
-        storage.set_workflow_capacity_policy(hard_status_capacity("in_progress", 2));
+        storage.set_workflow_policy(capacity_only(hard_status_capacity("in_progress", 2)));
 
         let update = IssueUpdate {
             title: Some("must roll back".to_string()),
@@ -13532,7 +13557,7 @@ mod tests {
                 "tester",
             )
             .unwrap();
-        storage.set_workflow_capacity_policy(hard_status_capacity("in_progress", 1));
+        storage.set_workflow_policy(capacity_only(hard_status_capacity("in_progress", 1)));
 
         // Admission intentionally appears first. Sequential evaluation would
         // reject it at 2/1 even though the batch's final occupancy remains 1.
@@ -13600,7 +13625,7 @@ mod tests {
                 hard: None,
             },
         );
-        storage.set_workflow_capacity_policy(policy);
+        storage.set_workflow_policy(capacity_only(policy));
 
         let update = IssueUpdate {
             status: Some(Status::InProgress),

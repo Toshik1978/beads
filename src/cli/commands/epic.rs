@@ -548,6 +548,19 @@ mod tests {
     use crate::storage::IssueUpdate;
     use chrono::TimeZone;
 
+    /// A `Workflow` carrying only a capacity policy. See the identically
+    /// named helper in `storage::sqlite`'s tests: the narrower capacity-only
+    /// setter these call sites used had no production caller and was removed
+    /// (bds-cn6), so the surrounding `Workflow` is built here.
+    fn capacity_only(
+        capacity: crate::close_policy::CapacityPolicy,
+    ) -> crate::close_policy::Workflow {
+        crate::close_policy::Workflow {
+            capacity,
+            ..crate::close_policy::Workflow::default()
+        }
+    }
+
     fn base_issue(id: &str, title: &str, issue_type: IssueType, status: Status) -> Issue {
         Issue {
             id: id.to_string(),
@@ -698,7 +711,7 @@ mod tests {
                 hard: Some(3),
             },
         );
-        storage.set_workflow_capacity_policy(policy);
+        storage.set_workflow_policy(capacity_only(policy));
 
         let error = close_eligible_epics_atomically(
             &mut storage,
@@ -725,7 +738,7 @@ mod tests {
                 hard: Some(5),
             },
         );
-        storage.set_workflow_capacity_policy(policy);
+        storage.set_workflow_policy(capacity_only(policy));
 
         let closed = close_eligible_epics_atomically(
             &mut storage,
