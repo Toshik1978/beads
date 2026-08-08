@@ -4238,15 +4238,7 @@ impl SqliteStorage {
             params.push(SqliteValue::from(format!("%{escaped}%")));
         }
 
-        if let Some(ts) = filters.updated_before {
-            sql.push_str(" AND updated_at <= ?");
-            params.push(SqliteValue::from(ts.to_rfc3339()));
-        }
-
-        if let Some(ts) = filters.updated_after {
-            sql.push_str(" AND updated_at >= ?");
-            params.push(SqliteValue::from(ts.to_rfc3339()));
-        }
+        append_date_range_filters(&mut sql, &mut params, filters);
 
         if !sort_default_in_rust {
             let spec = filters.sort.clone().unwrap_or_else(SortSpec::default_order);
@@ -4390,8 +4382,7 @@ impl SqliteStorage {
             || !filters.include_deferred
             || filters.include_templates
             || filters.title_contains.is_some()
-            || filters.updated_before.is_some()
-            || filters.updated_after.is_some()
+            || filters.has_date_range_filters()
             || filters.sort.is_some()
             || filters.reverse;
         if unsupported_filter {
@@ -4520,7 +4511,16 @@ impl SqliteStorage {
             || filters.assignee.is_some()
             || filters.unassigned
             || filters.title_contains.is_some()
-            || filters.updated_after.is_some()
+            // This query applies `updated_before` itself — it *is* the staleness
+            // threshold — and no other date bound. Asked as "any bound except
+            // that one", rather than by naming the bounds, so a bound added to
+            // `date_range_bounds` later is routed to the general builder here
+            // instead of being silently dropped from a `br stale` query.
+            || ListFilters {
+                updated_before: None,
+                ..filters.clone()
+            }
+            .has_date_range_filters()
             || filters.sort.as_ref().is_none_or(|spec| {
                 spec.resolved(filters.reverse)
                     != [
@@ -4660,8 +4660,7 @@ impl SqliteStorage {
                 && filters.priorities.as_ref().is_none_or(Vec::is_empty)
                 && filters.assignee.is_none()
                 && filters.title_contains.is_none()
-                && filters.updated_before.is_none()
-                && filters.updated_after.is_none();
+                && !filters.has_date_range_filters();
         let label_candidate_ids = if label_filters_can_use_uncorrelated_in {
             None
         } else {
@@ -4736,15 +4735,7 @@ impl SqliteStorage {
             params.push(SqliteValue::from(format!("%{escaped}%")));
         }
 
-        if let Some(ts) = filters.updated_before {
-            sql.push_str(" AND updated_at <= ?");
-            params.push(SqliteValue::from(ts.to_rfc3339()));
-        }
-
-        if let Some(ts) = filters.updated_after {
-            sql.push_str(" AND updated_at >= ?");
-            params.push(SqliteValue::from(ts.to_rfc3339()));
-        }
+        append_date_range_filters(&mut sql, &mut params, filters);
 
         let row = self.conn.query_row_with_params(&sql, &params)?;
         let count = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
@@ -5038,15 +5029,7 @@ impl SqliteStorage {
             params.push(SqliteValue::from(format!("%{escaped}%")));
         }
 
-        if let Some(ts) = filters.updated_before {
-            sql.push_str(" AND updated_at <= ?");
-            params.push(SqliteValue::from(ts.to_rfc3339()));
-        }
-
-        if let Some(ts) = filters.updated_after {
-            sql.push_str(" AND updated_at >= ?");
-            params.push(SqliteValue::from(ts.to_rfc3339()));
-        }
+        append_date_range_filters(&mut sql, &mut params, filters);
 
         let _ = write!(sql, " AND {SEARCH_TEXT_MATCH_SQL}");
         push_search_needle_params(&mut params, &trimmed.to_ascii_lowercase());
@@ -11043,6 +11026,99 @@ pub struct ListFilters {
     pub updated_before: Option<DateTime<Utc>>,
     /// Filter by `updated_at` >= timestamp
     pub updated_after: Option<DateTime<Utc>>,
+    /// Filter by `created_at` >= timestamp (bds-lf1)
+    pub created_after: Option<DateTime<Utc>>,
+    /// Filter by `created_at` <= timestamp
+    pub created_before: Option<DateTime<Utc>>,
+    /// Filter by `closed_at` >= timestamp. Rows with a NULL `closed_at` — every
+    /// issue that is not closed — are excluded; see [`date_range_bounds`].
+    pub closed_after: Option<DateTime<Utc>>,
+    /// Filter by `closed_at` <= timestamp
+    pub closed_before: Option<DateTime<Utc>>,
+    /// Filter by `due_at` >= timestamp. NULL (no due date) is excluded.
+    pub due_after: Option<DateTime<Utc>>,
+    /// Filter by `due_at` <= timestamp
+    pub due_before: Option<DateTime<Utc>>,
+    /// Filter by `defer_until` >= timestamp. NULL (never deferred) is excluded.
+    pub defer_after: Option<DateTime<Utc>>,
+    /// Filter by `defer_until` <= timestamp
+    pub defer_before: Option<DateTime<Utc>>,
+}
+
+impl ListFilters {
+    /// Does any date-range bound narrow this query?
+    ///
+    /// Several query paths have a fast route that only knows how to answer the
+    /// default view, and each one has to fall back to the general builder when a
+    /// range filter is present. They all ask this question rather than
+    /// enumerating the fields themselves, so that adding a bound to
+    /// [`date_range_bounds`] cannot leave a fast path silently ignoring it —
+    /// which is exactly the shape of bug that would make `br list
+    /// --created-after X` return unfiltered rows on one code path and filtered
+    /// rows on another.
+    #[must_use]
+    pub const fn has_date_range_filters(&self) -> bool {
+        self.updated_before.is_some()
+            || self.updated_after.is_some()
+            || self.created_after.is_some()
+            || self.created_before.is_some()
+            || self.closed_after.is_some()
+            || self.closed_before.is_some()
+            || self.due_after.is_some()
+            || self.due_before.is_some()
+            || self.defer_after.is_some()
+            || self.defer_before.is_some()
+    }
+}
+
+/// Every date-range bound this filter set carries, as
+/// `(column, comparison, value)`.
+///
+/// One list, consumed by every SQL builder that supports these filters, so the
+/// list path and the count path that paginates it cannot drift — a count that
+/// applied one bound fewer than the query would report a page total that does
+/// not match the page.
+///
+/// Rows whose column is NULL never match. That is SQL's three-valued logic
+/// rather than an explicit `IS NOT NULL`, and it is the behaviour we want:
+/// `--closed-after` asking about an open issue, or `--due-before` about an issue
+/// with no due date, has no true answer, and returning such rows would make
+/// "closed in the last week" include everything still open.
+fn date_range_bounds(
+    filters: &ListFilters,
+) -> impl Iterator<Item = (&'static str, &'static str, DateTime<Utc>)> + use<'_> {
+    [
+        ("created_at", ">=", filters.created_after),
+        ("created_at", "<=", filters.created_before),
+        ("updated_at", ">=", filters.updated_after),
+        ("updated_at", "<=", filters.updated_before),
+        ("closed_at", ">=", filters.closed_after),
+        ("closed_at", "<=", filters.closed_before),
+        ("due_at", ">=", filters.due_after),
+        ("due_at", "<=", filters.due_before),
+        ("defer_until", ">=", filters.defer_after),
+        ("defer_until", "<=", filters.defer_before),
+    ]
+    .into_iter()
+    .filter_map(|(column, comparison, value)| value.map(|value| (column, comparison, value)))
+}
+
+/// Append every date-range bound to a `WHERE` clause already ending in a
+/// condition.
+///
+/// Comparison is lexicographic on the stored RFC 3339 text, which is correct
+/// only because every write path stores `DateTime<Utc>::to_rfc3339()` — a fixed
+/// `+00:00` offset and fixed field widths. The pre-existing `updated_before`
+/// filter (and therefore `br stale`) already rests on that.
+fn append_date_range_filters(
+    sql: &mut String,
+    params: &mut Vec<SqliteValue>,
+    filters: &ListFilters,
+) {
+    for (column, comparison, value) in date_range_bounds(filters) {
+        let _ = write!(sql, " AND {column} {comparison} ?");
+        params.push(SqliteValue::from(value.to_rfc3339()));
+    }
 }
 
 /// Closure-time policy metadata row (issue #274 Phase 1).
@@ -11275,8 +11351,7 @@ fn default_visible_limited_page_limit(filters: &ListFilters) -> Option<usize> {
         && !filters.reverse
         && filters.labels.as_ref().is_none_or(Vec::is_empty)
         && filters.labels_or.as_ref().is_none_or(Vec::is_empty)
-        && filters.updated_before.is_none()
-        && filters.updated_after.is_none();
+        && !filters.has_date_range_filters();
 
     is_default_visible.then_some(limit)
 }
@@ -11297,8 +11372,7 @@ fn default_visible_single_label_count_filter(filters: &ListFilters) -> Option<&s
         && !filters.include_templates
         && filters.title_contains.is_none()
         && filters.labels_or.as_ref().is_none_or(Vec::is_empty)
-        && filters.updated_before.is_none()
-        && filters.updated_after.is_none();
+        && !filters.has_date_range_filters();
 
     is_default_visible.then_some(label.as_str())
 }

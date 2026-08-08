@@ -575,6 +575,52 @@ where
     }
 }
 
+/// Resolve `--created-after` and its nine siblings onto a `ListFilters`
+/// (bds-lf1).
+///
+/// `br list` and `br search` each build their own `ListFilters`, and both call
+/// this rather than parsing the flags themselves: the two must agree on what
+/// `--updated-after -7d` means down to the instant, or the same argument would
+/// select a different set in each command. `apply_date_range_filters` writing
+/// the fields is also what keeps the ten flags from being enumerated twice.
+///
+/// # Errors
+///
+/// Returns a validation error naming the offending flag if any value is not a
+/// timestamp, a date, a relative offset or a known keyword.
+pub fn apply_date_range_filters(
+    filters: &mut crate::storage::ListFilters,
+    args: &crate::cli::DateRangeArgs,
+) -> crate::error::Result<()> {
+    use crate::util::time::{RangeBound, parse_range_bound};
+
+    let lower = |value: &Option<String>, field: &str| {
+        value
+            .as_deref()
+            .map(|value| parse_range_bound(value, field, RangeBound::Lower))
+            .transpose()
+    };
+    filters.created_after = lower(&args.created_after, "created_after")?;
+    filters.updated_after = lower(&args.updated_after, "updated_after")?;
+    filters.closed_after = lower(&args.closed_after, "closed_after")?;
+    filters.due_after = lower(&args.due_after, "due_after")?;
+    filters.defer_after = lower(&args.defer_after, "defer_after")?;
+
+    let upper = |value: &Option<String>, field: &str| {
+        value
+            .as_deref()
+            .map(|value| parse_range_bound(value, field, RangeBound::Upper))
+            .transpose()
+    };
+    filters.created_before = upper(&args.created_before, "created_before")?;
+    filters.updated_before = upper(&args.updated_before, "updated_before")?;
+    filters.closed_before = upper(&args.closed_before, "closed_before")?;
+    filters.due_before = upper(&args.due_before, "due_before")?;
+    filters.defer_before = upper(&args.defer_before, "defer_before")?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

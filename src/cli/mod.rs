@@ -1210,6 +1210,77 @@ pub fn resolve_output_format_basic_with_outer_mode(
     }
 }
 
+/// Date-range filters shared by `br list` and `br search` (bds-lf1).
+///
+/// One struct, flattened into both commands, because the two share a
+/// `ListFilters` underneath: a flag that reached only one of them would make the
+/// same question answerable in `list` and not in `search` for no reason a caller
+/// could discover.
+///
+/// Every value accepts an absolute timestamp (`2026-03-01T09:00:00Z`), a bare
+/// date (`2026-03-01`), a relative offset (`-7d`, `+2w`), or one of the
+/// `today` / `yesterday` / `tomorrow` / `next-week` keywords. **Both ends are
+/// inclusive**, and a bare date widens to the whole day it names — the start of
+/// it for `--*-after`, the last instant of it for `--*-before` — so
+/// `--created-after 2026-03-01 --created-before 2026-03-01` means "created on
+/// the 1st". See `util::time::parse_range_bound`.
+///
+/// A backwards offset has to be written `--updated-after=-7d`, attached with
+/// `=`: given a space, the shell hands clap `-7d` and clap reads it as flags. The
+/// same applies to `--sort=-updated` and `--due=-7d`, and these flags follow that
+/// existing convention rather than setting `allow_hyphen_values` — which would
+/// make `--updated-after --json` silently consume `--json` as the value.
+///
+/// `closed_at`, `due_at` and `defer_until` are nullable, and a row whose column
+/// is NULL never matches a bound on it: "closed before Friday" does not include
+/// issues that are still open.
+#[derive(Args, Debug, Default, Clone)]
+pub struct DateRangeArgs {
+    /// Only issues created at or after this point
+    #[arg(long, value_name = "WHEN")]
+    pub created_after: Option<String>,
+
+    /// Only issues created at or before this point
+    #[arg(long, value_name = "WHEN")]
+    pub created_before: Option<String>,
+
+    /// Only issues updated at or after this point
+    #[arg(long, value_name = "WHEN")]
+    pub updated_after: Option<String>,
+
+    /// Only issues updated at or before this point
+    #[arg(long, value_name = "WHEN")]
+    pub updated_before: Option<String>,
+
+    /// Only issues closed at or after this point. Implies `--all`, since a
+    /// `closed_at` bound is satisfiable only by a closed issue
+    #[arg(long, value_name = "WHEN")]
+    pub closed_after: Option<String>,
+
+    /// Only issues closed at or before this point. Implies `--all`
+    #[arg(long, value_name = "WHEN")]
+    pub closed_before: Option<String>,
+
+    /// Only issues due at or after this point (excludes issues with no due date)
+    #[arg(long, value_name = "WHEN")]
+    pub due_after: Option<String>,
+
+    /// Only issues due at or before this point (excludes issues with no due
+    /// date)
+    #[arg(long, value_name = "WHEN")]
+    pub due_before: Option<String>,
+
+    /// Only issues deferred until at or after this point (excludes issues with
+    /// no defer date)
+    #[arg(long, value_name = "WHEN")]
+    pub defer_after: Option<String>,
+
+    /// Only issues deferred until at or before this point (excludes issues that
+    /// are not deferred)
+    #[arg(long, value_name = "WHEN")]
+    pub defer_before: Option<String>,
+}
+
 /// Arguments for the list command.
 #[derive(Args, Debug, Default, Clone)]
 #[allow(clippy::struct_excessive_bools)]
@@ -1299,6 +1370,9 @@ pub struct ListArgs {
     /// Filter for overdue issues
     #[arg(long)]
     pub overdue: bool,
+
+    #[command(flatten)]
+    pub dates: DateRangeArgs,
 
     /// Use long output format
     #[arg(long)]

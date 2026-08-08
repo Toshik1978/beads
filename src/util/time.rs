@@ -94,6 +94,56 @@ pub fn parse_flexible_timestamp(s: &str, field_name: &str) -> Result<DateTime<Ut
     }
 }
 
+/// Which end of a date range a bound is, for [`parse_range_bound`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeBound {
+    /// A `--*-after` bound: the earliest instant that still matches.
+    Lower,
+    /// A `--*-before` bound: the latest instant that still matches.
+    Upper,
+}
+
+/// Parse a date-range bound for `br list` / `br search` (bds-lf1).
+///
+/// Everything [`parse_flexible_timestamp`] accepts is accepted here and means
+/// the same instant — RFC 3339, relative offsets like `-7d`, and the
+/// `today`/`yesterday`/`tomorrow`/`next-week` keywords. The one deliberate
+/// difference is the bare `YYYY-MM-DD` form.
+///
+/// `parse_flexible_timestamp` reads a bare date as **09:00 local**, which is the
+/// right guess for `--due 2026-03-01` (a deadline is a moment in a working day)
+/// and the wrong one for a range. `--created-after 2026-03-01 --created-before
+/// 2026-03-01` would be a range of zero width at 09:00 and would match almost
+/// nothing, when the only thing a reader could mean by it is "created on the
+/// 1st". So a bare date widens to the day it names: the start of it for a lower
+/// bound, the last instant of it for an upper one.
+///
+/// Both ends are **inclusive**, which is what the pre-existing
+/// `ListFilters::updated_before` already did (`updated_at <= ?`) and what
+/// `br stale` depends on. A timestamp given explicitly is used exactly as
+/// given — the widening applies only to the form that names a day rather than
+/// an instant.
+///
+/// # Errors
+///
+/// Same as [`parse_flexible_timestamp`]: an unrecognised format, a bad relative
+/// unit, or a local time that cannot be resolved.
+pub fn parse_range_bound(s: &str, field_name: &str, bound: RangeBound) -> Result<DateTime<Utc>> {
+    let trimmed = s.trim();
+    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        let time = match bound {
+            RangeBound::Lower => NaiveTime::MIN,
+            // 23:59:59.999999999 rather than the next midnight, so that an
+            // inclusive `<=` cannot pick up the first instant of the next day.
+            RangeBound::Upper => {
+                NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999).unwrap_or(NaiveTime::MIN)
+            }
+        };
+        return local_to_utc(&date.and_time(time), field_name);
+    }
+    parse_flexible_timestamp(trimmed, field_name)
+}
+
 fn parse_rfc3339_timestamp(s: &str) -> Option<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.with_timezone(&Utc));
@@ -284,12 +334,76 @@ mod tests {
         parse_relative_timestamp(s).ok().flatten()
     }
     use super::*;
-    use chrono::Datelike;
+    use chrono::{Datelike, Timelike};
 
     #[test]
     fn test_parse_flexible_rfc3339() {
         let result = parse_flexible_timestamp("2025-01-15T12:00:00Z", "test").unwrap();
         assert_eq!(result.year(), 2025);
+    }
+
+    /// bds-lf1: a bare date names a *day*, and a range bound has to widen to it.
+    ///
+    /// The failure this prevents is quiet: with `parse_flexible_timestamp`'s
+    /// 09:00 reading, `--created-after 2026-03-01 --created-before 2026-03-01`
+    /// is a zero-width range at one instant and matches nothing, which looks
+    /// like "no issues were created that day" rather than like a bug.
+    #[test]
+    fn a_bare_date_range_bound_widens_to_the_whole_day() {
+        let lower = parse_range_bound("2026-03-01", "created_after", RangeBound::Lower).unwrap();
+        let upper = parse_range_bound("2026-03-01", "created_before", RangeBound::Upper).unwrap();
+
+        assert!(lower < upper, "lower={lower}, upper={upper}");
+        assert_eq!(
+            (upper - lower).num_seconds(),
+            24 * 60 * 60 - 1,
+            "the pair has to span the named day: lower={lower}, upper={upper}"
+        );
+
+        // Interpreted in the local zone, as every other bare date in this module
+        // is, and the endpoints land on the day named rather than beside it.
+        let local_lower = to_local(lower).naive_local();
+        let local_upper = to_local(upper).naive_local();
+        assert_eq!(local_lower.date(), local_upper.date());
+        assert_eq!(local_lower.time(), NaiveTime::MIN);
+        assert_eq!(local_upper.time().second(), 59);
+    }
+
+    /// Anything that names an instant is taken at that instant, both ends alike.
+    /// The widening is a property of the bare-date *form*, not of the bound.
+    #[test]
+    fn an_explicit_timestamp_range_bound_is_not_widened() {
+        let lower =
+            parse_range_bound("2026-03-01T12:00:00Z", "created_after", RangeBound::Lower).unwrap();
+        let upper =
+            parse_range_bound("2026-03-01T12:00:00Z", "created_before", RangeBound::Upper).unwrap();
+        assert_eq!(lower, upper);
+        assert_eq!(
+            lower,
+            parse_flexible_timestamp("2026-03-01T12:00:00Z", "test").unwrap()
+        );
+    }
+
+    /// The relative and keyword forms are shared with `--due` / `--defer`
+    /// wholesale; a range bound must not quietly grow its own dialect.
+    #[test]
+    fn relative_and_keyword_range_bounds_match_the_flexible_parser() {
+        for spelling in ["-7d", "+2w", "yesterday", "tomorrow", "next-week"] {
+            let bound = parse_range_bound(spelling, "updated_after", RangeBound::Lower)
+                .unwrap_or_else(|error| panic!("{spelling} should parse: {error}"));
+            let flexible = parse_flexible_timestamp(spelling, "test").unwrap();
+            // Relative forms are anchored on `Utc::now()` at call time, so allow
+            // the microseconds between the two calls.
+            assert!(
+                (bound - flexible).num_seconds().abs() <= 1,
+                "{spelling}: bound={bound}, flexible={flexible}"
+            );
+        }
+
+        assert!(
+            parse_range_bound("last-fortnight", "updated_after", RangeBound::Lower).is_err(),
+            "an unrecognised spelling has to be rejected, not guessed at"
+        );
     }
 
     #[test]

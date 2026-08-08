@@ -421,7 +421,13 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
     let include_closed = args.all
         || statuses
             .as_ref()
-            .is_some_and(|parsed| parsed.iter().any(Status::is_terminal));
+            .is_some_and(|parsed| parsed.iter().any(Status::is_terminal))
+        // A `closed_at` bound is satisfiable only by a closed issue, so leaving
+        // the default "hide closed" in place would make `--closed-after -7d`
+        // return nothing, every time, for a reason the caller cannot see. The
+        // bound is taken as the request it plainly is (bds-lf1).
+        || args.dates.closed_after.is_some()
+        || args.dates.closed_before.is_some();
 
     // Deferred issues are included by default (consistent with "open" status semantics).
     // They are only excluded when explicitly filtering by status that doesn't include deferred.
@@ -432,7 +438,7 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
             .as_ref()
             .is_some_and(|parsed| parsed.contains(&Status::Deferred));
 
-    Ok(ListFilters {
+    let mut filters = ListFilters {
         statuses,
         types,
         priorities,
@@ -460,9 +466,12 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
         } else {
             Some(args.label_any.clone())
         },
-        updated_before: None,
-        updated_after: None,
-    })
+        ..ListFilters::default()
+    };
+    // The ten date-range bounds are resolved in one shared place so `list` and
+    // `search` cannot disagree about what `--updated-after -7d` means.
+    super::apply_date_range_filters(&mut filters, &args.dates)?;
+    Ok(filters)
 }
 
 fn needs_client_filters(args: &ListArgs) -> bool {

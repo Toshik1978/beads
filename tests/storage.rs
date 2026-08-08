@@ -21,6 +21,8 @@ mod agent_context_sync;
 mod blocked_cache;
 #[path = "storage/crud.rs"]
 mod crud;
+#[path = "storage/date_range_filters.rs"]
+mod date_range_filters;
 #[path = "storage/deps.rs"]
 mod deps;
 #[path = "storage/export_atomic.rs"]

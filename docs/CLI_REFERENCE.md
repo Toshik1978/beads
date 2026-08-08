@@ -227,6 +227,45 @@ br list [OPTIONS]
 | `--deferred` | Include deferred issues |
 | `--overdue` | Filter for overdue issues |
 
+**Date-Range Options** (also on `br search`):
+| Option | Description |
+|--------|-------------|
+| `--created-after <WHEN>` / `--created-before <WHEN>` | Bound on `created_at` |
+| `--updated-after <WHEN>` / `--updated-before <WHEN>` | Bound on `updated_at` |
+| `--closed-after <WHEN>` / `--closed-before <WHEN>` | Bound on `closed_at`; implies `--all` |
+| `--due-after <WHEN>` / `--due-before <WHEN>` | Bound on `due_at` |
+| `--defer-after <WHEN>` / `--defer-before <WHEN>` | Bound on `defer_until` |
+
+`<WHEN>` accepts a timestamp (`2026-03-01T09:00:00Z`), a bare date
+(`2026-03-01`), a relative offset (`-7d`, `+2w`), or `today` / `yesterday` /
+`tomorrow` / `next-week`.
+
+**Both ends are inclusive.** A bare date widens to the whole day it names — the
+start of it for `--*-after`, the last instant for `--*-before` — so
+`--created-after 2026-03-01 --created-before 2026-03-01` means "created on the
+1st". A timestamp given explicitly is used exactly as given.
+
+`closed_at`, `due_at` and `defer_until` are nullable, and **a row with no value
+in the column never matches a bound on it**: "closed in the last week" does not
+include issues that are still open. Because a `closed_at` bound can only ever be
+satisfied by a closed issue, `--closed-after`/`--closed-before` turn on `--all`
+for you rather than returning an empty list.
+
+Write a backwards offset attached with `=` — `--updated-after=-7d`. With a space
+the shell hands `-7d` to clap, which reads it as flags. This is the same
+convention `--sort=-updated` and `--due=-7d` already follow.
+
+```bash
+# Everything touched since last Monday, newest first
+br list --updated-after=-7d --sort=-updated
+
+# What got closed yesterday
+br list --closed-after yesterday --closed-before yesterday
+
+# Overdue work that was filed this quarter
+br list --due-before today --created-after 2026-01-01
+```
+
 **Output Options:**
 | Option | Description |
 |--------|-------------|

@@ -33,6 +33,8 @@ mod concurrency;
 mod config_precedence;
 #[path = "e2e/create_output.rs"]
 mod create_output;
+#[path = "e2e/date_range_flags.rs"]
+mod date_range_flags;
 #[path = "e2e/defer.rs"]
 mod defer;
 #[path = "e2e/dep_tree_mermaid.rs"]
