@@ -227,6 +227,27 @@ br list [OPTIONS]
 | `--deferred` | Include deferred issues |
 | `--overdue` | Filter for overdue issues |
 
+**Exclusion Options** (also on `br search` and `br ready`):
+| Option | Description |
+|--------|-------------|
+| `--exclude-label <LABEL>` | Exclude issues carrying this label (can repeat) |
+| `--exclude-type <TYPE>` | Exclude issues of this type (can repeat) |
+| `--no-labels` | Exclude issues that carry any label |
+| `--no-parent` | Exclude issues that have a parent |
+
+Repeating an exclusion means **none of these**, not "not all of these" —
+`--exclude-label a --exclude-label b` drops anything carrying either. Note that
+this is the opposite of `--label`, which ANDs. Exclusions compose with the
+positive form of the same field, so `--label urgent --exclude-label wontfix`
+narrows twice.
+
+There is no `--no-assignee`: `--unassigned` already is that filter on all three
+commands, and a second spelling would be a synonym to keep working forever.
+
+`--no-parent` asks about the `parent-child` dependency row, which is where
+parenthood is recorded — not about the shape of the ID, which is a consequence of
+it.
+
 **Date-Range Options** (also on `br search`):
 | Option | Description |
 |--------|-------------|
@@ -541,6 +562,7 @@ br ready [OPTIONS]
 | `--label-any <LABEL>` | Filter by label (OR logic) |
 | `-t, --type <TYPE>` | Filter by type |
 | `-p, --priority <N>` | Filter by priority |
+| `--exclude-label <LABEL>` / `--exclude-type <TYPE>` / `--no-labels` / `--no-parent` | The exclusion filters; see `br list` |
 | `--sort <POLICY>` | Sort: hybrid (default), priority, oldest |
 | `--include-deferred` | Include deferred issues |
 | `--parent <ID>` | Filter to children of a parent issue |

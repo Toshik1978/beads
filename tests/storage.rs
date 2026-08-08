@@ -25,6 +25,8 @@ mod crud;
 mod date_range_filters;
 #[path = "storage/deps.rs"]
 mod deps;
+#[path = "storage/exclusion_filters.rs"]
+mod exclusion_filters;
 #[path = "storage/export_atomic.rs"]
 mod export_atomic;
 #[path = "storage/golden_snapshot.rs"]

@@ -131,6 +131,7 @@ fn execute_inner(
         // --epic implies descent through the whole subtree.
         recursive: args.recursive || args.epic.is_some(),
         parent_member_ids: None,
+        exclude: super::resolve_exclusion_filters(&args.exclude)?,
     };
 
     let sort_policy = match args.sort {

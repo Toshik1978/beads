@@ -47,6 +47,8 @@ mod env_overrides;
 mod epic;
 #[path = "e2e/errors.rs"]
 mod errors;
+#[path = "e2e/exclusion_flags.rs"]
+mod exclusion_flags;
 #[path = "e2e/git_safety_full_cli.rs"]
 mod git_safety_full_cli;
 #[path = "e2e/global_flags.rs"]

@@ -575,6 +575,33 @@ where
     }
 }
 
+/// Resolve `--exclude-label` and its three siblings (bds-3rt).
+///
+/// `list`, `search` and `ready` all call this rather than each converting the
+/// flags themselves, so `--exclude-type bug` cannot come to mean one thing on
+/// one command and another on the next. It is also the only place issue-type
+/// strings are parsed for exclusion, which is what makes a typo an error on all
+/// three at once instead of a silently ineffective filter on two of them.
+///
+/// # Errors
+///
+/// Returns a validation error if any `--exclude-type` value is not a known issue
+/// type.
+pub fn resolve_exclusion_filters(
+    args: &crate::cli::ExclusionArgs,
+) -> crate::error::Result<crate::storage::ExclusionFilters> {
+    let mut types = Vec::with_capacity(args.exclude_type.len());
+    for value in &args.exclude_type {
+        types.push(value.parse::<crate::model::IssueType>()?);
+    }
+    Ok(crate::storage::ExclusionFilters {
+        labels: args.exclude_label.clone(),
+        types,
+        no_labels: args.no_labels,
+        no_parent: args.no_parent,
+    })
+}
+
 /// Resolve `--created-after` and its nine siblings onto a `ListFilters`
 /// (bds-lf1).
 ///

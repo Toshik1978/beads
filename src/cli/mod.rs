@@ -1210,6 +1210,35 @@ pub fn resolve_output_format_basic_with_outer_mode(
     }
 }
 
+/// Negative filters shared by `br list`, `br search` and `br ready` (bds-3rt).
+///
+/// The positive forms (`--label`, `--label-any`, `--type`) already exist on all
+/// three; these are their complements, so "everything except the noise" is one
+/// query instead of `list` piped through `grep`, which loses the JSON contract.
+///
+/// `--no-assignee` is deliberately absent. `--unassigned` already is that
+/// filter on every one of these commands, and shipping a second spelling of it
+/// would be a synonym to keep working forever.
+#[derive(Args, Debug, Default, Clone)]
+pub struct ExclusionArgs {
+    /// Exclude issues carrying this label (can repeat). Repeating means "none of
+    /// these", not "not all of these"
+    #[arg(long, add = ArgValueCompleter::new(label_completer))]
+    pub exclude_label: Vec<String>,
+
+    /// Exclude issues of this type (can repeat)
+    #[arg(long, add = ArgValueCompleter::new(issue_type_completer))]
+    pub exclude_type: Vec<String>,
+
+    /// Exclude issues that carry any label at all
+    #[arg(long)]
+    pub no_labels: bool,
+
+    /// Exclude issues that have a parent
+    #[arg(long)]
+    pub no_parent: bool,
+}
+
 /// Date-range filters shared by `br list` and `br search` (bds-lf1).
 ///
 /// One struct, flattened into both commands, because the two share a
@@ -1373,6 +1402,9 @@ pub struct ListArgs {
 
     #[command(flatten)]
     pub dates: DateRangeArgs,
+
+    #[command(flatten)]
+    pub exclude: ExclusionArgs,
 
     /// Use long output format
     #[arg(long)]
@@ -1738,6 +1770,9 @@ pub struct ReadyArgs {
     /// Include deferred issues
     #[arg(long)]
     pub include_deferred: bool,
+
+    #[command(flatten)]
+    pub exclude: ExclusionArgs,
 
     /// Filter to children of this parent issue ID
     #[arg(long, add = ArgValueCompleter::new(issue_id_completer))]

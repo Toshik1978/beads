@@ -532,6 +532,7 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
         } else {
             Some(args.label_any.clone())
         },
+        exclude: super::resolve_exclusion_filters(&args.exclude)?,
         ..ListFilters::default()
     };
     // The ten date-range bounds are resolved in one shared place so `list` and

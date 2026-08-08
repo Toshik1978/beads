@@ -281,6 +281,101 @@ fn append_label_membership_filters(
     }
 }
 
+/// The negative half of the filter vocabulary (bds-3rt).
+///
+/// Shared verbatim by `ListFilters` (which `list` and `search` both build) and
+/// `ReadyFilters`, so the same flags mean the same thing on all three commands —
+/// they are one struct rather than three copies precisely because "everything
+/// except the noise" is the shape people reach for on whichever command they
+/// happen to be using.
+///
+/// Not included, deliberately: a `no_assignee` field. `ListFilters::unassigned`
+/// and `ReadyFilters::unassigned` already are that filter, and a second spelling
+/// of an existing flag is a synonym to maintain, not a feature.
+#[derive(Debug, Clone, Default)]
+pub struct ExclusionFilters {
+    /// Reject issues carrying **any** of these labels. Union semantics, which is
+    /// the only reading that makes sense for an exclusion: `--exclude-label a
+    /// --exclude-label b` means "neither a nor b", not "not both".
+    pub labels: Vec<String>,
+    /// Reject issues of any of these types.
+    pub types: Vec<IssueType>,
+    /// Reject issues that carry any label at all.
+    pub no_labels: bool,
+    /// Reject issues that have a parent.
+    pub no_parent: bool,
+}
+
+impl ExclusionFilters {
+    /// Does this narrow the query at all?
+    ///
+    /// Asked by every query fast path, for the reason spelled out on
+    /// [`ListFilters::has_date_range_filters`]: a route that answered an
+    /// exclusion-bearing query from a path that cannot apply exclusions would
+    /// return the rows the caller asked to be rid of, which reads as "the flag
+    /// does nothing" rather than as a failure.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.labels.is_empty() && self.types.is_empty() && !self.no_labels && !self.no_parent
+    }
+}
+
+/// Append the exclusion filters to a `WHERE` clause already ending in a
+/// condition.
+///
+/// Every clause is an anti-join written as `NOT IN`, against `issues.id` rather
+/// than a bare `id` because some callers reach this with `labels` joined in and
+/// the column ambiguous.
+///
+/// The `NOT IN` subqueries are safe against NULL here — `labels.issue_id` and
+/// `dependencies.issue_id` are both NOT NULL, and a single NULL in a `NOT IN`
+/// list would otherwise make the whole predicate unknown and drop every row.
+fn append_exclusion_filters(
+    sql: &mut String,
+    params: &mut Vec<SqliteValue>,
+    exclude: &ExclusionFilters,
+) {
+    let unique_labels = unique_label_refs(&exclude.labels);
+    if !unique_labels.is_empty() {
+        let placeholders: Vec<String> = unique_labels.iter().map(|_| "?".to_string()).collect();
+        let _ = write!(
+            sql,
+            " AND issues.id NOT IN (SELECT issue_id FROM labels WHERE label IN ({}))",
+            placeholders.join(",")
+        );
+        for label in &unique_labels {
+            params.push(SqliteValue::from(label.as_str()));
+        }
+    }
+
+    if exclude.no_labels {
+        sql.push_str(" AND issues.id NOT IN (SELECT issue_id FROM labels)");
+    }
+
+    if !exclude.types.is_empty() {
+        let placeholders: Vec<String> = exclude.types.iter().map(|_| "?".to_string()).collect();
+        let _ = write!(
+            sql,
+            " AND issues.issue_type NOT IN ({})",
+            placeholders.join(",")
+        );
+        for issue_type in &exclude.types {
+            params.push(SqliteValue::from(issue_type.as_str()));
+        }
+    }
+
+    if exclude.no_parent {
+        // A parent is a `parent-child` dependency row, not a column -- see
+        // `get_parent_id`. The dotted ID is a consequence of having a parent
+        // rather than the record of it, so matching on the ID shape would answer
+        // a different question.
+        sql.push_str(
+            " AND issues.id NOT IN \
+             (SELECT issue_id FROM dependencies WHERE type = 'parent-child')",
+        );
+    }
+}
+
 fn append_issue_source_with_label_and_joins(
     sql: &mut String,
     params: &mut Vec<SqliteValue>,
@@ -4239,6 +4334,7 @@ impl SqliteStorage {
         }
 
         append_date_range_filters(&mut sql, &mut params, filters);
+        append_exclusion_filters(&mut sql, &mut params, &filters.exclude);
 
         if !sort_default_in_rust {
             let spec = filters.sort.clone().unwrap_or_else(SortSpec::default_order);
@@ -4383,6 +4479,7 @@ impl SqliteStorage {
             || filters.include_templates
             || filters.title_contains.is_some()
             || filters.has_date_range_filters()
+            || !filters.exclude.is_empty()
             || filters.sort.is_some()
             || filters.reverse;
         if unsupported_filter {
@@ -4521,6 +4618,7 @@ impl SqliteStorage {
                 ..filters.clone()
             }
             .has_date_range_filters()
+            || !filters.exclude.is_empty()
             || filters.sort.as_ref().is_none_or(|spec| {
                 spec.resolved(filters.reverse)
                     != [
@@ -4660,7 +4758,8 @@ impl SqliteStorage {
                 && filters.priorities.as_ref().is_none_or(Vec::is_empty)
                 && filters.assignee.is_none()
                 && filters.title_contains.is_none()
-                && !filters.has_date_range_filters();
+                && !filters.has_date_range_filters()
+                && filters.exclude.is_empty();
         let label_candidate_ids = if label_filters_can_use_uncorrelated_in {
             None
         } else {
@@ -4736,6 +4835,7 @@ impl SqliteStorage {
         }
 
         append_date_range_filters(&mut sql, &mut params, filters);
+        append_exclusion_filters(&mut sql, &mut params, &filters.exclude);
 
         let row = self.conn.query_row_with_params(&sql, &params)?;
         let count = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
@@ -5030,6 +5130,7 @@ impl SqliteStorage {
         }
 
         append_date_range_filters(&mut sql, &mut params, filters);
+        append_exclusion_filters(&mut sql, &mut params, &filters.exclude);
 
         let _ = write!(sql, " AND {SEARCH_TEXT_MATCH_SQL}");
         push_search_needle_params(&mut params, &trimmed.to_ascii_lowercase());
@@ -5372,6 +5473,10 @@ impl SqliteStorage {
 
         // Exclude templates
         sql.push_str(" AND is_template = 0");
+
+        // The negative filters (bds-3rt), from the same struct `list` and
+        // `search` use, so --exclude-label means one thing across all three.
+        append_exclusion_filters(&mut sql, &mut params, &filters.exclude);
 
         // Filter by types
         if let Some(ref types) = filters.types
@@ -11043,6 +11148,8 @@ pub struct ListFilters {
     pub defer_after: Option<DateTime<Utc>>,
     /// Filter by `defer_until` <= timestamp
     pub defer_before: Option<DateTime<Utc>>,
+    /// The negative filters (bds-3rt).
+    pub exclude: ExclusionFilters,
 }
 
 impl ListFilters {
@@ -11293,6 +11400,8 @@ pub struct ReadyFilters {
     /// `Some(empty)` means "parent is set but has no matching descendants" → the
     /// candidate query must return no rows. `None` means no parent filter.
     pub parent_member_ids: Option<Vec<String>>,
+    /// The negative filters (bds-3rt), shared verbatim with `ListFilters`.
+    pub exclude: ExclusionFilters,
 }
 
 /// Minimal metadata needed for fast collision detection during sync.
@@ -11351,7 +11460,8 @@ fn default_visible_limited_page_limit(filters: &ListFilters) -> Option<usize> {
         && !filters.reverse
         && filters.labels.as_ref().is_none_or(Vec::is_empty)
         && filters.labels_or.as_ref().is_none_or(Vec::is_empty)
-        && !filters.has_date_range_filters();
+        && !filters.has_date_range_filters()
+        && filters.exclude.is_empty();
 
     is_default_visible.then_some(limit)
 }
@@ -11372,7 +11482,8 @@ fn default_visible_single_label_count_filter(filters: &ListFilters) -> Option<&s
         && !filters.include_templates
         && filters.title_contains.is_none()
         && filters.labels_or.as_ref().is_none_or(Vec::is_empty)
-        && !filters.has_date_range_filters();
+        && !filters.has_date_range_filters()
+        && filters.exclude.is_empty();
 
     is_default_visible.then_some(label.as_str())
 }
