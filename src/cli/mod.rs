@@ -924,6 +924,14 @@ pub struct CreateArgs {
     #[arg(long, value_name = "PATH", conflicts_with = "description")]
     pub description_file: Option<std::path::PathBuf>,
 
+    /// Additional notes
+    #[arg(long)]
+    pub notes: Option<String>,
+
+    /// Acceptance criteria
+    #[arg(long, visible_alias = "acceptance")]
+    pub acceptance_criteria: Option<String>,
+
     /// Assign to person
     #[arg(long, short = 'a', add = ArgValueCompleter::new(assignee_completer))]
     pub assignee: Option<String>,
@@ -1012,9 +1020,16 @@ pub struct UpdateArgs {
     #[arg(long, visible_alias = "acceptance")]
     pub acceptance_criteria: Option<String>,
 
-    /// Update additional notes
-    #[arg(long)]
+    /// Update additional notes, replacing whatever was there
+    #[arg(long, conflicts_with = "append_notes")]
     pub notes: Option<String>,
+
+    /// Append to additional notes instead of replacing them, separated by a
+    /// blank line. The read-modify-write happens inside the same transaction as
+    /// the write, so two agents appending at once cannot lose one another's text
+    /// -- which is exactly what doing it by hand with `--notes` risks
+    #[arg(long, value_name = "NOTES")]
+    pub append_notes: Option<String>,
 
     /// New comment bound atomically to the requested status transition.
     /// Required when policy lists `transition_comment` for the transition.
@@ -1906,8 +1921,25 @@ pub struct CloseArgs {
     pub ids: Vec<String>,
 
     /// Close reason
-    #[arg(long, short = 'r')]
+    #[arg(long, short = 'r', conflicts_with = "reason_file")]
     pub reason: Option<String>,
+
+    /// Read the close reason verbatim from a file (or `-` for stdin), for
+    /// reasons too long or too markdown-shaped to pass through shell quoting.
+    /// Mirrors `br create --description-file` and `br update
+    /// --description-file`. Mutually exclusive with `-r/--reason`
+    #[arg(long, value_name = "PATH")]
+    pub reason_file: Option<std::path::PathBuf>,
+
+    /// Keep going when one issue cannot be closed, and report what failed.
+    ///
+    /// Without this, a per-issue policy violation aborts the whole batch.
+    /// With it, that issue is recorded as skipped and the rest are closed —
+    /// and the exit code becomes non-zero unless every requested issue ended
+    /// up closed. "Ended up" includes issues that were already closed, so a
+    /// re-run of a partially-completed batch still exits 0
+    #[arg(long = "continue")]
+    pub keep_going: bool,
 
     /// New comment committed atomically with each close transition. This is
     /// distinct from close metadata in `--reason`.

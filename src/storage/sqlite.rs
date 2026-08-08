@@ -3435,6 +3435,21 @@ impl SqliteStorage {
             issue.notes.clone_from(val);
             add_update("notes", SqliteValue::from(val.as_deref().unwrap_or("")));
         }
+        // bds-yo8. `issue` was loaded by this transaction, so the value being
+        // appended to is the committed one -- not one a concurrent writer has
+        // since replaced. A blank line separates the paragraphs, which is what
+        // the field's markdown shape wants; an empty or whitespace-only existing
+        // value is replaced outright rather than prefixed with blank lines.
+        if let Some(ref addition) = updates.append_notes {
+            let combined = match issue.notes.as_deref().map(str::trim_end) {
+                Some(existing) if !existing.trim().is_empty() => {
+                    format!("{existing}\n\n{addition}")
+                }
+                _ => addition.clone(),
+            };
+            issue.notes = Some(combined.clone());
+            add_update("notes", SqliteValue::from(combined));
+        }
 
         // Status
         if let Some(ref status) = updates.status {
@@ -11317,6 +11332,19 @@ pub struct IssueUpdate {
     pub claim_exclusive: bool,
     /// The actor performing the claim (used for idempotent same-actor check).
     pub claim_actor: Option<String>,
+    /// Append to `notes` rather than replacing them (bds-yo8).
+    /// `br update --append-notes`.
+    ///
+    /// The read-modify-write happens inside the write transaction, against the
+    /// row that transaction loaded — which is the whole reason this is a storage
+    /// field rather than something the CLI could do with two calls. Two agents
+    /// appending at once would otherwise each read the same "before" and the
+    /// second write would drop the first's text; that is the general shape of
+    /// problem `expect_status` exists for, and appending is the case where it
+    /// bites without anybody asking for a guard.
+    ///
+    /// Mutually exclusive with `notes` at the CLI boundary.
+    pub append_notes: Option<String>,
     /// Compare-and-set guard: apply only if the stored status still equals this
     /// value (bds-o9a). `br update --if-status`.
     ///
@@ -11360,6 +11388,7 @@ impl IssueUpdate {
             && self.delete_reason.is_none()
             && self.transition_comment.is_none()
             && self.workflow_policy_bypass_reason.is_none()
+            && self.append_notes.is_none()
             && !self.expect_unassigned
     }
 }

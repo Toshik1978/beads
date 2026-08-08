@@ -997,6 +997,8 @@ mod tests {
     fn make_create_args() -> beads::cli::CreateArgs {
         beads::cli::CreateArgs {
             title: Some("test-title".to_string()),
+            notes: None,
+            acceptance_criteria: None,
             title_flag: None,
             type_: None,
             priority: None,

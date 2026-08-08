@@ -45,6 +45,8 @@ mod detach;
 mod env_overrides;
 #[path = "e2e/epic.rs"]
 mod epic;
+#[path = "e2e/ergonomics.rs"]
+mod ergonomics;
 #[path = "e2e/errors.rs"]
 mod errors;
 #[path = "e2e/exclusion_flags.rs"]

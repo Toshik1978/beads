@@ -1,10 +1,12 @@
 //! Close command implementation.
 
+use super::create::read_text_argument_file;
 use crate::cli::CloseArgs as CliCloseArgs;
 use crate::cli::commands::{
     acquire_routed_workspace_write_lock, auto_import_storage_ctx_if_stale,
     finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error,
-    report_auto_flush_failure, resolve_issue_ids, update_issues_atomically_with_recovery,
+    report_auto_flush_failure, resolve_issue_id, resolve_issue_ids,
+    update_issues_atomically_with_recovery,
 };
 use crate::close_policy::{self, CloseEvidence, ClosePolicy, PolicyViolation};
 use crate::config;
@@ -38,20 +40,46 @@ pub struct CloseArgs {
     pub bypass_policy: bool,
     /// Reason for bypass. Required when `bypass_policy = true`.
     pub bypass_reason: Option<String>,
+    /// Keep going past a per-issue policy violation, and make the exit code
+    /// report whether every requested issue ended up closed (bds-yo8).
+    pub keep_going: bool,
 }
 
-impl From<&CliCloseArgs> for CloseArgs {
-    fn from(cli: &CliCloseArgs) -> Self {
-        Self {
+impl TryFrom<&CliCloseArgs> for CloseArgs {
+    type Error = BeadsError;
+
+    /// `--reason-file` is read here, exactly once, before any route is opened.
+    /// The same reasoning as `resolve_update_description`: a routed batch and a
+    /// JSONL-recovery retry both re-run the close with these args, and re-reading
+    /// stdin the second time would find it empty.
+    fn try_from(cli: &CliCloseArgs) -> Result<Self> {
+        let reason = match cli.reason_file.as_deref() {
+            Some(path) => {
+                if cli.reason.is_some() {
+                    return Err(BeadsError::validation(
+                        "reason_file",
+                        "cannot be combined with --reason",
+                    ));
+                }
+                Some(read_text_argument_file(
+                    path,
+                    "reason_file",
+                    "close reason",
+                )?)
+            }
+            None => cli.reason.clone(),
+        };
+        Ok(Self {
             ids: cli.ids.clone(),
-            reason: cli.reason.clone(),
+            reason,
             transition_comment: cli.transition_comment.clone(),
             force: cli.force,
             session: cli.session.clone(),
             suggest_next: cli.suggest_next,
             bypass_policy: cli.bypass_policy,
             bypass_reason: cli.bypass_reason.clone(),
-        }
+            keep_going: cli.keep_going,
+        })
     }
 }
 
@@ -216,7 +244,7 @@ pub fn execute_cli(
     cli: &config::CliOverrides,
     ctx: &OutputContext,
 ) -> Result<()> {
-    let args = CloseArgs::from(cli_args);
+    let args = CloseArgs::try_from(cli_args)?;
     execute_with_args(&args, json, cli, ctx)
 }
 
@@ -263,6 +291,14 @@ pub struct ClosedIssue {
 pub struct SkippedIssue {
     pub id: String,
     pub reason: String,
+    /// The issue was already closed (or tombstoned), so nothing needed doing.
+    ///
+    /// `#[serde(skip)]` on purpose: the `--json` payload's field set is a
+    /// consumer contract and this is bookkeeping for `--continue`'s exit code
+    /// (bds-yo8), not information a caller asked for -- the `reason` string
+    /// already says "already closed" in words.
+    #[serde(skip)]
+    pub already_terminal: bool,
 }
 
 #[allow(dead_code)]
@@ -613,6 +649,12 @@ pub fn execute_with_args(
 
     let closed_count = closed_issues.len();
     let skipped_count = skipped_issues.len();
+    // Skips that leave the issue *not* closed. See the `--continue` exit-code
+    // block at the end of this function.
+    let unresolved_count = skipped_issues
+        .iter()
+        .filter(|skipped| !skipped.already_terminal)
+        .count();
     // Capture per-issue skip reasons BEFORE the vectors are moved into the
     // output emitters. When every issue is skipped, the terminal error must
     // carry the real reasons: a generic "all N skipped" used to imply
@@ -655,7 +697,28 @@ pub fn execute_with_args(
         }
     }
 
-    if closed_count == 0 && skipped_count > 0 {
+    // bds-yo8. `--continue` replaces the exit-code rule rather than adding to it.
+    //
+    // The default rule -- error only when *nothing* closed -- lets a partial batch
+    // exit 0, which is defensible interactively and poor in a script. A caller who
+    // passed `--continue` intends to inspect the outcome, so for them the question
+    // becomes "did every issue I named end up closed?".
+    //
+    // "Ended up closed" counts issues that were *already* closed. That is what
+    // makes `--continue` safe to re-run over a batch that half-succeeded: the
+    // second run reports the rest as already closed and exits 0. Under the default
+    // rule that same re-run errors, which is why this replaces it instead of
+    // stacking on top -- and why the default is left exactly as it was, since
+    // changing an exit code under existing callers would be worse than the gap.
+    if args.keep_going {
+        if unresolved_count > 0 {
+            return Err(BeadsError::PartiallyCompleted {
+                reason: format!(
+                    "closed {closed_count} issue(s); {unresolved_count} not closed — {skip_summary}"
+                ),
+            });
+        }
+    } else if closed_count == 0 && skipped_count > 0 {
         return Err(BeadsError::NothingToDo {
             reason: format!("all {skipped_count} issue(s) skipped — {skip_summary}"),
         });
@@ -707,7 +770,40 @@ fn execute_route(
     let actor = config::resolve_actor(&config_layer);
     let id_config = config::id_config_from_layer(&config_layer);
     let resolver = IdResolver::new(ResolverConfig::with_prefix(id_config.prefix));
-    let resolved_ids = resolve_issue_ids(&storage_ctx.storage, &resolver, &args.ids)?;
+    // bds-yo8. Without `--continue`, one unresolvable ID in a batch of ten fails
+    // the command before any of the ten is looked at -- which is the case people
+    // reach for `--continue` to fix. With it, each input is resolved on its own
+    // and a failure becomes that slot's outcome.
+    //
+    // `resolved_ids` stays 1:1 with `args.ids`, with an unresolvable input
+    // standing in for itself: `ordered_outcomes` is indexed by position and the
+    // routed-batch reordering maps outcomes back to inputs positionally, so a
+    // compacted list would silently misalign both.
+    let mut pre_skipped: HashMap<usize, SkippedIssue> = HashMap::new();
+    let resolved_ids = if args.keep_going {
+        args.ids
+            .iter()
+            .enumerate()
+            .map(
+                |(index, input)| match resolve_issue_id(&storage_ctx.storage, &resolver, input) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        pre_skipped.insert(
+                            index,
+                            SkippedIssue {
+                                id: input.clone(),
+                                reason: error.to_string(),
+                                already_terminal: false,
+                            },
+                        );
+                        input.clone()
+                    }
+                },
+            )
+            .collect()
+    } else {
+        resolve_issue_ids(&storage_ctx.storage, &resolver, &args.ids)?
+    };
 
     // Closure-time policy gates (issue #274 Phase 1). Loading happens once per
     // route; if the file is absent the doc is the all-off default.
@@ -750,6 +846,11 @@ fn execute_route(
     let mut planned_closes = Vec::new();
     for (outcome_index, id) in resolved_ids.iter().enumerate() {
         ordered_outcomes.push(None);
+        if let Some(skipped) = pre_skipped.remove(&outcome_index) {
+            ordered_outcomes[outcome_index] = Some(CloseOutcome::Skipped(skipped.clone()));
+            skipped_issues.push(skipped);
+            continue;
+        }
         tracing::info!(id = %id, "Closing issue");
 
         let issue_result = storage_ctx.storage.get_issue(id);
@@ -763,6 +864,7 @@ fn execute_route(
             let skipped = SkippedIssue {
                 id: id.clone(),
                 reason: "issue not found".to_string(),
+                already_terminal: false,
             };
             ordered_outcomes[outcome_index] = Some(CloseOutcome::Skipped(skipped.clone()));
             skipped_issues.push(skipped);
@@ -773,6 +875,10 @@ fn execute_route(
             let skipped = SkippedIssue {
                 id: id.clone(),
                 reason: format!("already {}", issue.status.as_str()),
+                // The only skip that is not a failure: the issue is in the
+                // state the caller asked for, which is what makes `--continue`
+                // safe to re-run over a partially-completed batch.
+                already_terminal: true,
             };
             ordered_outcomes[outcome_index] = Some(CloseOutcome::Skipped(skipped.clone()));
             skipped_issues.push(skipped);
@@ -795,6 +901,7 @@ fn execute_route(
                     total - closed,
                     total
                 ),
+                already_terminal: false,
             };
             ordered_outcomes[outcome_index] = Some(CloseOutcome::Skipped(skipped.clone()));
             skipped_issues.push(skipped);
@@ -836,6 +943,7 @@ fn execute_route(
                         preview.join(", "),
                         suffix
                     ),
+                    already_terminal: false,
                 };
                 ordered_outcomes[outcome_index] = Some(CloseOutcome::Skipped(skipped.clone()));
                 skipped_issues.push(skipped);
@@ -873,20 +981,23 @@ fn execute_route(
         open_issues.insert(id.clone(), issue);
     }
 
-    let active_issue_ids: HashSet<String> = open_issues.keys().cloned().collect();
-    let batch_closable_ids = if args.force {
-        active_issue_ids
-    } else {
-        compute_batch_closable_ids(
-            &active_issue_ids,
-            &internal_blockers_by_id,
-            &external_blockers_by_id,
-        )
+    let closable_ids = |open: &HashMap<String, Issue>| -> HashSet<String> {
+        let active: HashSet<String> = open.keys().cloned().collect();
+        if args.force {
+            active
+        } else {
+            compute_batch_closable_ids(&active, &internal_blockers_by_id, &external_blockers_by_id)
+        }
     };
+    let mut batch_closable_ids = closable_ids(&open_issues);
 
     let mut policy_evaluations_by_id: HashMap<String, EvaluatedGates> = HashMap::new();
+    // bds-yo8: under `--continue`, a policy violation drops one issue out of the
+    // batch instead of aborting it. Collected rather than applied inline because
+    // `open_issues` is borrowed by the loop.
+    let mut policy_failures: Vec<(usize, SkippedIssue)> = Vec::new();
     if policy_active {
-        for id in &resolved_ids {
+        for (outcome_index, id) in resolved_ids.iter().enumerate() {
             let Some(issue) = open_issues.get(id) else {
                 continue;
             };
@@ -904,6 +1015,17 @@ fn execute_route(
             )?;
             if !evaluated_gates.violations.is_empty() && !args.bypass_policy {
                 let summary = summarize_violations(&evaluated_gates.violations);
+                if args.keep_going {
+                    policy_failures.push((
+                        outcome_index,
+                        SkippedIssue {
+                            id: id.clone(),
+                            reason: format!("policy violation: {summary}"),
+                            already_terminal: false,
+                        },
+                    ));
+                    continue;
+                }
                 return Err(BeadsError::PolicyViolation {
                     issue_id: id.clone(),
                     summary,
@@ -912,6 +1034,22 @@ fn execute_route(
             }
             policy_evaluations_by_id.insert(id.clone(), evaluated_gates);
         }
+    }
+
+    if !policy_failures.is_empty() {
+        for (outcome_index, skipped) in policy_failures {
+            open_issues.remove(&skipped.id);
+            ordered_outcomes[outcome_index] = Some(CloseOutcome::Skipped(skipped.clone()));
+            skipped_issues.push(skipped);
+        }
+        // Recomputed, not merely narrowed. An issue dropped for a policy
+        // violation may be a blocker of another issue in the same batch:
+        // `compute_batch_closable_ids` had cleared that dependent on the
+        // assumption its blocker was closing too, and continuing on that
+        // assumption would close a dependent while its blocker stayed open --
+        // exactly the ordering the blocker check exists to prevent. The second
+        // loop then records the dependent as a blocked skip in the usual way.
+        batch_closable_ids = closable_ids(&open_issues);
     }
 
     for (outcome_index, id) in resolved_ids.iter().enumerate() {
@@ -947,6 +1085,7 @@ fn execute_route(
             let skipped = SkippedIssue {
                 id: id.clone(),
                 reason,
+                already_terminal: false,
             };
             ordered_outcomes[outcome_index] = Some(CloseOutcome::Skipped(skipped.clone()));
             skipped_issues.push(skipped);
@@ -1232,6 +1371,7 @@ mod tests {
             suggest_next: true,
             bypass_policy: true,
             bypass_reason: Some("Manual override approved".to_string()),
+            keep_going: false,
         };
         assert_eq!(args.ids.len(), 2);
         assert_eq!(args.ids[0], "bd-abc");
@@ -1280,6 +1420,7 @@ mod tests {
             skipped: vec![SkippedIssue {
                 id: "bd-456".to_string(),
                 reason: "already closed".to_string(),
+                already_terminal: false,
             }],
             warnings: vec![],
         };
@@ -1310,6 +1451,7 @@ mod tests {
             skipped: vec![SkippedIssue {
                 id: "bd-c".to_string(),
                 reason: "blocked by: bd-d".to_string(),
+                already_terminal: false,
             }],
             warnings: vec![],
         };
@@ -1368,6 +1510,7 @@ mod tests {
             skipped: vec![SkippedIssue {
                 id: "bd-x".to_string(),
                 reason: "not found".to_string(),
+                already_terminal: false,
             }],
             unblocked: vec![],
             warnings: vec![],
@@ -1438,6 +1581,7 @@ mod tests {
         let skipped = SkippedIssue {
             id: "bd-skip\x1b[2J".to_string(),
             reason: "blocked\rby\nterminal\x07".to_string(),
+            already_terminal: false,
         };
         let unblocked = UnblockedIssue {
             id: "bd-unblock\x1b[2J".to_string(),
@@ -1514,6 +1658,7 @@ mod tests {
         let skipped = SkippedIssue {
             id: "bd-skip".to_string(),
             reason: "already closed".to_string(),
+            already_terminal: false,
         };
         let json = serde_json::to_string(&skipped).unwrap();
         assert!(json.contains("\"id\":\"bd-skip\""));
@@ -1525,6 +1670,7 @@ mod tests {
         let skipped = SkippedIssue {
             id: "bd-blocked".to_string(),
             reason: "blocked by: bd-dep1, bd-dep2".to_string(),
+            already_terminal: false,
         };
         let json = serde_json::to_string(&skipped).unwrap();
         let parsed: SkippedIssue = serde_json::from_str(&json).unwrap();
@@ -1591,10 +1737,12 @@ mod tests {
                 SkippedIssue {
                     id: "bd-3".to_string(),
                     reason: "issue not found".to_string(),
+                    already_terminal: false,
                 },
                 SkippedIssue {
                     id: "bd-4".to_string(),
                     reason: "already tombstone".to_string(),
+                    already_terminal: false,
                 },
             ],
             warnings: vec![],
@@ -1639,6 +1787,7 @@ mod tests {
             vec![SkippedIssue {
                 id: "bd-2".to_string(),
                 reason: "blocked by: bd-3".to_string(),
+                already_terminal: false,
             }],
             vec![],
             vec![],
@@ -1661,6 +1810,7 @@ mod tests {
             suggest_next: true,
             bypass_policy: true,
             bypass_reason: Some("Clone bypass reason".to_string()),
+            keep_going: false,
         };
         let cloned = args.clone();
         assert_eq!(cloned.ids, args.ids);

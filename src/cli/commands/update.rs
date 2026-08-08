@@ -1,6 +1,6 @@
 //! Update command implementation.
 
-use super::create::read_description_file;
+use super::create::read_text_argument_file;
 use super::{
     RoutedWorkspaceWriteLock, acquire_routed_workspace_write_lock,
     auto_import_storage_ctx_if_stale, finalize_batched_blocked_cache_refresh,
@@ -1256,7 +1256,11 @@ fn resolve_update_description(args: &UpdateArgs) -> Result<UpdateArgs> {
     };
 
     let mut resolved = args.clone();
-    resolved.description = Some(read_description_file(path)?);
+    resolved.description = Some(read_text_argument_file(
+        path,
+        "description_file",
+        "description",
+    )?);
     resolved.description_file = None;
     Ok(resolved)
 }
@@ -1301,6 +1305,7 @@ fn build_update(args: &UpdateArgs, actor: &str, claim_exclusive: bool) -> Result
         design: args.design.clone().map(Some),
         acceptance_criteria: args.acceptance_criteria.clone().map(Some),
         notes: args.notes.clone().map(Some),
+        append_notes: args.append_notes.clone(),
         status,
         priority,
         issue_type,

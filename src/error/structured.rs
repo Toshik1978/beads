@@ -118,6 +118,8 @@ pub enum ErrorCode {
     ShuttingDown,
     /// All requested items were skipped; nothing to do
     NothingToDo,
+    /// Part of a batch succeeded and part did not (bds-yo8)
+    PartiallyCompleted,
 
     // === Policy Errors (exit code 4) ===
     /// Closure-time policy gate fired (issue #274)
@@ -178,6 +180,7 @@ impl ErrorCode {
             // Operational
             Self::ShuttingDown => "SHUTTING_DOWN",
             Self::NothingToDo => "NOTHING_TO_DO",
+            Self::PartiallyCompleted => "PARTIALLY_COMPLETED",
             // Policy
             Self::PolicyViolation => "POLICY_VIOLATION",
             Self::WorkflowCapacityExceeded => "WORKFLOW_CAPACITY_EXCEEDED",
@@ -207,6 +210,9 @@ impl ErrorCode {
                 // decide against the value it holds now. Retrying the identical
                 // guard unchanged will fail identically -- see the hint.
                 | Self::PreconditionFailed
+                // Fix the reported items and re-run: the part that succeeded is
+                // idempotent, so a retry cannot double-apply it.
+                | Self::PartiallyCompleted
         )
     }
 
@@ -237,7 +243,11 @@ impl ErrorCode {
             | Self::AmbiguousId
             | Self::IdCollision
             | Self::InvalidId
-            | Self::NothingToDo => 3,
+            | Self::NothingToDo
+            // Grouped with NothingToDo at 3 rather than given a code of its own:
+            // both mean "the request did not fully apply", and the distinction a
+            // caller needs is in the error code, which is machine-readable.
+            | Self::PartiallyCompleted => 3,
             Self::ShuttingDown => 130,
             // Validation (4)
             Self::ValidationFailed
@@ -535,6 +545,10 @@ impl StructuredError {
                     "expected": expected,
                     "actual": actual,
                 })),
+            ),
+            BeadsError::PartiallyCompleted { reason } => (
+                ErrorCode::PartiallyCompleted,
+                Some(json!({"reason": reason})),
             ),
             BeadsError::JsonlParse { line, reason } => (
                 ErrorCode::JsonlParseError,

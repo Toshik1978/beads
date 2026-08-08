@@ -301,24 +301,22 @@ fn create_issue_summary_line(id: &str, title: &str) -> String {
 /// truncation, no trimming), so callers get exactly the bytes on disk as a
 /// UTF-8 string. Shared by `br create --description-file` and
 /// `br update --description-file`.
-pub(crate) fn read_description_file(path: &Path) -> Result<String> {
+pub(crate) fn read_text_argument_file(
+    path: &Path,
+    field: &'static str,
+    noun: &'static str,
+) -> Result<String> {
     if path.as_os_str() == "-" {
         let mut buffer = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer).map_err(|err| {
-            BeadsError::validation(
-                "description_file",
-                format!("failed to read description from stdin: {err}"),
-            )
+            BeadsError::validation(field, format!("failed to read {noun} from stdin: {err}"))
         })?;
         return Ok(buffer);
     }
     std::fs::read_to_string(path).map_err(|err| {
         BeadsError::validation(
-            "description_file",
-            format!(
-                "failed to read description file '{}': {err}",
-                path.display()
-            ),
+            field,
+            format!("failed to read {noun} file '{}': {err}", path.display()),
         )
     })
 }
@@ -335,7 +333,11 @@ pub(crate) fn resolve_create_description(args: &CreateArgs) -> Result<Option<Str
                 "cannot be combined with --description",
             ));
         }
-        return Ok(Some(read_description_file(path)?));
+        return Ok(Some(read_text_argument_file(
+            path,
+            "description_file",
+            "description",
+        )?));
     }
     Ok(args.description.clone())
 }
@@ -452,11 +454,15 @@ pub fn create_issue_impl(
             defer_until,
             external_ref: args.external_ref.clone(),
             ephemeral: args.ephemeral,
+            // Settable at creation (bds-yo8): both fields already existed on
+            // `Issue` and were reachable only through a follow-up `br update`,
+            // which made a fully-populated issue cost two commands and two
+            // `updated_at` bumps.
+            acceptance_criteria: args.acceptance_criteria.clone(),
+            notes: args.notes.clone(),
             // Defaults
             content_hash: None,
             design: None,
-            acceptance_criteria: None,
-            notes: None,
             created_by: Some(config.actor.clone()),
             closed_at,
             close_reason: None,
@@ -856,7 +862,12 @@ fn execute_import(
         let issue_type_override = parsed.issue_type.clone();
         let assignee = parsed.assignee.or_else(|| args.assignee.clone());
         let design = parsed.design.clone();
-        let acceptance_criteria = parsed.acceptance_criteria.clone();
+        // A per-item `## Acceptance` block wins; the CLI flag is the fallback,
+        // the same precedence `assignee` above already uses.
+        let acceptance_criteria = parsed
+            .acceptance_criteria
+            .clone()
+            .or_else(|| args.acceptance_criteria.clone());
         let agent_context = parsed.agent_context.clone();
 
         // Resolve parent (item-specific header or CLI global fallback)
@@ -961,7 +972,9 @@ fn execute_import(
                 design: design.clone(),
                 acceptance_criteria: acceptance_criteria.clone(),
                 content_hash: None,
-                notes: None,
+                // The markdown import format has no notes block, so the CLI flag
+                // is the only source here.
+                notes: args.notes.clone(),
                 // Keep import hashes actor-independent so identical markdown imports
                 // still deduplicate across sync boundaries.
                 created_by: None,
@@ -1565,6 +1578,8 @@ mod tests {
     fn default_args() -> CreateArgs {
         CreateArgs {
             title: Some("Test Issue".to_string()),
+            notes: None,
+            acceptance_criteria: None,
             title_flag: None,
             type_: None,
             priority: None,

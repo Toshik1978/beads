@@ -167,6 +167,8 @@ br create [OPTIONS] [TITLE]
 | `-t, --type <TYPE>` | Issue type (task, bug, feature, epic, chore, docs, question) |
 | `-p, --priority <PRIORITY>` | Priority (0-4 or P0-P4, where 0=critical) |
 | `-d, --description <TEXT>` | Issue description |
+| `--notes <TEXT>` | Additional notes |
+| `--acceptance-criteria <TEXT>` | Acceptance criteria (alias: `--acceptance`) |
 | `-a, --assignee <NAME>` | Assign to person |
 | `--owner <EMAIL>` | Set owner email |
 | `-l, --labels <LABELS>` | Labels (comma-separated) |
@@ -415,7 +417,8 @@ br update [OPTIONS] [IDS]...
 | `--description <TEXT>` | Update description |
 | `--design <TEXT>` | Update design notes |
 | `--acceptance-criteria <TEXT>` | Update acceptance criteria |
-| `--notes <TEXT>` | Update additional notes |
+| `--notes <TEXT>` | Replace additional notes |
+| `--append-notes <TEXT>` | Append to additional notes, separated by a blank line. The read-modify-write happens inside the write transaction, so concurrent appends cannot lose each other |
 | `--transition-comment <TEXT>` | Add a fresh comment atomically with a status transition |
 | `-s, --status <STATUS>` | Change status |
 | `-p, --priority <N>` | Change priority |
@@ -488,10 +491,33 @@ br close [OPTIONS] [IDS]...
 | Option | Description |
 |--------|-------------|
 | `-r, --reason <TEXT>` | Close reason |
+| `--reason-file <PATH>` | Read the close reason verbatim from a file (or `-` for stdin). Mutually exclusive with `-r/--reason` |
 | `--transition-comment <TEXT>` | Add a fresh comment atomically with the close transition |
 | `-f, --force` | Close even if blocked by open dependencies |
+| `--continue` | Keep going past a per-issue failure, and make the exit code report the outcome (see below) |
 | `--suggest-next` | Return newly unblocked issues |
 | `--session <ID>` | Session ID for tracking |
+
+**`--continue` and the exit code.** By default one unresolvable ID fails the whole
+command before any issue is touched, and a per-issue policy violation aborts the
+batch. `--continue` turns both into recorded skips and closes the rest.
+
+It also *replaces* the exit-code rule, because a caller who passes it intends to
+inspect the outcome:
+
+| | Default | `--continue` |
+|---|---|---|
+| Nothing closed, some skipped | exit 3, `NOTHING_TO_DO` | exit 3, `PARTIALLY_COMPLETED` |
+| Some closed, some not | **exit 0** | exit 3, `PARTIALLY_COMPLETED` |
+| Everything already closed | exit 3, `NOTHING_TO_DO` | **exit 0** |
+
+The last row is what makes `--continue` usable in a retry loop: "already closed"
+is not a failure, so re-running a batch that half-succeeded exits 0. The default
+rule is deliberately left as it was — changing an exit code under existing callers
+would be worse than the gap it closes.
+
+The batch write itself is still one transaction. `--continue` decides which issues
+enter that transaction; it does not make the write partial.
 
 **Examples:**
 ```bash

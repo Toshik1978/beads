@@ -189,6 +189,17 @@ pub enum BeadsError {
     #[error("Nothing to do: {reason}")]
     NothingToDo { reason: String },
 
+    /// Some of a batch succeeded and some did not (bds-yo8).
+    ///
+    /// Reported only when the caller opted into continuing past failures
+    /// (`br close --continue`), and deliberately *not* folded into
+    /// [`Self::NothingToDo`]: "nothing to do" in front of "closed 4 issue(s)"
+    /// is a lie, and an agent reading only the error code needs to know that
+    /// part of the work landed before it decides whether to retry the whole
+    /// batch.
+    #[error("Partially completed: {reason}")]
+    PartiallyCompleted { reason: String },
+
     // === Policy Errors ===
     /// One or more closure-time policy gates fired.
     ///
@@ -275,6 +286,7 @@ impl BeadsError {
                 | Self::PolicyViolation { .. }
                 | Self::WorkflowCapacityExceeded { .. }
                 | Self::PreconditionFailed { .. }
+                | Self::PartiallyCompleted { .. }
         )
     }
 
@@ -312,6 +324,9 @@ impl BeadsError {
             ),
             Self::WorkflowCapacityExceeded { .. } => Some(
                 "Drain the named queue before admitting fresh work; inspect it with `br list --status <status>`.",
+            ),
+            Self::PartiallyCompleted { .. } => Some(
+                "Part of the batch succeeded. Fix the reported items and re-run; the ones that already succeeded will be reported as already closed and will not be redone.",
             ),
             Self::PreconditionFailed { .. } => Some(
                 "Nothing was written. Re-read the issue with `br show` and decide whether to retry against the value it holds now.",
