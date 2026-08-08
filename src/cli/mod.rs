@@ -984,6 +984,21 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub claim: bool,
 
+    /// Compare-and-set guard: apply the update only while the issue still has
+    /// this status, and fail without writing otherwise. Evaluated inside the
+    /// write transaction, so two agents racing the same guarded transition
+    /// produce exactly one winner. Composable with `--if-assignee` and
+    /// `--claim`. Exit code 4 / `PRECONDITION_FAILED` when the guard does not
+    /// hold — distinct from `ISSUE_NOT_FOUND`
+    #[arg(long = "if-status", add = ArgValueCompleter::new(status_completer))]
+    pub if_status: Option<String>,
+
+    /// Compare-and-set guard on the assignee. Pass an empty string to require
+    /// that the issue is still unassigned, mirroring `--assignee ""`. See
+    /// `--if-status`
+    #[arg(long = "if-assignee", add = ArgValueCompleter::new(assignee_completer))]
+    pub if_assignee: Option<String>,
+
     /// Force update even if issue is blocked
     #[arg(long)]
     pub force: bool,

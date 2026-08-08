@@ -360,6 +360,8 @@ br update [OPTIONS] [IDS]...
 | `--assignee <NAME>` | Assign (empty string clears) |
 | `--owner <EMAIL>` | Set owner (empty string clears) |
 | `--claim` | Atomic claim (assignee=actor + status=in_progress) |
+| `--if-status <STATUS>` | Compare-and-set guard: apply only while the status is still this |
+| `--if-assignee <NAME>` | Compare-and-set guard on the assignee; `""` means "still unassigned" |
 | `--force` | Force update even if issue is blocked |
 | `--due <DATE>` | Set due date (empty string clears) |
 | `--defer <DATE>` | Set defer date (empty string clears) |
@@ -385,6 +387,29 @@ br update bd-abc123 bd-def456 -p 1
 # Add labels
 br update bd-abc123 --add-label "urgent,reviewed"
 ```
+
+**Compare-and-set guards.** `--if-status` and `--if-assignee` make an update
+conditional on the value the issue still holds. The guard is evaluated inside
+the same write transaction as the update, so two agents racing the same
+transition produce exactly one winner — no read-then-write race:
+
+```bash
+# Take this only if nobody else has moved it yet
+br update bd-abc123 -s in_progress --if-status open --if-assignee ""
+```
+
+Both guards compose with each other and with `--claim`. When a guard does not
+hold, nothing is written — not the fields, not `updated_at`, not a
+`--transition-comment` — and the command exits **4** with error code
+`PRECONDITION_FAILED`, whose `context` names the field, the value expected and
+the value found. That exit code is deliberately not `3`: `3` is
+`ISSUE_NOT_FOUND`, and a caller retrying a guarded update has to be able to tell
+"someone got there first" (re-read and decide) from "there is nothing to update"
+(stop).
+
+A guard needs a field update to guard. Label and parent changes are written in
+their own transactions and cannot be guarded atomically, so `br update <id>
+--add-label x --if-status open` is refused rather than silently unguarded.
 
 ---
 

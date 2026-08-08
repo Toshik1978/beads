@@ -436,6 +436,21 @@ fn prepare_single_route(
             }
         }
     }
+    // A compare-and-set guard has to ride on the field update it guards. The
+    // predicate is evaluated by the UPDATE statement itself (see
+    // `update_issue_in_tx`), and label writes go through their own
+    // transactions — so a guard attached to a label-only change would read as
+    // enforced and would not be. Refuse rather than pretend.
+    if update.is_empty() && (update.expect_status.is_some() || update.expect_assignee.is_some()) {
+        return Err(BeadsError::validation(
+            "if_status",
+            "--if-status / --if-assignee guard a field update; this command changes no fields. \
+             Label and parent changes are written in their own transactions and cannot be \
+             guarded atomically, so combining them with a guard is refused rather than \
+             silently unguarded.",
+        ));
+    }
+
     let has_updates = !update.is_empty()
         || !args.add_label.is_empty()
         || !args.remove_label.is_empty()
@@ -1314,6 +1329,20 @@ fn build_update(args: &UpdateArgs, actor: &str, claim_exclusive: bool) -> Result
         } else {
             None
         },
+        // Parsed through `Status` rather than passed through as text so
+        // `--if-status IN_PROGRESS` and `--if-status in_progress` guard the same
+        // thing, and so a custom status from policy.yaml still round-trips
+        // (`Status::Custom` accepts any value, which is the point).
+        expect_status: args
+            .if_status
+            .as_deref()
+            .map(str::parse::<Status>)
+            .transpose()?
+            .map(|status| status.as_str().to_string()),
+        expect_assignee: args
+            .if_assignee
+            .as_deref()
+            .map(|value| optional_string_field(Some(value)).flatten()),
     })
 }
 

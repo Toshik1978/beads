@@ -124,6 +124,8 @@ pub enum ErrorCode {
     PolicyViolation,
     /// Atomic workflow capacity/admission guard fired (GitHub #384)
     WorkflowCapacityExceeded,
+    /// A compare-and-set guard on `br update` did not hold (bds-o9a)
+    PreconditionFailed,
 
     // === Internal Errors (exit code 1) ===
     /// Unexpected internal error
@@ -179,6 +181,7 @@ impl ErrorCode {
             // Policy
             Self::PolicyViolation => "POLICY_VIOLATION",
             Self::WorkflowCapacityExceeded => "WORKFLOW_CAPACITY_EXCEEDED",
+            Self::PreconditionFailed => "PRECONDITION_FAILED",
             // Internal
             Self::InternalError => "INTERNAL_ERROR",
         }
@@ -200,6 +203,10 @@ impl ErrorCode {
                 | Self::AmbiguousId
                 | Self::WorkflowCapacityExceeded
                 | Self::ShuttingDown
+                // Retryable in the compare-and-set sense: re-read the issue and
+                // decide against the value it holds now. Retrying the identical
+                // guard unchanged will fail identically -- see the hint.
+                | Self::PreconditionFailed
         )
     }
 
@@ -237,7 +244,12 @@ impl ErrorCode {
             | Self::InvalidPriority
             | Self::RequiredField
             | Self::PolicyViolation
-            | Self::WorkflowCapacityExceeded => 4,
+            | Self::WorkflowCapacityExceeded
+            // Deliberately *not* 3 (the issue-error group that holds
+            // IssueNotFound): telling "the guard did not hold" from "there is
+            // no such issue" is the whole point of the guard, and a caller that
+            // only reads the exit code has to be able to make that call.
+            | Self::PreconditionFailed => 4,
             // Dependency (5)
             Self::CycleDetected
             | Self::DependencyNotFound
@@ -510,6 +522,20 @@ impl StructuredError {
                     })),
                 )
             }
+            BeadsError::PreconditionFailed {
+                id,
+                field,
+                expected,
+                actual,
+            } => (
+                ErrorCode::PreconditionFailed,
+                Some(json!({
+                    "id": id,
+                    "field": field,
+                    "expected": expected,
+                    "actual": actual,
+                })),
+            ),
             BeadsError::JsonlParse { line, reason } => (
                 ErrorCode::JsonlParseError,
                 Some(json!({"line": line, "reason": reason})),

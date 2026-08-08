@@ -84,6 +84,21 @@ pub enum BeadsError {
     #[error("Priority must be 0-4, got: {priority}")]
     InvalidPriority { priority: String },
 
+    /// A compare-and-set guard on `br update` did not hold, so nothing was
+    /// written (bds-o9a).
+    ///
+    /// Distinct from [`Self::IssueNotFound`] on purpose: a caller retrying a
+    /// guarded update needs to tell "someone else got there first" (retry, or
+    /// concede) from "there is nothing to update" (stop), and a shared error
+    /// would make both look the same.
+    #[error("Precondition failed on {id}: expected {field} to be '{expected}', found '{actual}'")]
+    PreconditionFailed {
+        id: String,
+        field: String,
+        expected: String,
+        actual: String,
+    },
+
     // === JSONL Errors ===
     /// Failed to parse a line in the JSONL file.
     #[error("JSONL parse error at line {line}: {reason}")]
@@ -259,6 +274,7 @@ impl BeadsError {
                 | Self::AmbiguousId { .. }
                 | Self::PolicyViolation { .. }
                 | Self::WorkflowCapacityExceeded { .. }
+                | Self::PreconditionFailed { .. }
         )
     }
 
@@ -296,6 +312,9 @@ impl BeadsError {
             ),
             Self::WorkflowCapacityExceeded { .. } => Some(
                 "Drain the named queue before admitting fresh work; inspect it with `br list --status <status>`.",
+            ),
+            Self::PreconditionFailed { .. } => Some(
+                "Nothing was written. Re-read the issue with `br show` and decide whether to retry against the value it holds now.",
             ),
             _ => None,
         }

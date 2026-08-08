@@ -3263,6 +3263,45 @@ impl SqliteStorage {
             }
         }
 
+        // Compare-and-set guards (bds-o9a), the general form of the claim guard
+        // above. Checked here against the row *this* transaction loaded, and
+        // restated below as a predicate on the UPDATE's WHERE clause.
+        //
+        // Both, deliberately, and for the same reason `expect_unassigned` does
+        // both. The check here is what produces an error naming the value
+        // actually found, which a bare "0 rows affected" cannot. The predicate
+        // is what keeps the guard atomic: it is evaluated by the same statement
+        // that writes, so no refactor that moves this check earlier -- out of
+        // the transaction, into the CLI's validation pass -- can quietly
+        // reintroduce the TOCTOU the guard exists to close.
+        //
+        // Returning early also means a failed guard writes nothing at all: the
+        // transition-comment insert and every other side effect in this
+        // function are downstream of here.
+        if let Some(expected) = updates.expect_status.as_deref() {
+            let actual = issue.status.as_str();
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err(BeadsError::PreconditionFailed {
+                    id: id.to_string(),
+                    field: "status".to_string(),
+                    expected: expected.to_string(),
+                    actual: actual.to_string(),
+                });
+            }
+        }
+        if let Some(expected) = updates.expect_assignee.as_ref() {
+            let actual = normalized_assignee(issue.assignee.as_deref());
+            let expected = normalized_assignee(expected.as_deref());
+            if actual != expected {
+                return Err(BeadsError::PreconditionFailed {
+                    id: id.to_string(),
+                    field: "assignee".to_string(),
+                    expected: expected.unwrap_or_default(),
+                    actual: actual.unwrap_or_default(),
+                });
+            }
+        }
+
         let mut set_clauses: Vec<String> = vec![];
         let mut params: Vec<SqliteValue> = vec![];
 
@@ -3574,6 +3613,19 @@ impl SqliteStorage {
             }
             where_clause.push(')');
         }
+        if let Some(expected) = updates.expect_status.as_deref() {
+            where_clause.push_str(" AND status = ?");
+            params.push(SqliteValue::from(expected));
+        }
+        if let Some(expected) = updates.expect_assignee.as_ref() {
+            match normalized_assignee(expected.as_deref()) {
+                Some(actor) => {
+                    where_clause.push_str(" AND assignee = ?");
+                    params.push(SqliteValue::from(actor.as_str()));
+                }
+                None => where_clause.push_str(" AND (assignee IS NULL OR TRIM(assignee) = '')"),
+            }
+        }
 
         let sql = format!(
             "UPDATE issues SET {} WHERE {where_clause}",
@@ -3602,6 +3654,38 @@ impl SqliteStorage {
                     "claim",
                     format!("issue {id} already assigned to {current_assignee}"),
                 ));
+            }
+
+            // A guarded update that matched no row cannot be reported as
+            // IssueNotFound: the check above already proved the row exists and
+            // held the expected value, so reaching here means the predicate --
+            // the atomic half of the guard -- is what rejected it.
+            if let Some((field, expected)) = updates
+                .expect_status
+                .as_deref()
+                .map(|expected| ("status", expected.to_string()))
+                .or_else(|| {
+                    updates.expect_assignee.as_ref().map(|expected| {
+                        (
+                            "assignee",
+                            normalized_assignee(expected.as_deref()).unwrap_or_default(),
+                        )
+                    })
+                })
+            {
+                let actual = Self::get_issue_from_conn(conn, id)?.map_or_else(
+                    || "<row vanished>".to_string(),
+                    |issue| match field {
+                        "status" => issue.status.as_str().to_string(),
+                        _ => normalized_assignee(issue.assignee.as_deref()).unwrap_or_default(),
+                    },
+                );
+                return Err(BeadsError::PreconditionFailed {
+                    id: id.to_string(),
+                    field: field.to_string(),
+                    expected,
+                    actual,
+                });
             }
 
             return Err(BeadsError::IssueNotFound { id: id.to_string() });
@@ -11050,6 +11134,19 @@ pub struct IssueUpdate {
     pub claim_exclusive: bool,
     /// The actor performing the claim (used for idempotent same-actor check).
     pub claim_actor: Option<String>,
+    /// Compare-and-set guard: apply only if the stored status still equals this
+    /// value (bds-o9a). `br update --if-status`.
+    ///
+    /// This is `expect_unassigned` generalised. Like it, the guard is evaluated
+    /// inside the write transaction *and* restated as a predicate on the
+    /// `UPDATE`'s `WHERE` clause; see `update_issue_in_tx` for why both.
+    pub expect_status: Option<String>,
+    /// Compare-and-set guard on the assignee. `br update --if-assignee`.
+    ///
+    /// `Some(None)` guards on "unassigned", which is how the CLI spells
+    /// `--if-assignee ""` — deliberately the same convention as `--assignee ""`
+    /// meaning "clear it". `Some(Some(a))` guards on an exact match.
+    pub expect_assignee: Option<Option<String>>,
 }
 
 impl IssueUpdate {
@@ -11241,6 +11338,21 @@ fn parse_status(s: Option<&str>) -> Status {
 
 fn parse_issue_type(s: Option<&str>) -> IssueType {
     s.and_then(|s| s.parse().ok()).unwrap_or_default()
+}
+
+/// Collapse the two spellings of "nobody" into one.
+///
+/// `assignee` is stored as `NULL` by some paths and as the empty string by
+/// others — `bd` compatibility, see the `add_update` comment about empty
+/// strings in `update_issue_in_tx` — and whitespace survives a shell quote.
+/// The compare-and-set guard on `--if-assignee` has to treat all three as the
+/// same value, or `--if-assignee ""` would hold for one unassigned row and not
+/// for its neighbour.
+fn normalized_assignee(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn dependency_metadata_from_row(

@@ -17,6 +17,8 @@ extern crate test_support as common;
 
 #[path = "e2e/basic_lifecycle.rs"]
 mod basic_lifecycle;
+#[path = "e2e/cas_guards.rs"]
+mod cas_guards;
 #[path = "e2e/claim_atomic.rs"]
 mod claim_atomic;
 #[path = "e2e/comments.rs"]
