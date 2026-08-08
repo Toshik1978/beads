@@ -134,6 +134,7 @@ All 24 top-level commands, for orientation. Full flags, subcommands, and
 | `label` | Manage labels |
 | `epic` | Epic management commands |
 | `detach` | Move an issue out from under its parent |
+| `rename` | Change an issue's ID, cascading to its descendants |
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |

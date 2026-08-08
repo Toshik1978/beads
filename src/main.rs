@@ -312,6 +312,9 @@ fn main() {
         Commands::Detach(args) => {
             commands::detach::execute(&args, cli.json, &overrides, &output_ctx)
         }
+        Commands::Rename(args) => {
+            commands::rename::execute(&args, cli.json, &overrides, &output_ctx)
+        }
         Commands::Dep { command } => {
             if let (Some(res), Some(beads_dir)) = (storage_result.as_ref(), ctx.beads_dir.as_ref())
             {
@@ -646,7 +649,11 @@ const fn is_mutating_command(cmd: &Commands) -> bool {
         | Commands::Delete(_)
         | Commands::Close(_)
         | Commands::Reopen(_)
-        | Commands::Detach(_) => true,
+        | Commands::Detach(_)
+        // `--dry-run` writes nothing, but this decides auto-flush for the whole
+        // command before the args are read; treating rename as mutating costs a
+        // no-op flush on a dry run and never misses a real one.
+        | Commands::Rename(_) => true,
         Commands::Dep { command } => matches!(
             command,
             beads::cli::DepCommands::Add(_)
@@ -742,6 +749,7 @@ const fn should_auto_import(cmd: &Commands) -> bool {
         | Commands::Close(_)
         | Commands::Reopen(_)
         | Commands::Detach(_)
+        | Commands::Rename(_)
         | Commands::Comments(_)
         | Commands::Dep { .. }
         | Commands::Label { .. }

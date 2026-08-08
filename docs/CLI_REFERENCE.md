@@ -908,6 +908,51 @@ br detach ab-abc123.1
 
 ---
 
+### rename
+
+Change an issue's ID.
+
+```bash
+br rename <OLD_ID> <NEW_ID> [--dry-run]
+```
+
+The whole subtree moves with it, deepest-first: renaming `ab-abc` to `ab-auth`
+turns `ab-abc.1.2` into `ab-auth.1.2`. The vacated ID becomes a tombstone and is
+folded into the new issue's `former_ids`, so references written before the rename
+keep resolving — `br show ab-abc` hands back `ab-auth`.
+
+`OLD_ID` is resolved like any other ID argument: a partial ID, a hash fragment or
+a former ID all work. `NEW_ID` is taken literally, since it is a name being chosen
+rather than a row being found.
+
+**Options:**
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Print the rename and its full cascade without writing anything |
+
+Four things are refused:
+
+| Refused | Why, and what to use instead |
+|---------|------------------------------|
+| A target that already exists | Includes tombstones. A tombstone is what keeps a previously-vacated ID resolving, so it is not free to reuse. |
+| A tombstoned source | Same gate every other mutating command goes through. |
+| A change of position in the hierarchy | A dotted ID always names its real parent, so `ab-abc → ab-xyz.1` would leave the ID and the `parent-child` link disagreeing. Use `br update <id> --parent <id>` or `br detach <id>`. |
+| A change of prefix | Use `br sync --rename-prefix`, which rewrites a whole workspace. One issue at a time would leave a row whose prefix disagrees with its workspace. |
+
+**Examples:**
+```bash
+# See the blast radius first - a rename cascades
+br rename ab-abc123 ab-auth --dry-run
+
+# Then do it
+br rename ab-abc123 ab-auth
+
+# The old ID keeps working
+br show ab-abc123
+```
+
+---
+
 ### comments
 
 Manage comments on issues.

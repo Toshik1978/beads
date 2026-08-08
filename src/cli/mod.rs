@@ -684,6 +684,9 @@ pub enum Commands {
     /// Detach an issue from its parent, giving it an independent ID
     Detach(DetachArgs),
 
+    /// Change an issue's ID, cascading to its descendants
+    Rename(RenameArgs),
+
     /// Epic management commands
     Epic {
         #[command(subcommand)]
@@ -1893,6 +1896,26 @@ pub struct DetachArgs {
     /// Issue IDs to detach from their parent
     #[arg(add = ArgValueCompleter::new(issue_id_completer))]
     pub ids: Vec<String>,
+}
+
+/// Arguments for the rename command.
+#[derive(Args, Debug, Clone, Default)]
+pub struct RenameArgs {
+    /// The issue to rename. Resolved like any other ID argument, so a partial
+    /// ID, a hash fragment or a former ID all work
+    #[arg(add = ArgValueCompleter::new(issue_id_completer))]
+    pub old_id: String,
+
+    /// The ID it should have. Taken literally -- not resolved, since this is a
+    /// name being chosen rather than a row being found. It must be free (a
+    /// tombstone counts as taken), keep the same prefix, and sit in the same
+    /// place in the hierarchy: use `br update --parent` or `br detach` to
+    /// reparent
+    pub new_id: String,
+
+    /// Report the rename and its full cascade without writing anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Sort policy for ready command.
