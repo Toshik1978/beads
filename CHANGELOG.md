@@ -9,6 +9,167 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.5.0 — 2026-08-08
+
+`issues.jsonl` is the artefact this project is actually about. It is the file
+that gets committed, the file that gets merged, and the file other tools read —
+and it carried no way to say which generation of the format wrote it. Two
+separate defects could also silently revert an edit to it. This release fixes
+all three: every record now leads with a `format_version`, and neither an
+out-of-band edit nor a clock-skewed peer can have its change written back over.
+
+The rest is surface. `br update` takes compare-and-set guards, `br list` and
+`br search` take ten date bounds and four exclusions, `br rename` becomes a
+command rather than an internal primitive, and `br statuses` / `br types`
+answer a question that previously had none: which status and type names does
+*this* workspace accept.
+
+No schema migration — an existing database opens unchanged. An existing JSONL
+is migrated forward on import, counted, reported, and restamped by the next
+flush, so the upgrade is announced once. A file written by a newer build is
+refused rather than half-read.
+
+### Highlights
+
+- **Every JSONL record leads with `format_version`.** The marker is per record
+  rather than per file because the two things these records actually undergo —
+  concatenation and three-way merge — destroy a header line, and
+  `metadata.json` is per workspace, so it says nothing about a file that
+  arrived from somewhere else. It lives outside the `Issue` struct, in a
+  serialize wrapper, because it describes the format rather than an issue; the
+  pinned `Issue` field set is unchanged as a result. A missing marker is
+  generation 0. A newer generation is refused with `JsonlFormatTooNew`,
+  mirroring the `SchemaMismatch` posture for a database newer than the binary,
+  and for the same reason: a newer format may reinterpret a key this build
+  already knows, and a best-effort read would flush the misreading back over a
+  committed file. An unrecognised key is still dropped, now with a stated
+  reason and a round-trip test rather than by accident.
+- **`br update` takes compare-and-set guards.** `--if-status` and
+  `--if-assignee` generalise the predicate `--claim` already built, and compose
+  with it and with each other. The guard is checked against the row the write
+  transaction loaded *and* restated on the `UPDATE`'s `WHERE` clause — both
+  halves, so that the error can name the value actually found, and so that no
+  later refactor can hoist the check out of the transaction and reintroduce the
+  race it exists to close. A failed guard writes nothing and reports
+  `PRECONDITION_FAILED` with exit code 4 — deliberately not the 3 that carries
+  `ISSUE_NOT_FOUND`, because a caller retrying a guarded update has to tell
+  those two apart. A guard with no field update to guard is refused rather than
+  silently unenforced.
+- **Ten date bounds and four exclusions on the query surface.**
+  `--created-after/-before`, `--updated-*`, `--closed-*`, `--due-*` and
+  `--defer-*` land on `br list` and `br search` together, because both commands
+  share one flattened argument struct. Both ends of a range are inclusive,
+  matching what `--updated-before` already meant and what `br stale` rests on.
+  A bare date widens to the whole day it names, because a range whose ends both
+  resolve to 09:00 matches nothing while looking like an honest empty result. A
+  NULL column never satisfies a bound on it, so "closed in the last week"
+  cannot return everything still open, and setting a `closed_*` bound implies
+  `--all` — without that the flag could only match rows the default view hides.
+  Relative values need the attached form (`--created-after=-7d`), the same
+  convention `--sort=-updated` already follows. The exclusions —
+  `--exclude-label`, `--exclude-type`, `--no-labels`, `--no-parent` — reach
+  `br ready` as well, as one shared struct and one SQL builder, so the same
+  flag cannot come to mean three things on three commands. Repeating an
+  exclusion is a union, "neither a nor b", deliberately not symmetric with
+  `--label`'s AND, and `--no-parent` asks the `parent-child` dependency row
+  rather than the shape of the ID. Five query fast paths that used to name
+  individual filter fields now gate on a single predicate, so a bound added
+  later cannot leave one of them answering a filtered query unfiltered.
+- **`br rename` is a command.** v1.4.0 shipped the transactional subtree
+  cascade, the tombstone at the vacated ID and the `former_ids` provenance, and
+  `br detach` already drove all of it — what was missing was the front door, so
+  there was no supported way for a person to change an issue's ID. The storage
+  layer is untouched by this: it is a command, its arguments, its dispatch and
+  its refusals. Beyond an occupied target and a tombstoned source, it refuses
+  to move an issue within the hierarchy or to change its prefix, and names what
+  to run instead — `br update --parent` and `br detach` for reparenting,
+  `br sync --rename-prefix` for prefixes. Both would break invariants that hold
+  everywhere else: a dotted ID always names its real parent, and a workspace's
+  rows share its prefix. `--dry-run` reports the whole subtree the rename would
+  move without writing.
+- **`br statuses` and `br types` print the vocabulary this workspace accepts.**
+  That set is project-specific rather than constant — a custom status is
+  accepted unless `policy.yaml` enumerates one under `workflow.statuses` with
+  `strict` on — and there was no way to ask which of those two worlds you were
+  in. `br statuses` merges the built-in set with the policy's, marks which is
+  which and which are currently allowed, and prints the ready group. It
+  distinguishes three states, the middle one deliberately: no policy, strict
+  with an empty status list — which enforces nothing, and this is the only
+  place that is visible — and strict with a set. A test asserts that what
+  `br statuses` calls allowed is what `br update` actually accepts, and the
+  completion tables behind both commands are now shared rather than copied,
+  with exhaustive-match reminders beside them so a new variant breaks the build
+  instead of silently going unreported.
+- **Smaller gaps closed.** `br close --reason-file` mirrors the
+  `--description-file` that already existed, for reasons too long or too
+  quote-heavy to pass through a shell. `br create --notes` and `--acceptance`
+  let an issue be created fully populated instead of costing a second command
+  and a second `updated_at` bump. `br update --append-notes` adds a paragraph
+  instead of replacing the field, doing its read-modify-write inside the write
+  transaction so two agents appending at once cannot lose each other's text.
+  `br close --continue` closes what it can and reports the rest by ID: it
+  replaces the exit-code rule with "did every issue end up closed", counting
+  already-closed as closed so a retry over a half-finished batch exits 0, and
+  reports the new `PARTIALLY_COMPLETED` rather than `NOTHING_TO_DO`, which
+  would be a lie in front of "closed 2 issue(s)". The default rule is
+  untouched. Dropping an issue from the batch for a policy violation recomputes
+  the batch's closable set rather than narrowing it, because the dropped issue
+  may be another's blocker. `br stale --limit` caps the report.
+
+### Two ways a write could revert itself
+
+Both are import-path defects, both have been there since 1.0.0, and both end
+the same way: a change that appeared to succeed and was then written back over
+from the other side.
+
+- **A hand edit to `issues.jsonl` no longer undoes itself.** Removing a field
+  from a record does not touch `updated_at`, so the import read both sides as
+  the same revision and skipped the record as up-to-date — and because the skip
+  left the export hash unrecorded, the next flush wrote the unedited database
+  row back over the file. Equal timestamps are no longer a verdict. They are
+  resolved against the stored row, reusing the comparison the import already
+  ran for every skip, and at a tie the JSONL wins. That is not a preference for
+  one side but a statement of what the two artefacts are: the file is
+  committed, and the database beside it is gitignored and rebuildable. It is
+  also only safe because of the fix below — every local write now advances
+  `updated_at` strictly, so a row that differs at an identical timestamp cannot
+  be unflushed local work.
+- **A clock-skewed peer can no longer make a label or dependency write
+  invisible.** v1.4.0 clamped `updated_at` on the writes that already held the
+  row in hand and left four paths unclamped as a recorded follow-up; this is
+  that follow-up. Labels, dependencies and comments all travel in the JSONL and
+  all take part in the sync comparison, but the import decides what to do on
+  `updated_at` alone. A label or dependency write against a row seeded from a
+  machine whose clock runs ahead therefore *lowered* the timestamp while
+  changing synced content: the next import skipped the row as older, and the
+  following flush exported the stale copy back over the file. Every such write
+  now reads the row's own stored value and advances strictly past it. The bulk
+  paths read the affected rows first and partition, so the ordinary case still
+  costs one statement per chunk.
+
+### Features
+
+- [ddbe8b3](https://github.com/Toshik1978/beads/commit/ddbe8b3b520597bfbb97c4110fad68429db81603) feat(sync): version the JSONL interchange format and give it a migration path
+- [aca1148](https://github.com/Toshik1978/beads/commit/aca11485188c84bc88de901a4f64ed44b944cb3b) feat(update): add compare-and-set guards --if-status and --if-assignee
+- [c3fc89f](https://github.com/Toshik1978/beads/commit/c3fc89f5f819ddbab1808630ed9ebc349cf41f91) feat(list): add date-range filters to br list and br search
+- [ddef216](https://github.com/Toshik1978/beads/commit/ddef21613c58162f89ca87ad6a39dec7d059f0a9) feat(list): add exclusion filters to br list, search and ready
+- [d8e9549](https://github.com/Toshik1978/beads/commit/d8e95499a736fd2ccf9b4298193aecb1660861d7) feat(cli): add br rename as a first-class command
+- [499713b](https://github.com/Toshik1978/beads/commit/499713b5fb6a50eab1889798f8d9b387940f4f22) feat(cli): add br statuses and br types, and br stale --limit
+- [5d2396f](https://github.com/Toshik1978/beads/commit/5d2396fb5a74c6edd9c5c021ce76542681295c66) feat(cli): add close --reason-file/--continue, update --append-notes, create --notes
+
+### Bug Fixes
+
+- [1dc875c](https://github.com/Toshik1978/beads/commit/1dc875cabe3d3d30b65543030c5391b925c398e1) fix(storage): clamp label, dependency and comment writes against future timestamps
+- [23c3a73](https://github.com/Toshik1978/beads/commit/23c3a73cd83960cb900385159ab35203200a6577) fix(sync): let the JSONL win when an import ties on updated_at
+
+### Others
+
+- [4610507](https://github.com/Toshik1978/beads/commit/4610507492f1217d3693e019c5f3ec15bd877f50) refactor(error): remove the unconstructed InvalidStatus and InvalidType errors
+- [e748ff5](https://github.com/Toshik1978/beads/commit/e748ff5ca29049cd7d49972c02335d5241cb9806) build(lint): add an advisory dead-public-code report
+- [db0a227](https://github.com/Toshik1978/beads/commit/db0a2272ee618e198807647fa230dda432291dd7) refactor: clear the actionable dead-code buckets in src/ and test-support
+
+---
+
 ## v1.4.0 — 2026-08-05
 
 The dotted ID becomes the truth about parentage. Until now an issue's parent
