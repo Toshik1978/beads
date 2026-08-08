@@ -15,6 +15,17 @@ Conventions:
 - Sidecars, recovery artifacts, and other debris are preserved when they are the point of the case.
 - The payloads are intentionally small so they can live in git and be inspected by hand.
 - New fixtures should model one primary anomaly each. If a future incident needs a new combination, add a new directory instead of mutating an unrelated case.
+- A payload whose `*.jsonl` lacks the `format_version` marker (see
+  `src/sync/jsonl_format.rs`) is a *previous-generation* file: `br` migrates it
+  on import and then flags the workspace for a restamping flush. That is a real
+  anomaly, but not the one any fixture here is about, so it would make a replay
+  contract assert two things at once. `corrupt_db_text` and
+  `interrupted_rebuild_leftovers` carry the marker for that reason — both
+  rebuild from JSONL, so neither stores a content hash the edit could
+  invalidate. The rest deliberately do not: their databases pin the hash of
+  their own payload, and stamping the file would break the very relationship
+  the fixture captures. A fixture that wants to exercise the migration should be
+  added as its own directory.
 
 Current families covered here:
 

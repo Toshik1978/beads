@@ -49,6 +49,7 @@ use beads::model::{Comment, Dependency, DependencyType, Issue, IssueType, Priori
 use beads::storage::conn::Connection;
 use beads::storage::conn::SqliteValue;
 use beads::storage::schema::CURRENT_SCHEMA_VERSION;
+use beads::sync::jsonl_format::{CURRENT_JSONL_FORMAT_VERSION, FORMAT_VERSION_KEY};
 use chrono::Utc;
 use common::cli::{BrWorkspace, run_br};
 use serde_json::Value;
@@ -1373,11 +1374,26 @@ fn issues_jsonl_written_by_br_stays_inside_the_declared_field_set() {
     let issue: Value = serde_json::from_str(line).expect("each issues.jsonl line is valid JSON");
 
     let keys = sorted_keys(&issue);
-    let declared: Vec<String> = owned_names(EXPECTED_JSONL_KEYS);
+    // The file carries one key the `Issue` struct does not: the interchange
+    // generation marker, written by `sync::jsonl_format` outside the model
+    // because it is a property of the format rather than of an issue. That is
+    // the whole of the deliberate field-set change bds-ja3 made; the struct's
+    // own set, pinned by the test above, is untouched.
+    let declared: Vec<String> = owned_names(EXPECTED_JSONL_KEYS)
+        .into_iter()
+        .chain(std::iter::once(FORMAT_VERSION_KEY.to_string()))
+        .collect();
     let unexpected: Vec<&String> = keys.iter().filter(|key| !declared.contains(key)).collect();
     assert!(
         unexpected.is_empty(),
         "br wrote issue keys that are not part of the declared field set: {unexpected:?}"
+    );
+
+    assert_eq!(
+        issue.get(FORMAT_VERSION_KEY),
+        Some(&Value::from(CURRENT_JSONL_FORMAT_VERSION)),
+        "every record br writes must declare the generation that wrote it, or \
+         a future reader cannot tell an old file from a new one"
     );
 
     for key in ALWAYS_SERIALIZED_JSONL_KEYS {

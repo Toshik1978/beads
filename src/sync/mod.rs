@@ -8,6 +8,7 @@
 //! - Path validation and allowlist enforcement
 
 pub mod history;
+pub mod jsonl_format;
 pub mod path;
 pub mod witness;
 
@@ -557,6 +558,10 @@ pub struct ImportResult {
     pub blocked_cache_entries: usize,
     /// Number of child-counter rows rebuilt after import.
     pub child_counter_entries: usize,
+    /// Records that arrived at an older interchange generation and were
+    /// migrated forward, with the oldest generation seen. See
+    /// [`jsonl_format`].
+    pub format_upgrades: jsonl_format::FormatUpgradeTally,
 }
 
 // ============================================================================
@@ -1504,7 +1509,7 @@ fn write_export_issue_jsonl<W: Write>(
     ctx: &mut ExportContext,
 ) -> Result<bool> {
     buffer.clear();
-    if let Err(err) = serde_json::to_writer(&mut *buffer, issue) {
+    if let Err(err) = jsonl_format::write_line(&mut *buffer, issue) {
         ctx.handle_error(ExportError::new(
             ExportEntityType::Issue,
             issue.id.clone(),
@@ -1579,7 +1584,7 @@ fn prepare_export_issue_jsonl(issue: &Issue, retention_days: Option<u64>) -> Pre
     }
 
     let mut jsonl_line = Vec::with_capacity(1024);
-    if let Err(err) = serde_json::to_writer(&mut jsonl_line, issue) {
+    if let Err(err) = jsonl_format::write_line(&mut jsonl_line, issue) {
         return PreparedExportEntry::Error(ExportError::new(
             ExportEntityType::Issue,
             issue.id.clone(),
@@ -3040,7 +3045,7 @@ fn collect_incremental_auto_flush_changes(
         match maybe_issue {
             Some(mut issue) if is_issue_exportable(&issue, None) => {
                 normalize_issue_for_export(&mut issue);
-                let json = serde_json::to_string(&issue).map_err(|err| {
+                let json = jsonl_format::to_line(&issue).map_err(|err| {
                     BeadsError::Config(format!(
                         "Failed to serialize issue '{}' during auto-flush: {err}",
                         issue.id
@@ -3603,6 +3608,10 @@ struct ImportValidationPlan {
     record_count: usize,
     prefix_mismatches: Vec<PrefixRenameSeed>,
     occupied_ids: HashSet<String>,
+    /// What the validation pass saw of interchange generations. Counted here
+    /// rather than in the apply pass because this pass is the one that reads
+    /// every record exactly once, whatever the import mode.
+    format_upgrades: jsonl_format::FormatUpgradeTally,
 }
 
 struct ImportMetadataMaps {
@@ -3611,10 +3620,23 @@ struct ImportMetadataMaps {
     id_by_hash: HashMap<String, String>,
 }
 
-fn parse_normalized_import_issue(trimmed: &str, line_num: usize) -> Result<Issue> {
+/// Parse one JSONL line into a validated [`Issue`], returning the interchange
+/// generation the record declared alongside it.
+///
+/// The generation is checked *before* the record is trusted: a file from a
+/// newer generation is refused here rather than read best-effort, because a
+/// newer generation may reinterpret a key this build already knows and the
+/// misreading would be flushed back over a committed file. See
+/// [`jsonl_format`].
+fn parse_normalized_import_issue(trimmed: &str, line_num: usize) -> Result<(Issue, u32)> {
+    let declared_format = jsonl_format::read_format_version(trimmed)
+        .map_err(|e| BeadsError::Config(format!("Invalid JSON at line {line_num}: {e}")))?;
+    jsonl_format::ensure_readable(declared_format)?;
+
     let mut issue: Issue = serde_json::from_str(trimmed)
         .map_err(|e| BeadsError::Config(format!("Invalid JSON at line {line_num}: {e}")))?;
 
+    jsonl_format::migrate_record(declared_format, &mut issue);
     normalize_issue(&mut issue);
 
     if let Err(errors) = IssueValidator::validate(&issue) {
@@ -3629,12 +3651,16 @@ fn parse_normalized_import_issue(trimmed: &str, line_num: usize) -> Result<Issue
         )));
     }
 
-    Ok(issue)
+    Ok((issue, declared_format))
 }
 
+/// Stream every issue record in `input_path` through `handle_issue`, which
+/// also receives the interchange generation the record declared (see
+/// [`jsonl_format`]). Records older than the current generation have already
+/// been migrated by the time the callback sees them.
 fn for_each_jsonl_import_issue(
     input_path: &Path,
-    mut handle_issue: impl FnMut(usize, Issue) -> Result<()>,
+    mut handle_issue: impl FnMut(usize, Issue, u32) -> Result<()>,
 ) -> Result<()> {
     let file = File::open(input_path)?;
     path::validate_jsonl_fd_metadata(&file, input_path)?;
@@ -3646,8 +3672,8 @@ fn for_each_jsonl_import_issue(
         line_num += 1;
         let trimmed = line.trim();
         if !trimmed.is_empty() {
-            let issue = parse_normalized_import_issue(trimmed, line_num)?;
-            handle_issue(line_num, issue)?;
+            let (issue, declared_format) = parse_normalized_import_issue(trimmed, line_num)?;
+            handle_issue(line_num, issue, declared_format)?;
         }
         line.clear();
     }
@@ -3663,7 +3689,7 @@ fn collect_import_validation_plan(
     let mut plan = ImportValidationPlan::default();
     let mut seen_ids = HashSet::new();
 
-    for_each_jsonl_import_issue(input_path, |line_num, issue| {
+    for_each_jsonl_import_issue(input_path, |line_num, issue, declared_format| {
         let prefix_mismatch = !config.skip_prefix_validation
             && expected_prefix.is_some_and(|prefix| {
                 !id_matches_expected_prefix(&issue.id, prefix)
@@ -3700,6 +3726,10 @@ fn collect_import_validation_plan(
             plan.occupied_ids.insert(issue.id);
         }
         plan.record_count += 1;
+        plan.format_upgrades.record(
+            declared_format,
+            declared_format < jsonl_format::CURRENT_JSONL_FORMAT_VERSION,
+        );
 
         Ok(())
     })?;
@@ -3841,7 +3871,7 @@ fn scan_import_collision_renames(
     let progress =
         create_progress_bar(record_count as u64, "Scanning issues", config.show_progress);
 
-    for_each_jsonl_import_issue(input_path, |_line_num, mut issue| {
+    for_each_jsonl_import_issue(input_path, |_line_num, mut issue, _declared_format| {
         apply_prefix_renames(&mut issue, prefix_renames);
 
         if issue.ephemeral {
@@ -4045,7 +4075,7 @@ fn stream_import_actions_in_tx(
     progress.set_position(0);
     storage.clear_all_export_hashes_in_tx()?;
 
-    for_each_jsonl_import_issue(input_path, |_line_num, mut issue| {
+    for_each_jsonl_import_issue(input_path, |_line_num, mut issue, _declared_format| {
         apply_prefix_renames(&mut issue, prefix_renames);
 
         if issue.ephemeral {
@@ -4219,8 +4249,10 @@ pub fn import_from_jsonl(
         config.show_progress,
     );
 
+    let format_upgrades = validation_plan.format_upgrades;
+
     let apply_result = storage.with_write_transaction(|storage| -> Result<ImportResult> {
-        let tx_result = stream_import_actions_in_tx(
+        let mut tx_result = stream_import_actions_in_tx(
             storage,
             input_path,
             config,
@@ -4230,10 +4262,20 @@ pub fn import_from_jsonl(
             &result,
             &progress,
         )?;
+        tx_result.format_upgrades = format_upgrades;
 
         storage.set_metadata_in_tx(METADATA_LAST_IMPORT_TIME, &chrono::Utc::now().to_rfc3339())?;
         storage.set_metadata_in_tx(METADATA_JSONL_CONTENT_HASH, &jsonl_hash)?;
         record_observed_jsonl_witness_in_tx(storage, &observed_jsonl)?;
+
+        // A file that arrived at an older generation has been migrated into
+        // the database but not yet on disk. Marking it for flush is what makes
+        // the upgrade announce itself once instead of on every run: the next
+        // flush restamps the file, and the import after that finds nothing to
+        // migrate.
+        if format_upgrades.needs_restamp() {
+            storage.set_metadata_in_tx("needs_flush", "true")?;
+        }
 
         Ok(tx_result)
     });
@@ -4768,7 +4810,9 @@ pub fn save_base_snapshot<S: ::std::hash::BuildHasher>(
     let mut buffer = Vec::new();
     for issue in ordered_issues {
         buffer.clear();
-        serde_json::to_writer(&mut buffer, issue).map_err(|e| {
+        // The base snapshot is an ordinary JSONL file that the three-way merge
+        // reads back, so it carries the generation marker like any other.
+        jsonl_format::write_line(&mut buffer, issue).map_err(|e| {
             BeadsError::Config(format!("Failed to serialize issue {}: {}", issue.id, e))
         })?;
         writer.write_all(&buffer).map_err(BeadsError::Io)?;

@@ -62,6 +62,15 @@ pub struct ImportResultOutput {
     pub tombstone_skipped: usize,
     pub orphans_removed: usize,
     pub blocked_cache_rebuilt: bool,
+    /// How many records arrived at an older interchange generation and were
+    /// migrated forward. Omitted when nothing was upgraded, so the ordinary
+    /// payload is unchanged for existing consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_upgraded: Option<usize>,
+    /// The oldest interchange generation seen in the file, alongside
+    /// `format_upgraded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_upgraded_from: Option<u32>,
 }
 
 /// Sync status information.
@@ -2078,6 +2087,8 @@ fn emit_auto_rebuild_import_result(
         tombstone_skipped: 0,
         orphans_removed: 0,
         blocked_cache_rebuilt: true,
+        format_upgraded: None,
+        format_upgraded_from: None,
     };
     if use_json {
         ctx.json_pretty(&result);
@@ -2202,6 +2213,8 @@ fn execute_import(
                 tombstone_skipped: 0,
                 orphans_removed: 0,
                 blocked_cache_rebuilt: false,
+                format_upgraded: None,
+                format_upgraded_from: None,
             };
             ctx.json_pretty(&result);
         } else if should_render_human_sync_output(ctx, use_json) {
@@ -2233,6 +2246,8 @@ fn execute_import(
                         tombstone_skipped: 0,
                         orphans_removed: 0,
                         blocked_cache_rebuilt: false,
+                        format_upgraded: None,
+                        format_upgraded_from: None,
                     };
                     ctx.json_pretty(&result);
                 } else if should_render_human_sync_output(ctx, use_json) {
@@ -2532,6 +2547,12 @@ fn execute_import(
         tombstone_skipped: import_result.tombstone_skipped,
         orphans_removed: import_result.orphans_removed,
         blocked_cache_rebuilt: true,
+        format_upgraded: if import_result.format_upgrades.needs_restamp() {
+            Some(import_result.format_upgrades.upgraded)
+        } else {
+            None
+        },
+        format_upgraded_from: import_result.format_upgrades.oldest_seen,
     };
 
     if use_json {
@@ -2559,6 +2580,14 @@ fn execute_import(
                 "  Orphans removed: {} issues (not in JSONL)",
                 result.orphans_removed
             );
+        }
+        if let (Some(upgraded), Some(from)) = (result.format_upgraded, result.format_upgraded_from)
+        {
+            println!(
+                "  Format upgraded: {upgraded} issues from format version {from} to {}",
+                crate::sync::jsonl_format::CURRENT_JSONL_FORMAT_VERSION
+            );
+            println!("    (the file is rewritten at the new version on the next flush)");
         }
         println!("  Rebuilt blocked cache");
     }

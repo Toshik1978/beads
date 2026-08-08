@@ -98,6 +98,42 @@ database is brought forward by a sequence of migrations gated on the stored
 `user_version` (`if user_version < N { ... }`), run automatically whenever
 the database is opened — there is no separate migration command.
 
+## Interchange format versioning
+
+The database's schema version has a counterpart on the file that actually
+matters: every record in `issues.jsonl` carries `format_version` as its first
+key, defined by `CURRENT_JSONL_FORMAT_VERSION` in `src/sync/jsonl_format.rs`.
+
+The marker is per record, not a header line or an entry in
+`.beads/metadata.json`, because those are the only two things JSONL records
+here are reliably subjected to: concatenation and three-way merge (this repo
+ships `beads.{base,left,right}.jsonl` handling). A header survives neither, and
+`metadata.json` is per workspace, so it says nothing about a file that arrived
+from somewhere else — which is the case the marker exists for.
+
+A reader can face three cases:
+
+- **Older** — migrated forward on import, counted, and reported
+  (`Format upgraded: N issues from format version X to Y`). The import marks
+  the workspace for flush, so the next export rewrites the file at the current
+  generation and the upgrade is announced once rather than every run. A file
+  with no marker at all is generation 0: everything written before this
+  existed.
+- **Current** — nothing happens.
+- **Newer** — refused, with `JsonlFormatTooNew`. This is deliberate and mirrors
+  the `SchemaMismatch` posture for a database newer than the binary: a newer
+  generation may *reinterpret* a key this build already knows, not merely add
+  ones it does not, and a best-effort read would flush the misreading back over
+  a committed file. Upgrade `br`.
+
+**An unrecognised key is dropped, not preserved.** Within a generation this
+build understands, an unknown key is not a future field — future fields travel
+behind the version marker, and the refusal above is what protects them. It is a
+foreign field from a tracker this fork does not model. Carrying one would mean
+storing meaningless data in the derived database and letting it vote in
+`sync_equals`, `content_hash` and the three-way merge. The rule is pinned by a
+round-trip test in `tests/storage/jsonl_format_version.rs`.
+
 ## The `Issue` field set is a published interface
 
 `Issue` (see `src/model/mod.rs`) serializes to both `issues.jsonl` lines and
@@ -112,7 +148,10 @@ consumer, not just an internal refactor.
 serialized field set of a fully-populated `Issue`, the subset that must
 always be present even on a default/empty `Issue`, and — as an end-to-end
 check — that a real `br create` actually writes only declared keys into
-`.beads/issues.jsonl`. The same file also pins `Dependency` and `Comment`'s
+`.beads/issues.jsonl`. The one key in the file that is not in that set is
+`format_version`, which lives outside `Issue` precisely because it describes
+the format rather than the issue; the end-to-end check knows about it by name
+and asserts its value. The same file also pins `Dependency` and `Comment`'s
 wire field sets, and the database's DDL shape (table/index/foreign-key
 definitions) independent of `Issue`, so that a schema or serialization
 regression fails a targeted test instead of surviving on a green suite. See

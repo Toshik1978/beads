@@ -37,6 +37,16 @@ pub enum BeadsError {
     #[error("Schema version mismatch: expected {expected}, found {found}")]
     SchemaMismatch { expected: i32, found: i32 },
 
+    /// `issues.jsonl` was written by a newer generation of the interchange
+    /// format than this build understands. Refused rather than read
+    /// best-effort: a newer generation may reinterpret a key this build
+    /// already knows, and a best-effort read would write its misreading back
+    /// over a committed file. See `sync::jsonl_format`.
+    #[error(
+        "issues.jsonl is format version {found}; this build of br understands up to {supported}"
+    )]
+    JsonlFormatTooNew { found: u32, supported: u32 },
+
     /// `SQLite` database error.
     #[error("Database error: {0}")]
     Database(#[from] crate::storage::conn::DbError),
@@ -275,6 +285,9 @@ impl BeadsError {
             Self::DependencyCycle { .. } => Some("Remove one dependency to break the cycle"),
             Self::SelfDependency { .. } => Some("An issue cannot depend on itself"),
             Self::AlreadyInitialized { .. } => Some("Use --force to reinitialize"),
+            Self::JsonlFormatTooNew { .. } => Some(
+                "Upgrade br to a build that understands this format version. Do not import with an older build: it would drop or misread what the newer one wrote and flush the result back over the file.",
+            ),
             Self::InvalidPriority { .. } => {
                 Some("Use a priority between 0 (critical) and 4 (backlog)")
             }

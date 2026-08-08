@@ -18,6 +18,7 @@ issue:
   content_hash: 68de7a4e48995c1d78f057e7a61e7b46b6f76cf9ec0caaa00b8531f46d10738d
 jsonl:
 {
+  "format_version": 1,
   "id": "storage-golden-1",
   "title": "Golden storage lifecycle updated",
   "description": "Updated description",

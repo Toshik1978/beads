@@ -33,6 +33,8 @@ mod history;
 mod id_hash_parity;
 #[path = "storage/invariants.rs"]
 mod invariants;
+#[path = "storage/jsonl_format_version.rs"]
+mod jsonl_format_version;
 #[path = "storage/list_filters.rs"]
 mod list_filters;
 #[path = "storage/ready.rs"]

@@ -684,9 +684,17 @@ fn import_of_a_bumped_former_ids_change_updates_the_row_instead_of_skipping() {
 
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("issues.jsonl");
+    // Written through the export helper, not `serde_json::to_string`, so the
+    // record carries the current interchange generation. A hand-serialized
+    // line would be a previous-generation file, which the import migrates and
+    // then flags for a restamping flush -- setting `needs_flush` for a reason
+    // that has nothing to do with the update-vs-skip decision this test pins.
     std::fs::write(
         &path,
-        format!("{}\n", serde_json::to_string(&incoming).unwrap()),
+        format!(
+            "{}\n",
+            beads::sync::jsonl_format::to_line(&incoming).unwrap()
+        ),
     )
     .unwrap();
 

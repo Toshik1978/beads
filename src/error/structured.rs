@@ -90,6 +90,8 @@ pub enum ErrorCode {
     ImportCollision,
     /// Conflict detected between local database changes and newer JSONL
     SyncConflict,
+    /// `issues.jsonl` declares a format generation newer than this build reads
+    JsonlFormatTooNew,
     /// Conflict markers in JSONL
     ConflictMarkers,
     /// Path traversal attempt blocked
@@ -160,6 +162,7 @@ impl ErrorCode {
             Self::PrefixMismatch => "PREFIX_MISMATCH",
             Self::ImportCollision => "IMPORT_COLLISION",
             Self::SyncConflict => "SYNC_CONFLICT",
+            Self::JsonlFormatTooNew => "JSONL_FORMAT_TOO_NEW",
             Self::ConflictMarkers => "CONFLICT_MARKERS",
             Self::PathTraversal => "PATH_TRAVERSAL",
             // Config
@@ -246,6 +249,7 @@ impl ErrorCode {
             | Self::PrefixMismatch
             | Self::ImportCollision
             | Self::SyncConflict
+            | Self::JsonlFormatTooNew
             | Self::ConflictMarkers
             | Self::PathTraversal => 6,
             // Config (7)
@@ -460,6 +464,10 @@ impl StructuredError {
             BeadsError::SchemaMismatch { expected, found } => (
                 ErrorCode::SchemaMismatch,
                 Some(json!({"expected": expected, "found": found})),
+            ),
+            BeadsError::JsonlFormatTooNew { found, supported } => (
+                ErrorCode::JsonlFormatTooNew,
+                Some(json!({"found": found, "supported": supported})),
             ),
             BeadsError::Database(_) => (ErrorCode::DatabaseError, None),
             BeadsError::NotInitialized => (ErrorCode::NotInitialized, None),
