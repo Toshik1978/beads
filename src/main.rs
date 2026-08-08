@@ -315,6 +315,8 @@ fn main() {
         Commands::Rename(args) => {
             commands::rename::execute(&args, cli.json, &overrides, &output_ctx)
         }
+        Commands::Statuses(_) => commands::vocabulary::statuses(cli.json, &overrides, &output_ctx),
+        Commands::Types(_) => commands::vocabulary::types(cli.json, &overrides, &output_ctx),
         Commands::Dep { command } => {
             if let (Some(res), Some(beads_dir)) = (storage_result.as_ref(), ctx.beads_dir.as_ref())
             {
@@ -761,6 +763,10 @@ const fn should_auto_import(cmd: &Commands) -> bool {
         | Commands::Version(_)
         | Commands::Completions(_)
         | Commands::Config { .. }
+        // `statuses` and `types` read `policy.yaml`, never an issue row, so an
+        // import would be pure cost.
+        | Commands::Statuses(_)
+        | Commands::Types(_)
         | Commands::History(_) => false,
     }
 }

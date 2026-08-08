@@ -113,7 +113,7 @@ every ID it sees resolves against the current directory's workspace; see
 
 ## Command index
 
-All 24 top-level commands, for orientation. Full flags, subcommands, and
+All 27 top-level commands, for orientation. Full flags, subcommands, and
 `--json` shapes are in `CLI_REFERENCE.md`.
 
 | Command | Purpose |
@@ -135,6 +135,8 @@ All 24 top-level commands, for orientation. Full flags, subcommands, and
 | `epic` | Epic management commands |
 | `detach` | Move an issue out from under its parent |
 | `rename` | Change an issue's ID, cascading to its descendants |
+| `statuses` | Print the status vocabulary this project accepts |
+| `types` | Print the issue-type vocabulary this project accepts |
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |

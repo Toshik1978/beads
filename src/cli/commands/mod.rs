@@ -35,6 +35,7 @@ pub mod stats;
 pub mod sync;
 pub mod update;
 pub mod version;
+pub mod vocabulary;
 
 /// Report a post-mutation auto-flush failure without corrupting command stdout.
 ///

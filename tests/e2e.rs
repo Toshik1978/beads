@@ -115,6 +115,8 @@ mod terminal_sanitization;
 mod undefer;
 #[path = "e2e/version.rs"]
 mod version;
+#[path = "e2e/vocabulary.rs"]
+mod vocabulary;
 #[path = "e2e/workspace_commands.rs"]
 mod workspace_commands;
 #[path = "e2e/workspace_scenarios.rs"]

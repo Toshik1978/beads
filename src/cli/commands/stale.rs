@@ -68,6 +68,12 @@ fn execute_inner(args: &StaleArgs, ctx: &OutputContext, storage: &SqliteStorage)
     let now = Utc::now();
     let threshold = now - Duration::days(args.days);
     filters.updated_before = Some(threshold);
+    // Applied in SQL alongside the stalest-first ordering below, so `--limit 10`
+    // keeps the ten *stalest* rather than ten arbitrary ones. 0 means unlimited,
+    // matching `br ready --limit`.
+    if args.limit > 0 {
+        filters.limit = Some(args.limit);
+    }
     // Sort by updated_at ASC (oldest first) to show most stale items first
     filters.sort = Some("updated_at".parse().expect("valid sort spec"));
     filters.reverse = true; // updated_at default is DESC, so reverse gets ASC

@@ -86,7 +86,15 @@ struct CompletionConfigIndex {
 static COMPLETION_INDEX: OnceLock<CompletionIndex> = OnceLock::new();
 static CONFIG_INDEX: OnceLock<CompletionConfigIndex> = OnceLock::new();
 
-const STATUS_CANDIDATES: &[(&str, &str)] = &[
+/// The built-in status vocabulary, as `(value, description)`.
+///
+/// Shared by shell completion and by `br statuses` (bds-b4h) rather than
+/// duplicated, so the list an agent is *told* about and the list it is
+/// *completed* from cannot disagree.
+///
+/// Kept honest by [`assert_every_status_variant_is_listed`] below and by a test
+/// that every entry parses back to a built-in rather than to [`Status::Custom`].
+pub(crate) const STATUS_CANDIDATES: &[(&str, &str)] = &[
     ("open", "Open issue"),
     ("in_progress", "In progress"),
     ("blocked", "Blocked"),
@@ -97,7 +105,8 @@ const STATUS_CANDIDATES: &[(&str, &str)] = &[
     ("pinned", "Pinned"),
 ];
 
-const ISSUE_TYPE_CANDIDATES: &[(&str, &str)] = &[
+/// The built-in issue-type vocabulary. See [`STATUS_CANDIDATES`].
+pub(crate) const ISSUE_TYPE_CANDIDATES: &[(&str, &str)] = &[
     ("task", "Task"),
     ("bug", "Bug"),
     ("feature", "Feature"),
@@ -106,6 +115,51 @@ const ISSUE_TYPE_CANDIDATES: &[(&str, &str)] = &[
     ("docs", "Docs"),
     ("question", "Question"),
 ];
+
+/// Exhaustive on purpose, and for one reason only: adding a variant to
+/// [`Status`] stops this compiling, which is the only thing standing between
+/// [`STATUS_CANDIDATES`] and a `br statuses` that quietly under-reports the
+/// vocabulary. Nothing calls it.
+///
+/// If you are here because it stopped compiling: add the new variant's wire
+/// value to `STATUS_CANDIDATES`, then add the arm here.
+#[expect(
+    dead_code,
+    reason = "a compile-time reminder, not a function anything calls"
+)]
+const fn assert_every_status_variant_is_listed(status: &crate::model::Status) {
+    use crate::model::Status;
+    match status {
+        Status::Open
+        | Status::InProgress
+        | Status::Blocked
+        | Status::Deferred
+        | Status::Draft
+        | Status::Closed
+        | Status::Tombstone
+        | Status::Pinned
+        | Status::Custom(_) => {}
+    }
+}
+
+/// The same reminder for [`ISSUE_TYPE_CANDIDATES`]. See above.
+#[expect(
+    dead_code,
+    reason = "a compile-time reminder, not a function anything calls"
+)]
+const fn assert_every_issue_type_variant_is_listed(issue_type: &crate::model::IssueType) {
+    use crate::model::IssueType;
+    match issue_type {
+        IssueType::Task
+        | IssueType::Bug
+        | IssueType::Feature
+        | IssueType::Epic
+        | IssueType::Chore
+        | IssueType::Docs
+        | IssueType::Question
+        | IssueType::Custom(_) => {}
+    }
+}
 
 const PRIORITY_CANDIDATES: &[(&str, &str)] = &[
     ("0", "Critical (P0)"),
@@ -686,6 +740,12 @@ pub enum Commands {
 
     /// Change an issue's ID, cascading to its descendants
     Rename(RenameArgs),
+
+    /// Print the status vocabulary this project accepts
+    Statuses(VocabularyArgs),
+
+    /// Print the issue-type vocabulary this project accepts
+    Types(VocabularyArgs),
 
     /// Epic management commands
     Epic {
@@ -1723,6 +1783,11 @@ pub struct StaleArgs {
     #[arg(long, default_value_t = 30)]
     pub days: i64,
 
+    /// Maximum number of issues to report (0 = unlimited). Results are ordered
+    /// stalest first, so a limit keeps the worst offenders
+    #[arg(long, default_value_t = 0)]
+    pub limit: usize,
+
     /// Filter by status (repeatable or comma-separated)
     #[arg(long, value_delimiter = ',', add = ArgValueCompleter::new(status_completer_delimited))]
     pub status: Vec<String>,
@@ -1897,6 +1962,13 @@ pub struct DetachArgs {
     #[arg(add = ArgValueCompleter::new(issue_id_completer))]
     pub ids: Vec<String>,
 }
+
+/// Arguments for `br statuses` and `br types`.
+///
+/// Deliberately empty: these commands answer one question and take no
+/// narrowing. `--json` is a global flag, so it needs no entry here.
+#[derive(Args, Debug, Clone, Default)]
+pub struct VocabularyArgs {}
 
 /// Arguments for the rename command.
 #[derive(Args, Debug, Clone, Default)]

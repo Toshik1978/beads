@@ -27,6 +27,9 @@ Comprehensive reference for all `br` commands.
   - [label](#label)
   - [epic](#epic)
   - [detach](#detach)
+  - [rename](#rename)
+  - [statuses](#statuses)
+  - [types](#types)
   - [comments](#comments)
 - [Workflow Commands](#workflow-commands)
   - [defer / undefer](#defer--undefer)
@@ -754,6 +757,7 @@ br stale [OPTIONS]
 |--------|-------------|
 | `--days <N>` | Issues not updated in N days (default: 30) |
 | `--status <STATUS>` | Filter by status (repeatable or comma-separated) |
+| `--limit <N>` | Maximum results (0 = unlimited, the default). Output is stalest-first, so a limit keeps the worst offenders |
 
 **Abandoned in-progress claims:**
 
@@ -950,6 +954,62 @@ br rename ab-abc123 ab-auth
 # The old ID keeps working
 br show ab-abc123
 ```
+
+---
+
+### statuses
+
+Print the status vocabulary this project accepts.
+
+```bash
+br statuses [--json]
+```
+
+`br statuses` and `br types` exist because the answer is project-specific rather than a constant.
+`Status::Custom` means **any** status string is accepted unless
+`.beads/policy.yaml` enumerates a set under `workflow.statuses` *and* sets
+`workflow.strict: true` — and there was previously no way to ask which of those
+two worlds you were in, let alone what the set was.
+
+`br statuses` reports, per status, whether it is built into `br` or comes only
+from `policy.yaml`, and — when the policy is enforcing — whether it is currently
+allowed. It also prints the `br ready` status group. Three states are
+distinguished, the middle one deliberately:
+
+| State | Meaning |
+|-------|---------|
+| No policy | Any status value is accepted. |
+| `strict: true`, `statuses:` empty | **Nothing is enforced.** A project that set `strict` and expected enforcement has a real problem, and this is where it shows. |
+| `strict: true`, `statuses:` non-empty | Enforcing; a status outside the set is rejected by `create`/`update`. |
+
+`closed` and `tombstone` are never settable through `br update --status`
+regardless of policy — use `br close` and `br delete`, which enforce close policy
+and rewire dependencies.
+
+**Examples:**
+```bash
+# What may I set on this project?
+br statuses --json | jq -r '.statuses[] | select(.allowed) | .name'
+
+# Is anything actually enforced here?
+br statuses --json | jq '.enforced'
+```
+
+---
+
+### types
+
+Print the issue-type vocabulary this project accepts.
+
+```bash
+br types [--json]
+```
+
+The flatter of the pair: it prints the built-in types and states plainly that any
+other value is also accepted and stored as given (`--json` reports this as
+`any_value_accepted`). There is no type vocabulary in `policy.yaml` to narrow it
+with, unlike statuses — that is the honest answer rather than a placeholder for a
+future policy key. See [statuses](#statuses) for why both commands exist.
 
 ---
 
