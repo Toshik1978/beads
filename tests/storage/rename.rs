@@ -684,11 +684,13 @@ fn import_of_a_bumped_former_ids_change_updates_the_row_instead_of_skipping() {
 
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("issues.jsonl");
-    // Written through the export helper, not `serde_json::to_string`, so the
-    // record carries the current interchange generation. A hand-serialized
-    // line would be a previous-generation file, which the import migrates and
-    // then flags for a restamping flush -- setting `needs_flush` for a reason
-    // that has nothing to do with the update-vs-skip decision this test pins.
+    // Written through `jsonl_format::to_line`, the production serializer,
+    // rather than an inline `serde_json::to_string(&incoming)`. The two
+    // produce byte-identical output today -- `to_line` is exactly
+    // `serde_json::to_string` on an `Issue` since the interchange marker was
+    // removed -- but routing through the real writer keeps this test correct
+    // automatically if that ever stops being true, instead of duplicating
+    // production behaviour that could quietly drift out from under it.
     std::fs::write(
         &path,
         format!(

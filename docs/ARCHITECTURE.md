@@ -98,62 +98,40 @@ database is brought forward by a sequence of migrations gated on the stored
 `user_version` (`if user_version < N { ... }`), run automatically whenever
 the database is opened — there is no separate migration command.
 
-## Interchange format versioning
+## Interchange format has no generation marker
 
-The database's schema version has a counterpart on the file that actually
-matters: every record in `issues.jsonl` carries `format_version` as its first
-key, defined by `CURRENT_JSONL_FORMAT_VERSION` in `src/sync/jsonl_format.rs`.
+`issues.jsonl` carries no version marker. A record is `Issue`'s own derived
+`Serialize` output (`src/sync/jsonl_format.rs`'s `to_line`/`write_line`),
+nothing wrapped around it. There is exactly one shape a reader has ever had to
+handle, so there is nothing to migrate and nothing to refuse: an unrecognised
+key from some other tool is dropped by `serde`'s ordinary "unknown field"
+behaviour, the same as any other JSON consumer that does not model it.
 
-The marker is per record, not a header line or an entry in
-`.beads/metadata.json`, because those are the only two things JSONL records
-here are reliably subjected to: concatenation and three-way merge (this repo
-ships `beads.{base,left,right}.jsonl` handling). A header survives neither, and
-`metadata.json` is per workspace, so it says nothing about a file that arrived
-from somewhere else — which is the case the marker exists for.
-
-A reader can face three cases:
-
-- **Older** — migrated forward on import, counted, and reported
-  (`Format upgraded: N issues from format version X to Y`). The import marks
-  the workspace for flush, so the next export rewrites the file at the current
-  generation and the upgrade is announced once rather than every run. A file
-  with no marker at all is generation 0: everything written before this
-  existed.
-- **Current** — nothing happens.
-- **Newer** — refused, with `JsonlFormatTooNew`. This is deliberate and mirrors
-  the `SchemaMismatch` posture for a database newer than the binary: a newer
-  generation may *reinterpret* a key this build already knows, not merely add
-  ones it does not, and a best-effort read would flush the misreading back over
-  a committed file. Upgrade `br`.
-
-**An unrecognised key is dropped, not preserved.** Within a generation this
-build understands, an unknown key is not a future field — future fields travel
-behind the version marker, and the refusal above is what protects them. It is a
-foreign field from a tracker this fork does not model. Carrying one would mean
-storing meaningless data in the derived database and letting it vote in
-`sync_equals`, `content_hash` and the three-way merge. The rule is pinned by a
-round-trip test in `tests/storage/jsonl_format_version.rs`.
+A file written by an earlier build that *did* stamp a leading
+`format_version` key still imports cleanly — the key is simply an unmodelled
+field like any other and is dropped on read, with no error and no warning.
+Two fixtures under `tests/fixtures/workspace_failures/` keep that stamped key
+in their checked-in payload for exactly this reason; see that directory's
+`README.md`.
 
 ## The `Issue` field set is a published interface
 
 `Issue` (see `src/model/mod.rs`) serializes to both `issues.jsonl` lines and
-every command's `--json` output. That serialized field set — currently 40
-keys, enumerated in `EXPECTED_JSONL_KEYS` in `tests/storage_schema_shape.rs`,
+every command's `--json` output. That serialized field set — currently 41
+keys, enumerated in `EXPECTED_JSONL_KEYS` in `tests/storage/schema_shape.rs`,
 which is the authority — is not free to change: an external consumer parses
 `issues.jsonl`
 directly, so adding, removing, or renaming a key is a breaking change to that
 consumer, not just an internal refactor.
 
-`tests/storage_schema_shape.rs` pins this from three angles: the full
+`tests/storage/schema_shape.rs` pins this from three angles: the full
 serialized field set of a fully-populated `Issue`, the subset that must
 always be present even on a default/empty `Issue`, and — as an end-to-end
 check — that a real `br create` actually writes only declared keys into
-`.beads/issues.jsonl`. The one key in the file that is not in that set is
-`format_version`, which lives outside `Issue` precisely because it describes
-the format rather than the issue; the end-to-end check knows about it by name
-and asserts its value. The same file also pins `Dependency` and `Comment`'s
-wire field sets, and the database's DDL shape (table/index/foreign-key
-definitions) independent of `Issue`, so that a schema or serialization
-regression fails a targeted test instead of surviving on a green suite. See
-that file's module doc comment for how the expected values were derived (from
-a database this project actually produced, not from source text).
+`.beads/issues.jsonl`, and no more: every key in the file is a key of `Issue`.
+The same file also pins `Dependency` and `Comment`'s wire field sets, and the
+database's DDL shape (table/index/foreign-key definitions) independent of
+`Issue`, so that a schema or serialization regression fails a targeted test
+instead of surviving on a green suite. See that file's module doc comment for
+how the expected values were derived (from a database this project actually
+produced, not from source text).

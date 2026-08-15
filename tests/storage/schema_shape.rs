@@ -49,7 +49,6 @@ use beads::model::{Comment, Dependency, DependencyType, Issue, IssueType, Priori
 use beads::storage::conn::Connection;
 use beads::storage::conn::SqliteValue;
 use beads::storage::schema::CURRENT_SCHEMA_VERSION;
-use beads::sync::jsonl_format::{CURRENT_JSONL_FORMAT_VERSION, FORMAT_VERSION_KEY};
 use chrono::Utc;
 use common::cli::{BrWorkspace, run_br};
 use serde_json::Value;
@@ -1374,26 +1373,13 @@ fn issues_jsonl_written_by_br_stays_inside_the_declared_field_set() {
     let issue: Value = serde_json::from_str(line).expect("each issues.jsonl line is valid JSON");
 
     let keys = sorted_keys(&issue);
-    // The file carries one key the `Issue` struct does not: the interchange
-    // generation marker, written by `sync::jsonl_format` outside the model
-    // because it is a property of the format rather than of an issue. That is
-    // the whole of the deliberate field-set change bds-ja3 made; the struct's
-    // own set, pinned by the test above, is untouched.
-    let declared: Vec<String> = owned_names(EXPECTED_JSONL_KEYS)
-        .into_iter()
-        .chain(std::iter::once(FORMAT_VERSION_KEY.to_string()))
-        .collect();
+    // The file's key set is exactly `Issue`'s own declared field set: the
+    // record is the struct's derived serialization, nothing added.
+    let declared: Vec<String> = owned_names(EXPECTED_JSONL_KEYS);
     let unexpected: Vec<&String> = keys.iter().filter(|key| !declared.contains(key)).collect();
     assert!(
         unexpected.is_empty(),
         "br wrote issue keys that are not part of the declared field set: {unexpected:?}"
-    );
-
-    assert_eq!(
-        issue.get(FORMAT_VERSION_KEY),
-        Some(&Value::from(CURRENT_JSONL_FORMAT_VERSION)),
-        "every record br writes must declare the generation that wrote it, or \
-         a future reader cannot tell an old file from a new one"
     );
 
     for key in ALWAYS_SERIALIZED_JSONL_KEYS {
@@ -1402,4 +1388,145 @@ fn issues_jsonl_written_by_br_stays_inside_the_declared_field_set() {
             "br omitted `{key}`, which must always be present in issues.jsonl"
         );
     }
+}
+
+#[test]
+fn exported_records_carry_no_format_version_key() {
+    let workspace = init_workspace();
+    let create = run_br(
+        &workspace,
+        ["create", "--title", "Marker check", "--silent"],
+        "create",
+    );
+    assert!(
+        create.status.success(),
+        "create failed: stdout={} stderr={}",
+        create.stdout,
+        create.stderr
+    );
+
+    let flush = run_br(&workspace, ["sync", "--flush-only"], "flush");
+    assert!(
+        flush.status.success(),
+        "sync --flush-only failed: stdout={} stderr={}",
+        flush.stdout,
+        flush.stderr
+    );
+
+    let jsonl = std::fs::read_to_string(workspace.root.join(".beads").join("issues.jsonl"))
+        .expect("read issues.jsonl");
+    let line = jsonl
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("issues.jsonl has at least one issue line");
+    let record: Value = serde_json::from_str(line).expect("record parses");
+
+    assert!(
+        record.get("format_version").is_none(),
+        "format_version was removed but still appears in an exported record: {record}"
+    );
+}
+
+/// Criterion: a record carrying keys `Issue` does not model imports cleanly
+/// and those keys do not survive a round trip through the database.
+///
+/// This is the invariant the whole removal in bds-b4f.1.1 rests on, restored
+/// from the deleted `tests/storage/jsonl_format_version.rs` (see
+/// `git show 098b379:tests/storage/jsonl_format_version.rs`) after that file
+/// went out with the interchange-marker mechanism it was written to pin —
+/// carrying `format_version` was only one of several things it tested, and
+/// this one is not about the marker at all. It survives the marker's removal
+/// unchanged: an unmodelled key, whether it is a leftover `format_version`
+/// from a pre-removal file or any other foreign field, is simply dropped by
+/// `Issue`'s ordinary derive-`Deserialize` behaviour on import, and is
+/// therefore absent the next time the workspace exports. That is the entire
+/// "an old file still imports" claim the removal depends on, and every task
+/// after this one that deletes an `Issue` field depends on it holding for the
+/// field it removes.
+#[test]
+fn a_record_with_an_unrecognised_key_imports_cleanly_and_the_key_is_dropped_on_export() {
+    let workspace = init_workspace();
+    let create = run_br(
+        &workspace,
+        ["create", "--title", "foreign key probe", "--type", "task"],
+        "create",
+    );
+    assert!(
+        create.status.success(),
+        "create failed: stdout={} stderr={}",
+        create.stdout,
+        create.stderr
+    );
+
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    let jsonl = std::fs::read_to_string(&jsonl_path).expect("read issues.jsonl");
+    let line = jsonl
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("issues.jsonl has at least one issue line");
+    let mut record: Value = serde_json::from_str(line).expect("record parses");
+
+    let object = record.as_object_mut().expect("issue record is an object");
+    // A leftover marker from a pre-removal file, and an unrelated foreign
+    // field no build of `br` has ever modelled -- both are unrecognised keys
+    // to this build, and both must be handled identically: dropped, not
+    // refused and not carried through.
+    object.insert("format_version".to_string(), Value::from(1));
+    object.insert("lease_granted_node".to_string(), Value::from("node-7"));
+    // Move the clock forward so the importer applies this record as an
+    // update rather than skipping it as no-newer-than what's already in the
+    // database: the point under test is what survives an *applied* record,
+    // not whether this one was applied at all.
+    object.insert(
+        "updated_at".to_string(),
+        Value::from("2099-01-01T00:00:00Z"),
+    );
+    std::fs::write(&jsonl_path, format!("{record}\n")).expect("write edited issues.jsonl");
+
+    let import = run_br(&workspace, ["sync", "--import-only"], "import");
+    assert!(
+        import.status.success(),
+        "a record with an unrecognised key must still import: stdout={} stderr={}",
+        import.stdout,
+        import.stderr
+    );
+    assert!(
+        !import.stderr.contains("WARN"),
+        "importing a record with an unrecognised key must not warn (RUST_LOG=beads=warn \
+         is set for this run, so any warning would appear here): {}",
+        import.stderr
+    );
+
+    // Importing an already-current file leaves nothing dirty, so an
+    // unforced flush would be a no-op ("Nothing to export (no dirty
+    // issues)") and would leave the hand-edited file on disk unchanged --
+    // which would make this test pass for the wrong reason, having asserted
+    // nothing about what the importer actually did to the record. `--force`
+    // makes the export unconditional, which is what actually exercises "the
+    // key is dropped by the next export".
+    let flush = run_br(&workspace, ["sync", "--flush-only", "--force"], "flush");
+    assert!(
+        flush.status.success(),
+        "sync --flush-only --force failed: stdout={} stderr={}",
+        flush.stdout,
+        flush.stderr
+    );
+
+    let round_tripped = std::fs::read_to_string(&jsonl_path).expect("read issues.jsonl");
+    let line = round_tripped
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("issues.jsonl has at least one issue line");
+    let exported: Value = serde_json::from_str(line).expect("record parses");
+
+    assert!(
+        exported.get("lease_granted_node").is_none(),
+        "an unrecognised key must be dropped on import, not carried through to the \
+         next export: {exported}"
+    );
+    assert!(
+        exported.get("format_version").is_none(),
+        "a leftover format_version key must be dropped like any other unrecognised \
+         key, not resurrected on export: {exported}"
+    );
 }
