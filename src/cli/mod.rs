@@ -819,7 +819,6 @@ MODES (one required):
   --import-only   Import JSONL into database (validates first)
   --merge         Three-way merge .beads/beads.base.jsonl + DB + JSONL
   --status        Show sync status (read-only)
-  --witness       Emit deterministic JSONL chunk witness (read-only)
 
 SAFETY GUARDS:
   Export guards (bypassed with --force):
@@ -852,8 +851,7 @@ EXAMPLES:
   br sync --merge --force-db     Keep local DB conflicts
   br sync --merge --force-jsonl  Keep JSONL conflicts
   br sync --import-only --rebuild Import + remove DB entries not in JSONL
-  br sync --status               Show current sync status
-  br sync --witness --json       Emit JSONL chunk witness")]
+  br sync --status               Show current sync status")]
     Sync(SyncArgs),
 
     /// Update an issue
@@ -2034,9 +2032,6 @@ pub enum SortPolicy {
     Oldest,
 }
 
-/// Default worker cap for read-only witness planning on high-core swarm hosts.
-pub const DEFAULT_WITNESS_PARALLELISM: usize = 64;
-
 /// Arguments for the sync command.
 #[derive(Args, Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
@@ -2071,37 +2066,6 @@ pub struct SyncArgs {
     /// ({"available": false} when git or a repo is absent).
     #[arg(long)]
     pub status: bool,
-
-    /// Emit deterministic JSONL chunk witness (read-only)
-    ///
-    /// Reads the resolved issues.jsonl bytes and emits chunk/root hashes
-    /// without opening or mutating the SQLite database.
-    #[arg(long)]
-    pub witness: bool,
-
-    /// Lines per JSONL witness chunk
-    ///
-    /// Only used with --witness. Larger chunks reduce witness size; smaller
-    /// chunks improve unchanged-chunk localization for parallel sync planning.
-    #[arg(
-        long = "witness-chunk-lines",
-        default_value_t = 1024,
-        value_name = "LINES",
-        requires = "witness"
-    )]
-    pub witness_chunk_lines: usize,
-
-    /// Parallel worker cap for read-only JSONL witness hashing and work planning
-    ///
-    /// Only used with --witness. When omitted, br uses a deterministic
-    /// 64-worker cap rather than host-dependent CPU detection so machine output
-    /// remains stable across machines.
-    #[arg(
-        long = "witness-parallelism",
-        value_name = "WORKERS",
-        requires = "witness"
-    )]
-    pub witness_parallelism: Option<usize>,
 
     /// Parallel worker cap for JSONL export line preparation
     ///

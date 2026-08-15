@@ -10,7 +10,6 @@
 pub mod history;
 pub mod jsonl_format;
 pub mod path;
-pub mod witness;
 
 pub use path::{
     ALLOWED_EXACT_NAMES, ALLOWED_EXTENSIONS, PathValidation, require_safe_sync_overwrite_path,

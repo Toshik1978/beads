@@ -703,10 +703,9 @@ const fn needs_write_lock(cmd: &Commands) -> bool {
         // to prevent (issue #243). `--status` only renders status after open,
         // but opening storage can still apply schema/runtime defaults or
         // recover the DB family, so it must also serialize before open.
-        // `br sync --witness` hashes JSONL and returns before opening SQLite, so
-        // it also should not block behind DB writers. Bare `br sync` is invalid
-        // and fails validation before storage open, so it should not block on
-        // `.write.lock` just to report an argument error.
+        // Bare `br sync` is invalid and fails validation before storage open,
+        // so it should not block on `.write.lock` just to report an argument
+        // error.
         Commands::List(_)
         | Commands::Show(_)
         | Commands::Search(_)
@@ -1407,7 +1406,6 @@ mod tests {
         // sidecars. It must therefore serialize before entering `sync::execute`.
         let flush_only = Cli::parse_from(["br", "sync", "--flush-only"]).command;
         let status = Cli::parse_from(["br", "sync", "--status"]).command;
-        let witness = Cli::parse_from(["br", "sync", "--witness"]).command;
         let merge = Cli::parse_from(["br", "sync", "--merge"]).command;
         let import_only = Cli::parse_from(["br", "sync", "--import-only"]).command;
         let default_sync = Cli::parse_from(["br", "sync"]).command;
@@ -1419,10 +1417,6 @@ mod tests {
         assert!(
             needs_write_lock(&status),
             "`br sync --status` opens storage and must serialize before recovery/schema work"
-        );
-        assert!(
-            !needs_write_lock(&witness),
-            "`br sync --witness` reads JSONL without opening SQLite and should not wait on .write.lock"
         );
         assert!(needs_write_lock(&merge));
         assert!(needs_write_lock(&import_only));

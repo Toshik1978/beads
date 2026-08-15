@@ -1128,7 +1128,7 @@ br sync [OPTIONS]
 **Rebuild semantics:**
 - `--rebuild` is valid only with explicit import mode: `br sync --import-only --rebuild`.
 - JSONL is authoritative. After import, entries present only in SQLite are removed; deletion tombstones are preserved when applicable.
-- `--rebuild` is rejected with every non-import mode, including `--flush-only`, `--merge`, `--status`, and `--witness`.
+- `--rebuild` is rejected with every non-import mode, including `--flush-only`, `--merge`, and `--status`.
 - Recovery artifacts are preserved under `.beads/.br_recovery/` when br has to move aside a damaged SQLite family before rebuilding.
 - If open-time recovery rebuilt the database before a semantic import flag such as `--rename-prefix` could apply, br prints a rerun command that includes the needed flags.
 

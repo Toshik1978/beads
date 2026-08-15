@@ -3,19 +3,13 @@
 //! Provides explicit JSONL sync actions without git operations.
 //! Supports `--flush-only` (export) and `--import-only` (import).
 
-use crate::cli::{DEFAULT_WITNESS_PARALLELISM, SyncArgs};
+use crate::cli::SyncArgs;
 use crate::config;
 use crate::error::{BeadsError, Result};
 use crate::health::{Anomaly, AnomalyClass};
 use crate::output::OutputContext;
 use crate::sync::history::HistoryConfig;
 use crate::sync::path::symlink_escape_for_existing_ancestor;
-use crate::sync::witness::{
-    JsonlMerkleWitness, JsonlWitnessComparison, JsonlWitnessParallelWorkPlan,
-    JsonlWitnessReuseMaterialization, JsonlWitnessReusePlan, build_jsonl_merkle_witness_parallel,
-    compare_jsonl_merkle_witnesses, materialize_jsonl_witness_reuse_plan,
-    plan_jsonl_witness_parallel_work, plan_jsonl_witness_reuse,
-};
 use crate::sync::{
     ConflictResolution, ExportConfig, ExportEntityType, ExportError, ExportErrorPolicy,
     ImportConfig, METADATA_JSONL_CONTENT_HASH, METADATA_LAST_EXPORT_TIME,
@@ -23,7 +17,7 @@ use crate::sync::{
     compute_staleness, export_temp_path, export_to_jsonl_with_policy, finalize_export,
     get_issue_ids_from_jsonl, id_matches_expected_prefix, import_from_jsonl, load_base_snapshot,
     read_issues_from_jsonl, refresh_base_snapshot_from_flushed_jsonl,
-    require_safe_sync_overwrite_path, require_valid_sync_path, restore_tombstones_after_rebuild,
+    require_safe_sync_overwrite_path, restore_tombstones_after_rebuild,
     save_base_snapshot_from_jsonl, scan_jsonl_for_tombstone_filter, snapshot_tombstones,
     three_way_merge, tombstones_missing_from_jsonl_tombstones, validate_no_git_path,
     validate_sync_path_with_external,
@@ -33,7 +27,7 @@ use rich_rust::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, IsTerminal};
+use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -150,31 +144,6 @@ impl GitExportStatus {
     }
 }
 
-/// JSONL witness command output.
-#[derive(Debug, Serialize)]
-pub struct SyncWitnessResult {
-    pub jsonl_path: String,
-    pub witness: JsonlMerkleWitness,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_jsonl_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_comparison: Option<JsonlWitnessComparison>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_reuse_plan: Option<JsonlWitnessReusePlan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_parallel_work_plan: Option<JsonlWitnessParallelWorkPlan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_reuse_materialization: Option<JsonlWitnessReuseMaterialization>,
-}
-
-struct BaseWitnessArtifacts {
-    jsonl_path: Option<String>,
-    comparison: Option<JsonlWitnessComparison>,
-    reuse_plan: Option<JsonlWitnessReusePlan>,
-    parallel_work_plan: Option<JsonlWitnessParallelWorkPlan>,
-    reuse_materialization: Option<JsonlWitnessReuseMaterialization>,
-}
-
 #[derive(Debug)]
 #[allow(dead_code)] // Fields may be used in future sync enhancements
 struct SyncPathPolicy {
@@ -195,7 +164,6 @@ struct SyncStartupState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SyncOperation {
     Status,
-    Witness,
     Flush,
     Merge,
     Import,
@@ -223,11 +191,6 @@ pub fn execute(
     startup_write_lock_held: bool,
 ) -> Result<()> {
     validate_sync_mode_args(args)?;
-
-    if args.witness {
-        let (_, _, path_policy) = resolve_sync_startup_paths(args, cli)?;
-        return execute_witness(&path_policy, args, ctx.is_json(), ctx);
-    }
 
     let mut startup = prepare_sync_startup(args, cli, startup_write_lock_held)?;
 
@@ -321,38 +284,22 @@ fn validate_sync_mode_args(args: &SyncArgs) -> Result<()> {
     let mode_count = u8::from(args.status)
         + u8::from(args.flush_only)
         + u8::from(args.import_only)
-        + u8::from(args.merge)
-        + u8::from(args.witness);
+        + u8::from(args.merge);
     if mode_count > 1 {
         return Err(BeadsError::Validation {
             field: "mode".to_string(),
-            reason:
-                "Must specify exactly one of --flush-only, --import-only, --merge, --status, or --witness"
-                    .to_string(),
+            reason: "Must specify exactly one of --flush-only, --import-only, --merge, or --status"
+                .to_string(),
         });
     }
     if mode_count == 0 {
         return Err(BeadsError::Validation {
             field: "mode".to_string(),
-            reason:
-                "Must specify one of --flush-only, --import-only, --merge, --status, or --witness"
-                    .to_string(),
+            reason: "Must specify one of --flush-only, --import-only, --merge, or --status"
+                .to_string(),
         });
     }
 
-    if args.witness && args.witness_chunk_lines == 0 {
-        return Err(BeadsError::Validation {
-            field: "witness_chunk_lines".to_string(),
-            reason: "--witness-chunk-lines must be greater than zero".to_string(),
-        });
-    }
-
-    if args.witness_parallelism == Some(0) {
-        return Err(BeadsError::Validation {
-            field: "witness_parallelism".to_string(),
-            reason: "--witness-parallelism must be greater than zero".to_string(),
-        });
-    }
     if args.export_parallelism == Some(0) {
         return Err(BeadsError::Validation {
             field: "export_parallelism".to_string(),
@@ -520,7 +467,6 @@ fn dispatch_sync_subcommand(
             options.use_json,
             ctx,
         ),
-        SyncOperation::Witness => execute_witness(path_policy, args, options.use_json, ctx),
         SyncOperation::Flush => execute_flush(
             &mut open_result.storage,
             beads_dir,
@@ -557,9 +503,8 @@ fn dispatch_sync_subcommand(
         ),
         SyncOperation::Unspecified => Err(BeadsError::Validation {
             field: "mode".to_string(),
-            reason:
-                "Must specify one of --flush-only, --import-only, --merge, --status, or --witness"
-                    .to_string(),
+            reason: "Must specify one of --flush-only, --import-only, --merge, or --status"
+                .to_string(),
         }),
     }
 }
@@ -581,9 +526,7 @@ fn sync_dispatch_options(
 }
 
 fn sync_operation(args: &SyncArgs) -> SyncOperation {
-    if args.witness {
-        SyncOperation::Witness
-    } else if args.status {
+    if args.status {
         SyncOperation::Status
     } else if args.flush_only {
         SyncOperation::Flush
@@ -1147,223 +1090,6 @@ fn render_status_rich(status: &SyncStatus, ctx: &OutputContext) {
         .title(Text::new("Sync Status"))
         .box_style(theme.box_style);
     ctx.render(&panel);
-}
-
-/// Execute the --witness operation.
-fn execute_witness(
-    path_policy: &SyncPathPolicy,
-    args: &SyncArgs,
-    use_json: bool,
-    ctx: &OutputContext,
-) -> Result<()> {
-    let jsonl_path = &path_policy.jsonl_path;
-    if !jsonl_path.is_file() {
-        return Err(BeadsError::Config(format!(
-            "JSONL file not found: {}",
-            jsonl_path.display()
-        )));
-    }
-
-    let witness_parallelism = effective_witness_parallelism(args);
-    let witness =
-        build_witness_for_path(jsonl_path, args.witness_chunk_lines, witness_parallelism)?;
-    let base_artifacts = build_base_witness_artifacts(
-        path_policy,
-        args.witness_chunk_lines,
-        witness_parallelism,
-        &witness,
-    )?;
-    let result = SyncWitnessResult {
-        jsonl_path: jsonl_path.display().to_string(),
-        witness,
-        base_jsonl_path: base_artifacts.jsonl_path,
-        base_comparison: base_artifacts.comparison,
-        base_reuse_plan: base_artifacts.reuse_plan,
-        base_parallel_work_plan: base_artifacts.parallel_work_plan,
-        base_reuse_materialization: base_artifacts.reuse_materialization,
-    };
-
-    if !should_render_human_sync_output(ctx, use_json) {
-        return Ok(());
-    }
-
-    if use_json {
-        ctx.json_pretty(&result);
-    } else {
-        render_witness_text(&result);
-    }
-
-    Ok(())
-}
-
-fn effective_witness_parallelism(args: &SyncArgs) -> usize {
-    args.witness_parallelism
-        .unwrap_or(DEFAULT_WITNESS_PARALLELISM)
-}
-
-fn build_witness_for_path(
-    jsonl_path: &Path,
-    chunk_size_lines: usize,
-    max_parallelism: usize,
-) -> Result<JsonlMerkleWitness> {
-    crate::sync::ensure_no_conflict_markers(jsonl_path)?;
-    let file = File::open(jsonl_path).map_err(|err| {
-        BeadsError::Config(format!(
-            "Failed to open JSONL file for witness {}: {err}",
-            jsonl_path.display()
-        ))
-    })?;
-    build_jsonl_merkle_witness_parallel(BufReader::new(file), chunk_size_lines, max_parallelism)
-        .map_err(|err| {
-            BeadsError::Config(format!(
-                "Failed to build JSONL witness for {}: {err}",
-                jsonl_path.display()
-            ))
-        })
-}
-
-fn build_base_witness_artifacts(
-    path_policy: &SyncPathPolicy,
-    chunk_size_lines: usize,
-    max_parallelism: usize,
-    current_witness: &JsonlMerkleWitness,
-) -> Result<BaseWitnessArtifacts> {
-    let base_jsonl_path = path_policy.beads_dir.join("beads.base.jsonl");
-    match fs::symlink_metadata(&base_jsonl_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(BeadsError::Config(format!(
-                "Base JSONL snapshot '{}' must not be a symlink",
-                base_jsonl_path.display()
-            )));
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(BeadsError::Config(format!(
-                "Base JSONL snapshot '{}' must be a regular file",
-                base_jsonl_path.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(BaseWitnessArtifacts {
-                jsonl_path: None,
-                comparison: None,
-                reuse_plan: None,
-                parallel_work_plan: None,
-                reuse_materialization: None,
-            });
-        }
-        Err(err) => {
-            return Err(BeadsError::Config(format!(
-                "Failed to inspect base JSONL snapshot '{}': {err}",
-                base_jsonl_path.display()
-            )));
-        }
-    }
-
-    require_valid_sync_path(&base_jsonl_path, &path_policy.beads_dir)?;
-
-    let base_witness = build_witness_for_path(&base_jsonl_path, chunk_size_lines, max_parallelism)?;
-    let comparison = compare_jsonl_merkle_witnesses(&base_witness, current_witness);
-    let reuse_plan = plan_jsonl_witness_reuse(&base_witness, current_witness);
-    let parallel_work_plan = plan_jsonl_witness_parallel_work(&reuse_plan, max_parallelism)
-        .map_err(|err| BeadsError::Config(format!("Failed to plan JSONL witness work: {err}")))?;
-    let reuse_materialization = materialize_base_reuse_plan(
-        &base_jsonl_path,
-        &path_policy.jsonl_path,
-        &base_witness,
-        current_witness,
-        &reuse_plan,
-    )?;
-
-    Ok(BaseWitnessArtifacts {
-        jsonl_path: Some(base_jsonl_path.display().to_string()),
-        comparison: Some(comparison),
-        reuse_plan: Some(reuse_plan),
-        parallel_work_plan: Some(parallel_work_plan),
-        reuse_materialization: Some(reuse_materialization),
-    })
-}
-
-fn materialize_base_reuse_plan(
-    base_jsonl_path: &Path,
-    current_jsonl_path: &Path,
-    base_witness: &JsonlMerkleWitness,
-    current_witness: &JsonlMerkleWitness,
-    reuse_plan: &JsonlWitnessReusePlan,
-) -> Result<JsonlWitnessReuseMaterialization> {
-    let mut base_file = File::open(base_jsonl_path).map_err(|err| {
-        BeadsError::Config(format!(
-            "Failed to open base JSONL file for reuse materialization {}: {err}",
-            base_jsonl_path.display()
-        ))
-    })?;
-    let mut current_file = File::open(current_jsonl_path).map_err(|err| {
-        BeadsError::Config(format!(
-            "Failed to open current JSONL file for reuse materialization {}: {err}",
-            current_jsonl_path.display()
-        ))
-    })?;
-    let mut sink = std::io::sink();
-
-    materialize_jsonl_witness_reuse_plan(
-        &mut base_file,
-        &mut current_file,
-        &mut sink,
-        base_witness,
-        current_witness,
-        reuse_plan,
-    )
-    .map_err(|err| BeadsError::Config(format!("Failed to materialize JSONL reuse plan: {err}")))
-}
-
-fn render_witness_text(result: &SyncWitnessResult) {
-    let witness = &result.witness;
-    println!("JSONL Witness:");
-    println!("  Path: {}", result.jsonl_path);
-    println!("  Schema: {}", witness.schema_version);
-    println!("  Lines: {}", witness.line_count);
-    println!("  Bytes: {}", witness.byte_count);
-    println!("  Chunk size: {} lines", witness.chunk_size_lines);
-    println!("  Chunks: {}", witness.chunks.len());
-    println!("  Root hash: {}", witness.root_hash);
-
-    if let Some(comparison) = &result.base_comparison {
-        if let Some(base_path) = &result.base_jsonl_path {
-            println!("  Base path: {base_path}");
-        }
-        println!(
-            "  Base comparison: drift={}, unchanged_chunks={}, changed_chunks={}, added_chunks={}, removed_chunks={}, safe_prefix_chunks={}",
-            comparison.drift_detected,
-            comparison.unchanged_chunks,
-            comparison.changed_chunks,
-            comparison.added_chunks,
-            comparison.removed_chunks,
-            comparison.safe_reuse_prefix_chunks
-        );
-        if let Some(index) = comparison.first_changed_chunk_index {
-            println!("  First changed chunk: {index}");
-        }
-    }
-
-    if let Some(plan) = &result.base_reuse_plan {
-        println!("  Reuse plan actions: {}", plan.actions.len());
-    }
-    if let Some(plan) = &result.base_parallel_work_plan {
-        println!(
-            "  Parallel work batches: {} (max_parallelism={})",
-            plan.total_batches, plan.max_parallelism
-        );
-    }
-    if let Some(materialization) = &result.base_reuse_materialization {
-        println!(
-            "  Reuse materialization: output_bytes={}, reused_chunks={}, rebuilt_chunks={}, read_added_chunks={}, dropped_chunks={}",
-            materialization.output_byte_count,
-            materialization.reused_chunks,
-            materialization.rebuilt_chunks,
-            materialization.read_added_chunks,
-            materialization.dropped_chunks
-        );
-    }
 }
 
 /// Execute the --flush-only (export) operation.
@@ -2980,10 +2706,9 @@ fn render_merge_result_rich(report: &crate::sync::MergeReport, ctx: &OutputConte
 #[cfg(test)]
 mod tests {
     use super::{
-        SyncOperation, SyncPathPolicy, auto_rebuild_semantic_conflict_field,
-        auto_rebuild_semantic_flag_conflict_reason, build_base_witness_artifacts,
-        classify_sync_status_workspace, detect_prefix_from_jsonl,
-        fresh_force_import_maintenance_gate_applies, git_export_status,
+        SyncOperation, auto_rebuild_semantic_conflict_field,
+        auto_rebuild_semantic_flag_conflict_reason, classify_sync_status_workspace,
+        detect_prefix_from_jsonl, fresh_force_import_maintenance_gate_applies, git_export_status,
         jsonl_contains_duplicate_external_refs, jsonl_contains_prefix_mismatch,
         merge_conflict_resolution, porcelain_cleanliness, prepare_sync_startup,
         should_defer_jsonl_recovery, should_render_human_sync_output, sync_operation,
@@ -3186,70 +2911,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_operation_witness_is_explicit_read_only_mode() {
-        let args = SyncArgs {
-            witness: true,
-            witness_chunk_lines: 2,
-            ..SyncArgs::default()
-        };
-
-        assert_eq!(sync_operation(&args), SyncOperation::Witness);
-        assert!(!should_defer_jsonl_recovery(&args));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn build_base_witness_artifacts_rejects_symlinked_base_snapshot() {
-        use std::os::unix::fs::symlink;
-
-        let temp = TempDir::new().unwrap();
-        let beads_dir = temp.path().join(".beads");
-        let outside_dir = temp.path().join("outside");
-        fs::create_dir_all(&beads_dir).unwrap();
-        fs::create_dir_all(&outside_dir).unwrap();
-
-        let current_jsonl_path = beads_dir.join("issues.jsonl");
-        fs::write(&current_jsonl_path, "current\n").unwrap();
-        let outside_base_path = outside_dir.join("beads.base.jsonl");
-        fs::write(&outside_base_path, "outside\n").unwrap();
-        symlink(&outside_base_path, beads_dir.join("beads.base.jsonl")).unwrap();
-
-        let path_policy = SyncPathPolicy {
-            jsonl_path: current_jsonl_path.clone(),
-            jsonl_temp_path: current_jsonl_path.with_extension("jsonl.tmp"),
-            manifest_path: beads_dir.join(".manifest.json"),
-            beads_dir,
-            is_external: false,
-            allow_external_jsonl: false,
-        };
-        let current_witness = super::build_witness_for_path(&current_jsonl_path, 1, 1)
-            .expect("current witness should build");
-
-        let result = build_base_witness_artifacts(&path_policy, 1, 1, &current_witness);
-        assert!(
-            result.is_err(),
-            "base witness should reject symlinked base snapshot"
-        );
-        let err = result.err().expect("checked error result");
-
-        assert!(
-            matches!(&err, BeadsError::Config(message) if message.contains("must not be a symlink")),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
     fn test_validate_sync_mode_args_rejects_mode_conflicts() {
-        let status_conflict = SyncArgs {
-            status: true,
-            witness: true,
-            witness_chunk_lines: 2,
-            ..SyncArgs::default()
-        };
-        let err = validate_sync_mode_args(&status_conflict)
-            .expect_err("status and witness should conflict");
-        assert!(matches!(err, BeadsError::Validation { .. }));
-
         let status_flush_conflict = SyncArgs {
             status: true,
             flush_only: true,
@@ -3257,41 +2919,6 @@ mod tests {
         };
         let err = validate_sync_mode_args(&status_flush_conflict)
             .expect_err("status and flush-only should conflict");
-        assert!(matches!(err, BeadsError::Validation { .. }));
-
-        let merge_conflict = SyncArgs {
-            merge: true,
-            witness: true,
-            witness_chunk_lines: 2,
-            ..SyncArgs::default()
-        };
-        let err = validate_sync_mode_args(&merge_conflict)
-            .expect_err("merge and witness should conflict");
-        assert!(matches!(err, BeadsError::Validation { .. }));
-    }
-
-    #[test]
-    fn test_validate_sync_mode_args_rejects_zero_witness_chunk_lines() {
-        let args = SyncArgs {
-            witness: true,
-            witness_chunk_lines: 0,
-            ..SyncArgs::default()
-        };
-
-        let err = validate_sync_mode_args(&args).expect_err("zero witness chunk size should fail");
-        assert!(matches!(err, BeadsError::Validation { .. }));
-    }
-
-    #[test]
-    fn test_validate_sync_mode_args_rejects_zero_witness_parallelism() {
-        let args = SyncArgs {
-            witness: true,
-            witness_chunk_lines: 2,
-            witness_parallelism: Some(0),
-            ..SyncArgs::default()
-        };
-
-        let err = validate_sync_mode_args(&args).expect_err("zero witness parallelism should fail");
         assert!(matches!(err, BeadsError::Validation { .. }));
     }
 
@@ -3316,17 +2943,6 @@ mod tests {
         };
         let err = validate_sync_mode_args(&status_rebuild)
             .expect_err("status rebuild should be rejected");
-        assert!(matches!(&err, BeadsError::Validation { field, .. } if field == "rebuild"));
-        assert!(err.to_string().contains("--import-only"));
-
-        let witness_rebuild = SyncArgs {
-            witness: true,
-            rebuild: true,
-            witness_chunk_lines: 2,
-            ..SyncArgs::default()
-        };
-        let err = validate_sync_mode_args(&witness_rebuild)
-            .expect_err("witness rebuild should be rejected");
         assert!(matches!(&err, BeadsError::Validation { field, .. } if field == "rebuild"));
         assert!(err.to_string().contains("--import-only"));
 
