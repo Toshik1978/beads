@@ -1035,8 +1035,8 @@ pub struct UpdateArgs {
     pub transition_comment: Option<String>,
 
     /// Change status. Terminal states (`closed`, `tombstone`) are refused —
-    /// use the dedicated `br close` / `br delete` commands so close-policy
-    /// and dependency-rewiring are enforced (beads#301).
+    /// use the dedicated `br close` / `br delete` commands so close
+    /// attribution and dependency-rewiring are enforced (beads#301).
     #[arg(long, short = 's', add = ArgValueCompleter::new(status_completer))]
     pub status: Option<String>,
 
@@ -1931,11 +1931,14 @@ pub struct CloseArgs {
 
     /// Keep going when one issue cannot be closed, and report what failed.
     ///
-    /// Without this, a per-issue policy violation aborts the whole batch.
-    /// With it, that issue is recorded as skipped and the rest are closed —
-    /// and the exit code becomes non-zero unless every requested issue ended
-    /// up closed. "Ended up" includes issues that were already closed, so a
-    /// re-run of a partially-completed batch still exits 0
+    /// Without this, one unresolvable issue ID fails the whole command
+    /// before any of the batch is looked at. With it, that ID is recorded
+    /// as skipped and the rest of the batch is still attempted — and the
+    /// exit code becomes non-zero unless every requested issue ended up
+    /// closed. "Ended up" includes issues that were already closed, so a
+    /// re-run of a partially-completed batch still exits 0. A workflow
+    /// policy violation (e.g. a missing required transition field) still
+    /// aborts the whole batch either way — `--continue` does not rescue it.
     #[arg(long = "continue")]
     pub keep_going: bool,
 
@@ -1955,22 +1958,6 @@ pub struct CloseArgs {
     /// Session ID for tracking
     #[arg(long)]
     pub session: Option<String>,
-
-    // Closure-time policy gates (issue #274 — Phase 1).
-    //
-    // All fields below are inert when the project has no `.beads/policy.yaml`
-    // file. Solo-dev workflows see no behavior change; only opt-in repos
-    // observe gating.
-    //
-    /// Bypass closure-time policy gates. Requires `--bypass-reason`.
-    /// Only honoured when `.beads/policy.yaml` has `allow_bypass: true`
-    /// (which is the default).
-    #[arg(long)]
-    pub bypass_policy: bool,
-
-    /// Reason for bypassing policy gates. Required when `--bypass-policy` is set.
-    #[arg(long, value_name = "REASON")]
-    pub bypass_reason: Option<String>,
 }
 
 /// Arguments for the reopen command.
@@ -2248,12 +2235,13 @@ pub struct VersionArgs {
 /// Explains a failed parse caused by a value that begins with `-`.
 ///
 /// bds-04l.12. Acceptance criteria are markdown checklists by construction --
-/// the close-policy engine parses `- [x]` / `- [ ]` to decide whether they are
-/// satisfied, and br's own error text calls them "unchecked" -- so `- [x]
-/// Exercised` is the natural value for `--acceptance-criteria`. Passed as a
-/// separate argument it begins with `-`, which clap reads as a short-flag
-/// cluster, and the resulting `unexpected argument '- ' found` never names the
-/// flag that caused it. The same shape affects `--description`, `--design`,
+/// the workflow required-fields gate parses `- [x]` / `- [ ]` to decide
+/// whether they are satisfied, and br's own error text calls them
+/// "unchecked" -- so `- [x] Exercised` is the natural value for
+/// `--acceptance-criteria`. Passed as a separate argument it begins with
+/// `-`, which clap reads as a short-flag cluster, and the resulting
+/// `unexpected argument '- ' found` never names the flag that caused it.
+/// The same shape affects `--description`, `--design`,
 /// `--notes` and `--transition-comment`.
 ///
 /// Parsing is deliberately left alone. `allow_hyphen_values` would make

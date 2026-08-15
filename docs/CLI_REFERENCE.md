@@ -499,8 +499,10 @@ br close [OPTIONS] [IDS]...
 | `--session <ID>` | Session ID for tracking |
 
 **`--continue` and the exit code.** By default one unresolvable ID fails the whole
-command before any issue is touched, and a per-issue policy violation aborts the
-batch. `--continue` turns both into recorded skips and closes the rest.
+command before any issue is touched. `--continue` turns that into a recorded skip
+and closes the rest. A workflow policy violation (e.g. a missing required
+transition field) still aborts the whole batch either way — `--continue` does not
+rescue it.
 
 It also *replaces* the exit-code rule, because a caller who passes it intends to
 inspect the outcome:

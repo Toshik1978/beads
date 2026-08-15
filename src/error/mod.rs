@@ -201,7 +201,9 @@ pub enum BeadsError {
     PartiallyCompleted { reason: String },
 
     // === Policy Errors ===
-    /// One or more closure-time policy gates fired.
+    /// One or more `workflow.required_fields` gates fired for a status
+    /// transition (issue #312/#388) — raised from any command that changes
+    /// an issue's status, `br close` included.
     ///
     /// Display format intentionally repeats the gate that fired and a
     /// short explanation so terminal output stays readable; structured
@@ -320,7 +322,7 @@ impl BeadsError {
                 Some("Use a priority between 0 (critical) and 4 (backlog)")
             }
             Self::PolicyViolation { .. } => Some(
-                "Fix the violation(s) above, or pass --bypass-policy --bypass-reason \"<text>\" if your project's policy.yaml allows bypass.",
+                "Fix the violation(s) above and retry, or supply the missing --transition-comment / satisfy the workflow's required fields for this transition.",
             ),
             Self::WorkflowCapacityExceeded { .. } => Some(
                 "Drain the named queue before admitting fresh work; inspect it with `br list --status <status>`.",

@@ -1909,10 +1909,20 @@ impl SqliteStorage {
     /// names that fired (or that were waived by `--bypass-policy`). An empty
     /// slice serialises to `"[]"` so callers can always rely on JSON typing.
     ///
+    /// `#[cfg(test)]` because it has no production caller and never had one
+    /// since bds-b4f.4.1 removed close-policy gates and the `--bypass-policy`
+    /// flag from `br close`: its only caller was there. `close_metadata` and
+    /// its reader `get_close_metadata` are scheduled for full removal in
+    /// bds-b4f.3.1's schema migration; this stays gated (rather than deleted
+    /// here) only because that removal needs a schema-version bump kept in
+    /// one migration commit. Its job until then is to let the tests beside it
+    /// check that a write is well-formed.
+    ///
     /// # Errors
     ///
     /// Returns an error if the database write fails or JSON serialisation of
     /// `policy_gates_fired` fails.
+    #[cfg(test)]
     pub fn record_close_metadata(
         &self,
         issue_id: &str,
@@ -1947,11 +1957,12 @@ impl SqliteStorage {
     /// metadata was recorded for this close.
     ///
     /// `#[cfg(test)]` because it has no production caller and never had one:
-    /// nothing displays close metadata, and the writer beside it is live. Its
-    /// job is to let the close tests check that the write was correct, so
-    /// gating states that intent and keeps it out of the shipped binary rather
-    /// than leaving it to read as an unfinished feature (bds-cn6). Ungate it
-    /// the day a command reads close metadata back.
+    /// nothing displays close metadata, and — since bds-b4f.4.1 — the writer
+    /// beside it is test-only too. Its job is to let the close tests check
+    /// that a write was correct, so gating states that intent and keeps it
+    /// out of the shipped binary rather than leaving it to read as an
+    /// unfinished feature (bds-cn6). Both are scheduled for full removal in
+    /// bds-b4f.3.1's schema migration.
     ///
     /// # Errors
     ///
@@ -11249,7 +11260,8 @@ fn append_date_range_filters(
 /// attribution, a `--bypass-policy` waiver, or the list of gates that fired.
 ///
 /// `#[cfg(test)]` with [`SqliteStorage::get_close_metadata`], the only thing
-/// that constructs it; the rows themselves are written by live code.
+/// that constructs it; since bds-b4f.4.1 the rows themselves are written only
+/// by test code too (both are scheduled for removal in bds-b4f.3.1).
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseMetadataRow {

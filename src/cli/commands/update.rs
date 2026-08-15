@@ -1203,7 +1203,7 @@ fn validate_mutable_target_issues(
 /// `br update` is a data-only field mutator. Terminal-state transitions
 /// (`closed`, `tombstone`) own their own audit / policy pipelines:
 ///
-/// * `closed`    → `br close`  (close-policy gates: close-reason, AC, attribution, ...)
+/// * `closed`    → `br close`  (close reason, attribution, suggest-next)
 /// * `tombstone` → `br delete` (tombstone metadata, dependency rewiring)
 ///
 /// Allowing both paths to reach the same terminal state would give the
@@ -1222,10 +1222,9 @@ fn reject_terminal_status_transition(raw_status: Option<&str>) -> Result<()> {
         Status::Closed => Err(BeadsError::validation(
             "status",
             "refusing to close via `br update --status closed`: \
-             terminal-state transitions must go through `br close` so close-policy \
-             (close-reason / AC / attribution) is enforced. \
-             Use `br close <id> --reason \"...\"` instead, or `br close <id> \
-             --bypass-policy --bypass-reason \"...\"` to opt out explicitly.",
+             terminal-state transitions must go through `br close` so close \
+             reason and attribution are recorded. \
+             Use `br close <id> --reason \"...\"` instead.",
         )),
         Status::Tombstone => Err(BeadsError::validation(
             "status",
@@ -1776,7 +1775,7 @@ mod tests {
     }
 
     /// `br update --status closed` must refuse and direct
-    /// the operator at `br close` so close-policy fires.
+    /// the operator at `br close` so close reason / attribution are recorded.
     #[test]
     fn reject_terminal_status_transition_refuses_closed() {
         init_test_logging();
@@ -1787,8 +1786,8 @@ mod tests {
             "error must point at br close; got: {msg}"
         );
         assert!(
-            msg.contains("close-policy"),
-            "error must mention close-policy; got: {msg}"
+            msg.contains("close reason"),
+            "error must explain why br close is required; got: {msg}"
         );
     }
 

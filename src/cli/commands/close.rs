@@ -8,13 +8,12 @@ use crate::cli::commands::{
     report_auto_flush_failure, resolve_issue_id, resolve_issue_ids,
     update_issues_atomically_with_recovery,
 };
-use crate::close_policy::{self, CloseEvidence, ClosePolicy, PolicyViolation};
 use crate::config;
 use crate::error::{BeadsError, Result};
 use crate::format::sanitize_terminal_inline;
 use crate::model::{Issue, IssueType, Status};
 use crate::output::OutputContext;
-use crate::storage::{IssueUpdate, SqliteStorage};
+use crate::storage::IssueUpdate;
 use crate::util::id::{IdResolver, ResolverConfig};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -36,11 +35,7 @@ pub struct CloseArgs {
     pub session: Option<String>,
     /// Return newly unblocked issues (single ID only)
     pub suggest_next: bool,
-    /// Bypass closure-time policy gates.
-    pub bypass_policy: bool,
-    /// Reason for bypass. Required when `bypass_policy = true`.
-    pub bypass_reason: Option<String>,
-    /// Keep going past a per-issue policy violation, and make the exit code
+    /// Keep going past a per-issue unresolvable ID, and make the exit code
     /// report whether every requested issue ended up closed (bds-yo8).
     pub keep_going: bool,
 }
@@ -76,161 +71,9 @@ impl TryFrom<&CliCloseArgs> for CloseArgs {
             force: cli.force,
             session: cli.session.clone(),
             suggest_next: cli.suggest_next,
-            bypass_policy: cli.bypass_policy,
-            bypass_reason: cli.bypass_reason.clone(),
             keep_going: cli.keep_going,
         })
     }
-}
-
-/// Aggregate of policy gates that fired for a single candidate close.
-struct EvaluatedGates {
-    violations: Vec<PolicyViolation>,
-}
-
-/// Validate the `--bypass-policy` / `--bypass-reason` flag pair before
-/// touching storage. Mirrors the documented contract: bypass requires a
-/// non-empty reason and is meaningless without `--bypass-policy`.
-fn validate_bypass_args(args: &CloseArgs) -> Result<()> {
-    if args.bypass_policy {
-        let reason_present = args
-            .bypass_reason
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|s| !s.is_empty());
-        if !reason_present {
-            return Err(BeadsError::validation(
-                "bypass-reason",
-                "--bypass-policy requires --bypass-reason \"<text>\"",
-            ));
-        }
-    } else if args
-        .bypass_reason
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty())
-    {
-        return Err(BeadsError::validation(
-            "bypass-policy",
-            "--bypass-reason was set without --bypass-policy",
-        ));
-    }
-    Ok(())
-}
-
-/// Run every enabled gate against `issue` and produce the (possibly empty)
-/// violation list. This includes the close-policy gates (issue #274) *and* the
-/// workflow gate engine (issue #312, layer 2): closing an issue is a transition
-/// into the `closed` state, so any `workflow.gates` rule guarding
-/// `"<current> -> closed"` is enforced here too.
-fn evaluate_close_policy(
-    policy: &ClosePolicy,
-    workflow: &crate::close_policy::Workflow,
-    storage: &SqliteStorage,
-    issue_id: &str,
-    issue: &Issue,
-    args: &CloseArgs,
-) -> Result<EvaluatedGates> {
-    let evidence = CloseEvidence {
-        issue_id,
-        close_reason: args.reason.as_deref(),
-        description: issue.description.as_deref(),
-        design: issue.design.as_deref(),
-        acceptance_criteria: issue.acceptance_criteria.as_deref(),
-        notes: issue.notes.as_deref(),
-    };
-
-    let mut violations = close_policy::evaluate(policy, &evidence);
-
-    // Deferred-dependents gate (beads#303). Storage-backed, so it lives
-    // here rather than in the pure `close_policy::evaluate`. We only query when
-    // the gate is enabled to avoid a dependency lookup per close otherwise.
-    if policy.forbid_close_with_deferred_dependents.enabled {
-        let deferred_dependents = collect_deferred_blocks_dependents(storage, issue_id)?;
-        if let Some(violation) =
-            close_policy::deferred_dependents_violation(issue_id, &deferred_dependents)
-        {
-            violations.push(violation);
-        }
-    }
-
-    // The storage transaction is the canonical gate/required-field chokepoint.
-    // Pre-evaluate these rules only for an explicit bypass so the warning and
-    // close metadata can name exactly what the operator bypassed without
-    // introducing a read-before-write race on the ordinary path.
-    if args.bypass_policy {
-        let from = issue.status.as_str();
-        let to = Status::Closed.as_str();
-        violations.extend(close_policy::evaluate_transition_required_fields(
-            workflow,
-            issue_id,
-            Some(from),
-            to,
-            issue.acceptance_criteria.as_deref(),
-            args.transition_comment.as_deref(),
-        ));
-        // bds-04l.23 removed the `workflow.gates` engine that ran here. It
-        // could only ever block: a required gate was satisfied by a recorded
-        // provider verdict, and nothing in the shipped binary recorded one --
-        // `record_scoped_gate_result` had exactly one caller, in this file's
-        // own test module. Nor was there any way to see which gate was
-        // blocking; the doc comments pointed at `br gate report` / `br gate
-        // list`, which existed nowhere in src/. A configured gate was
-        // therefore a permanent, uninspectable block on closing an issue.
-        //
-        // The close-policy toggles above (`require_acceptance_criteria_
-        // satisfied`, `forbid_close_with_deferred_dependents`) and the required-fields
-        // rules are unaffected: those evaluate from data br itself holds, so
-        // they can be satisfied and are reported by name.
-    }
-
-    Ok(EvaluatedGates { violations })
-}
-
-/// Collect the IDs of issues that have a `blocks` edge *from* `issue_id`
-/// (i.e. depend on `issue_id` as a prerequisite) and are currently in
-/// `deferred` status. Used by the `forbid_close_with_deferred_dependents`
-/// gate (beads#303).
-///
-/// Edge direction: a `blocks` dependency row
-/// `(issue_id=DEP, depends_on_id=PREREQ)` means "PREREQ blocks DEP" / "DEP
-/// depends on PREREQ". `get_dependents_with_metadata` returns the `DEP` rows
-/// for a given `PREREQ`, which is exactly the set we filter.
-fn collect_deferred_blocks_dependents(
-    storage: &SqliteStorage,
-    issue_id: &str,
-) -> Result<Vec<String>> {
-    let dependents = storage.get_dependents_with_metadata(issue_id)?;
-    Ok(dependents
-        .into_iter()
-        .filter(|dependent| {
-            dependent.dep_type == crate::model::DependencyType::Blocks.as_str()
-                && dependent.status == Status::Deferred
-        })
-        .map(|dependent| dependent.id)
-        .collect())
-}
-
-fn summarize_violations(violations: &[PolicyViolation]) -> String {
-    if let [single] = violations {
-        return single.message.clone();
-    }
-    let lines: Vec<String> = violations
-        .iter()
-        .map(|v| format!("- {}", v.message))
-        .collect();
-    format!("{} gates fired:\n{}", violations.len(), lines.join("\n"))
-}
-
-fn emit_bypass_warning(ctx: &OutputContext, issue_id: &str, violations: &[PolicyViolation]) {
-    let summary = summarize_violations(violations);
-    let id = sanitize_terminal_inline(issue_id);
-    let summary = sanitize_terminal_inline(&summary);
-    ctx.warning(&format!(
-        "Closing {} despite policy violation(s) (--bypass-policy): {}",
-        id.as_ref(),
-        summary.as_ref()
-    ));
 }
 
 /// Execute the close command from CLI args.
@@ -560,10 +403,6 @@ pub fn execute_with_args(
     tracing::info!("Executing close command");
     let use_structured_output = use_json || ctx.is_json();
 
-    // Up-front bypass argument-pair validation. Done before any storage IO so
-    // a misuse of the bypass flag never silently slips past policy gates.
-    validate_bypass_args(args)?;
-
     let beads_dir = config::discover_beads_dir_with_cli(cli)?;
     let mut target_inputs = args.ids.clone();
     if target_inputs.is_empty() {
@@ -805,21 +644,6 @@ fn execute_route(
         resolve_issue_ids(&storage_ctx.storage, &resolver, &args.ids)?
     };
 
-    // Closure-time policy gates (issue #274 Phase 1). Loading happens once per
-    // route; if the file is absent the doc is the all-off default.
-    let policy_doc = close_policy::load_for_beads_dir(beads_dir)?;
-    // Active when close-policy gates are enabled (issue #274) or the workflow
-    // declares required fields for a transition. The `workflow.gates` engine
-    // that used to be a third trigger here was removed in bds-04l.23.
-    let policy_active =
-        policy_doc.close_policy.is_active() || !policy_doc.workflow.required_fields.is_empty();
-    if args.bypass_policy && !policy_doc.allow_bypass {
-        return Err(BeadsError::validation(
-            "bypass-policy",
-            ".beads/policy.yaml has allow_bypass: false; --bypass-policy is disabled",
-        ));
-    }
-
     let epic_counts = storage_ctx.storage.get_epic_counts()?;
     let blocked_before: Vec<String> = if args.suggest_next {
         storage_ctx
@@ -989,68 +813,7 @@ fn execute_route(
             compute_batch_closable_ids(&active, &internal_blockers_by_id, &external_blockers_by_id)
         }
     };
-    let mut batch_closable_ids = closable_ids(&open_issues);
-
-    let mut policy_evaluations_by_id: HashMap<String, EvaluatedGates> = HashMap::new();
-    // bds-yo8: under `--continue`, a policy violation drops one issue out of the
-    // batch instead of aborting it. Collected rather than applied inline because
-    // `open_issues` is borrowed by the loop.
-    let mut policy_failures: Vec<(usize, SkippedIssue)> = Vec::new();
-    if policy_active {
-        for (outcome_index, id) in resolved_ids.iter().enumerate() {
-            let Some(issue) = open_issues.get(id) else {
-                continue;
-            };
-            if !args.force && !batch_closable_ids.contains(id) {
-                continue;
-            }
-
-            let evaluated_gates = evaluate_close_policy(
-                &policy_doc.close_policy,
-                &policy_doc.workflow,
-                &storage_ctx.storage,
-                id,
-                issue,
-                args,
-            )?;
-            if !evaluated_gates.violations.is_empty() && !args.bypass_policy {
-                let summary = summarize_violations(&evaluated_gates.violations);
-                if args.keep_going {
-                    policy_failures.push((
-                        outcome_index,
-                        SkippedIssue {
-                            id: id.clone(),
-                            reason: format!("policy violation: {summary}"),
-                            already_terminal: false,
-                        },
-                    ));
-                    continue;
-                }
-                return Err(BeadsError::PolicyViolation {
-                    issue_id: id.clone(),
-                    summary,
-                    violations: evaluated_gates.violations,
-                });
-            }
-            policy_evaluations_by_id.insert(id.clone(), evaluated_gates);
-        }
-    }
-
-    if !policy_failures.is_empty() {
-        for (outcome_index, skipped) in policy_failures {
-            open_issues.remove(&skipped.id);
-            ordered_outcomes[outcome_index] = Some(CloseOutcome::Skipped(skipped.clone()));
-            skipped_issues.push(skipped);
-        }
-        // Recomputed, not merely narrowed. An issue dropped for a policy
-        // violation may be a blocker of another issue in the same batch:
-        // `compute_batch_closable_ids` had cleared that dependent on the
-        // assumption its blocker was closing too, and continuing on that
-        // assumption would close a dependent while its blocker stayed open --
-        // exactly the ordering the blocker check exists to prevent. The second
-        // loop then records the dependent as a blocked skip in the usual way.
-        batch_closable_ids = closable_ids(&open_issues);
-    }
+    let batch_closable_ids = closable_ids(&open_issues);
 
     for (outcome_index, id) in resolved_ids.iter().enumerate() {
         let Some(issue) = open_issues.get(id) else {
@@ -1092,19 +855,6 @@ fn execute_route(
             continue;
         }
 
-        let gates_fired = if let Some(evaluated_gates) = policy_evaluations_by_id.get(id) {
-            if !evaluated_gates.violations.is_empty() && args.bypass_policy {
-                emit_bypass_warning(ctx, id, &evaluated_gates.violations);
-            }
-            evaluated_gates
-                .violations
-                .iter()
-                .map(|v| v.gate.clone())
-                .collect::<Vec<String>>()
-        } else {
-            Vec::new()
-        };
-
         let now = Utc::now();
         let close_reason = args.reason.clone().unwrap_or_else(|| "done".to_string());
         let update = IssueUpdate {
@@ -1113,24 +863,12 @@ fn execute_route(
             close_reason: Some(Some(close_reason.clone())),
             closed_by_session: args.session.clone().map(Some),
             transition_comment: args.transition_comment.clone(),
-            workflow_policy_bypass_reason: if args.bypass_policy {
-                args.bypass_reason.clone()
-            } else {
-                None
-            },
             skip_cache_rebuild: true,
             ..Default::default()
         };
 
         atomic_updates.push((id.clone(), update));
-        planned_closes.push((
-            outcome_index,
-            id.clone(),
-            issue.clone(),
-            gates_fired,
-            now,
-            close_reason,
-        ));
+        planned_closes.push((outcome_index, id.clone(), issue.clone(), now, close_reason));
     }
 
     if !atomic_updates.is_empty() {
@@ -1146,34 +884,8 @@ fn execute_route(
         cache_dirty = true;
     }
 
-    for (outcome_index, id, issue, gates_fired, now, close_reason) in planned_closes {
+    for (outcome_index, id, issue, now, close_reason) in planned_closes {
         tracing::info!(id = %id, reason = ?args.reason, "Issue closed");
-
-        if policy_active {
-            // Best-effort persistence of attribution + bypass auditing. Failure
-            // to record metadata never undoes a successful close: the close
-            // already committed, and burning down a successful close because of
-            // an optional auxiliary table would be a regression for users whose
-            // schema could not migrate. We log and move on.
-            let bypass_reason = if args.bypass_policy {
-                args.bypass_reason.as_deref()
-            } else {
-                None
-            };
-            let metadata_result = storage_ctx.storage.record_close_metadata(
-                &id,
-                args.bypass_policy && !gates_fired.is_empty(),
-                bypass_reason,
-                &gates_fired,
-            );
-            if let Err(error) = metadata_result {
-                tracing::warn!(
-                    issue_id = %id,
-                    error = %error,
-                    "failed to record closure-time policy metadata; close already committed"
-                );
-            }
-        }
 
         let closed = ClosedIssue {
             id: id.clone(),
@@ -1369,8 +1081,6 @@ mod tests {
             force: true,
             session: Some("session-456".to_string()),
             suggest_next: true,
-            bypass_policy: true,
-            bypass_reason: Some("Manual override approved".to_string()),
             keep_going: false,
         };
         assert_eq!(args.ids.len(), 2);
@@ -1383,11 +1093,6 @@ mod tests {
         assert!(args.force);
         assert_eq!(args.session.as_deref(), Some("session-456"));
         assert!(args.suggest_next);
-        assert!(args.bypass_policy);
-        assert_eq!(
-            args.bypass_reason.as_deref(),
-            Some("Manual override approved")
-        );
     }
 
     // =========================================================================
@@ -1808,8 +1513,6 @@ mod tests {
             force: true,
             session: Some("sess".to_string()),
             suggest_next: true,
-            bypass_policy: true,
-            bypass_reason: Some("Clone bypass reason".to_string()),
             keep_going: false,
         };
         let cloned = args.clone();
@@ -1818,9 +1521,6 @@ mod tests {
         assert_eq!(cloned.transition_comment, args.transition_comment);
         assert_eq!(cloned.force, args.force);
         assert_eq!(cloned.session, args.session);
-        assert_eq!(cloned.suggest_next, args.suggest_next);
-        assert_eq!(cloned.bypass_policy, args.bypass_policy);
-        assert_eq!(cloned.bypass_reason, args.bypass_reason);
         assert_eq!(cloned.suggest_next, args.suggest_next);
     }
 
@@ -2142,365 +1842,6 @@ mod tests {
         let err = execute_with_args(&args, true, &CliOverrides::default(), &ctx)
             .expect_err("all-skipped close should fail");
         assert!(matches!(err, BeadsError::NothingToDo { .. }));
-    }
-
-    #[test]
-    fn execute_with_args_records_clean_policy_close_metadata() {
-        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
-        let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
-
-        let beads_dir = temp.path().join(".beads");
-        let db_path = beads_dir.join("beads.db");
-        let mut storage = SqliteStorage::open(&db_path).expect("storage");
-        storage
-            .create_issue(&make_issue("bd-policy", "Policy governed"), "tester")
-            .expect("create policy issue");
-        drop(storage);
-
-        std::fs::write(
-            beads_dir.join(close_policy::POLICY_FILE_NAME),
-            "close_policy:\n  require_close_reason:\n    enabled: true\n    min_length: 4\n",
-        )
-        .expect("write policy");
-
-        let _guard = DirGuard::new(temp.path());
-        let args = CloseArgs {
-            ids: vec!["bd-policy".to_string()],
-            reason: Some("done cleanly".to_string()),
-            ..CloseArgs::default()
-        };
-        execute_with_args(&args, false, &CliOverrides::default(), &ctx).expect("close issue");
-
-        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
-        let metadata = storage
-            .get_close_metadata("bd-policy")
-            .expect("read close metadata")
-            .expect("active policy should record metadata even when no gate fires");
-        assert!(!metadata.bypassed_policy);
-        assert!(metadata.bypass_reason.is_none());
-        assert!(metadata.policy_gates_fired.is_empty());
-    }
-
-    #[test]
-    fn execute_with_args_policy_violation_in_batch_does_not_close_earlier_issue() {
-        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
-        let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
-
-        let beads_dir = temp.path().join(".beads");
-        let db_path = beads_dir.join("beads.db");
-        let mut storage = SqliteStorage::open(&db_path).expect("storage");
-        storage
-            .create_issue(&make_issue("bd-clean", "Clean policy issue"), "tester")
-            .expect("create clean issue");
-        let mut failing_issue = make_issue("bd-policy-fail", "Policy failing issue");
-        failing_issue.acceptance_criteria = Some("- [ ] Finish remaining work\n".to_string());
-        storage
-            .create_issue(&failing_issue, "tester")
-            .expect("create failing issue");
-        drop(storage);
-
-        std::fs::write(
-            beads_dir.join(close_policy::POLICY_FILE_NAME),
-            "close_policy:\n  require_acceptance_criteria_satisfied:\n    enabled: true\n",
-        )
-        .expect("write policy");
-
-        let _guard = DirGuard::new(temp.path());
-        let args = CloseArgs {
-            ids: vec!["bd-clean".to_string(), "bd-policy-fail".to_string()],
-            reason: Some("done".to_string()),
-            ..CloseArgs::default()
-        };
-        let err = execute_with_args(&args, false, &CliOverrides::default(), &ctx)
-            .expect_err("policy violation should abort the batch before mutation");
-        assert!(
-            matches!(err, BeadsError::PolicyViolation { .. }),
-            "unexpected error: {err:?}"
-        );
-
-        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
-        let clean = storage
-            .get_issue("bd-clean")
-            .expect("read clean issue")
-            .expect("clean issue exists");
-        let failing = storage
-            .get_issue("bd-policy-fail")
-            .expect("read failing issue")
-            .expect("failing issue exists");
-        assert_eq!(clean.status, Status::Open);
-        assert_eq!(failing.status, Status::Open);
-        assert!(
-            storage
-                .get_close_metadata("bd-clean")
-                .expect("read clean metadata")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn execute_with_args_leaves_no_policy_close_metadata_invisible() {
-        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
-        let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
-
-        let beads_dir = temp.path().join(".beads");
-        let db_path = beads_dir.join("beads.db");
-        let mut storage = SqliteStorage::open(&db_path).expect("storage");
-        storage
-            .create_issue(&make_issue("bd-no-policy", "No policy"), "tester")
-            .expect("create no-policy issue");
-        drop(storage);
-
-        let _guard = DirGuard::new(temp.path());
-        let args = CloseArgs {
-            ids: vec!["bd-no-policy".to_string()],
-            reason: Some("done".to_string()),
-            ..CloseArgs::default()
-        };
-        execute_with_args(&args, false, &CliOverrides::default(), &ctx).expect("close issue");
-
-        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
-        assert!(
-            storage
-                .get_close_metadata("bd-no-policy")
-                .expect("read close metadata")
-                .is_none(),
-            "repos without an active policy should retain the no-observable-change invariant"
-        );
-    }
-
-    // =========================================================================
-    // forbid_close_with_deferred_dependents gate (beads#303)
-    // =========================================================================
-
-    const DEFERRED_DEPENDENTS_POLICY: &str =
-        "close_policy:\n  forbid_close_with_deferred_dependents:\n    enabled: true\n";
-
-    /// Build a prereq bead `bd-prereq` and a dependent bead `bd-dep` with a
-    /// `blocks` edge from the prereq (so `bd-dep` depends on `bd-prereq`),
-    /// where the dependent has the supplied status.
-    fn setup_prereq_and_dependent(
-        beads_dir: &std::path::Path,
-        db_path: &std::path::Path,
-        dependent_status: Status,
-    ) {
-        let mut storage = SqliteStorage::open(db_path).expect("storage");
-        storage
-            .create_issue(&make_issue("bd-prereq", "Prerequisite"), "tester")
-            .expect("create prereq");
-        storage
-            .create_issue(
-                &make_issue_with_status("bd-dep", "Dependent", dependent_status),
-                "tester",
-            )
-            .expect("create dependent");
-        // Row (issue_id=bd-dep, depends_on_id=bd-prereq, type=blocks):
-        // "bd-prereq blocks bd-dep" / "bd-dep depends on bd-prereq".
-        storage
-            .add_dependency(
-                "bd-dep",
-                "bd-prereq",
-                DependencyType::Blocks.as_str(),
-                "tester",
-            )
-            .expect("add dependency");
-        storage.rebuild_blocked_cache(true).expect("rebuild cache");
-        drop(storage);
-        // No policy.yaml written by default — callers add it when needed.
-        let _ = beads_dir;
-    }
-
-    #[test]
-    fn deferred_dependents_gate_off_allows_close_by_default() {
-        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
-        let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
-
-        let beads_dir = temp.path().join(".beads");
-        let db_path = beads_dir.join("beads.db");
-        // Deferred dependent present, but NO policy.yaml => gate is off.
-        setup_prereq_and_dependent(&beads_dir, &db_path, Status::Deferred);
-
-        let _guard = DirGuard::new(temp.path());
-        let args = CloseArgs {
-            ids: vec!["bd-prereq".to_string()],
-            reason: Some("done".to_string()),
-            ..CloseArgs::default()
-        };
-        execute_with_args(&args, false, &CliOverrides::default(), &ctx)
-            .expect("close should succeed when gate is off (backwards compatible)");
-
-        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
-        let prereq = storage
-            .get_issue("bd-prereq")
-            .expect("get prereq")
-            .expect("prereq exists");
-        assert_eq!(prereq.status, Status::Closed);
-    }
-
-    #[test]
-    fn deferred_dependents_gate_on_rejects_close_and_names_ids() {
-        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
-        let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
-
-        let beads_dir = temp.path().join(".beads");
-        let db_path = beads_dir.join("beads.db");
-        setup_prereq_and_dependent(&beads_dir, &db_path, Status::Deferred);
-        std::fs::write(
-            beads_dir.join(close_policy::POLICY_FILE_NAME),
-            DEFERRED_DEPENDENTS_POLICY,
-        )
-        .expect("write policy");
-
-        let _guard = DirGuard::new(temp.path());
-        let args = CloseArgs {
-            ids: vec!["bd-prereq".to_string()],
-            reason: Some("done".to_string()),
-            ..CloseArgs::default()
-        };
-        let err = execute_with_args(&args, false, &CliOverrides::default(), &ctx)
-            .expect_err("close should be rejected by the deferred-dependents gate");
-
-        match err {
-            BeadsError::PolicyViolation {
-                issue_id,
-                summary,
-                violations,
-            } => {
-                assert_eq!(issue_id, "bd-prereq");
-                assert!(summary.contains("bd-dep"), "summary: {summary}");
-                assert!(
-                    violations.iter().any(|v| v.gate
-                        == close_policy::GATE_FORBID_CLOSE_WITH_DEFERRED_DEPENDENTS),
-                    "expected deferred-dependents gate to fire: {violations:?}"
-                );
-            }
-            other => panic!("expected PolicyViolation, got {other:?}"),
-        }
-
-        // The prereq must NOT have been closed.
-        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
-        let prereq = storage
-            .get_issue("bd-prereq")
-            .expect("get prereq")
-            .expect("prereq exists");
-        assert_ne!(prereq.status, Status::Closed);
-    }
-
-    #[test]
-    fn deferred_dependents_gate_on_allows_when_dependent_not_deferred() {
-        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
-        let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
-
-        let beads_dir = temp.path().join(".beads");
-        let db_path = beads_dir.join("beads.db");
-        // Dependent is open, not deferred => gate is satisfied.
-        setup_prereq_and_dependent(&beads_dir, &db_path, Status::Open);
-        std::fs::write(
-            beads_dir.join(close_policy::POLICY_FILE_NAME),
-            DEFERRED_DEPENDENTS_POLICY,
-        )
-        .expect("write policy");
-
-        let _guard = DirGuard::new(temp.path());
-        let args = CloseArgs {
-            ids: vec!["bd-prereq".to_string()],
-            reason: Some("done".to_string()),
-            ..CloseArgs::default()
-        };
-        execute_with_args(&args, false, &CliOverrides::default(), &ctx)
-            .expect("close should succeed when no dependent is deferred");
-
-        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
-        let prereq = storage
-            .get_issue("bd-prereq")
-            .expect("get prereq")
-            .expect("prereq exists");
-        assert_eq!(prereq.status, Status::Closed);
-    }
-
-    #[test]
-    fn deferred_dependents_gate_on_allows_after_reopening_dependent() {
-        let _lock = crate::util::test_helpers::TEST_DIR_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
-        let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
-
-        let beads_dir = temp.path().join(".beads");
-        let db_path = beads_dir.join("beads.db");
-        setup_prereq_and_dependent(&beads_dir, &db_path, Status::Deferred);
-        std::fs::write(
-            beads_dir.join(close_policy::POLICY_FILE_NAME),
-            DEFERRED_DEPENDENTS_POLICY,
-        )
-        .expect("write policy");
-
-        // First attempt is rejected.
-        {
-            let _guard = DirGuard::new(temp.path());
-            let args = CloseArgs {
-                ids: vec!["bd-prereq".to_string()],
-                reason: Some("done".to_string()),
-                ..CloseArgs::default()
-            };
-            execute_with_args(&args, false, &CliOverrides::default(), &ctx)
-                .expect_err("close should be rejected while dependent is deferred");
-        }
-
-        // Reopen the deferred dependent (`br update bd-dep --status=open`).
-        {
-            let mut storage = SqliteStorage::open(&db_path).expect("storage");
-            let update = IssueUpdate {
-                status: Some(Status::Open),
-                ..Default::default()
-            };
-            storage
-                .update_issue("bd-dep", &update, "tester")
-                .expect("reopen dependent");
-        }
-
-        // Second attempt now succeeds.
-        {
-            let _guard = DirGuard::new(temp.path());
-            let args = CloseArgs {
-                ids: vec!["bd-prereq".to_string()],
-                reason: Some("done".to_string()),
-                ..CloseArgs::default()
-            };
-            execute_with_args(&args, false, &CliOverrides::default(), &ctx)
-                .expect("close should succeed after the dependent is reopened");
-        }
-
-        let storage = SqliteStorage::open(&db_path).expect("reopen storage");
-        let prereq = storage
-            .get_issue("bd-prereq")
-            .expect("get prereq")
-            .expect("prereq exists");
-        assert_eq!(prereq.status, Status::Closed);
     }
 
     // =========================================================================
