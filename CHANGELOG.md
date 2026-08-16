@@ -9,6 +9,103 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.6.0 — 2026-08-16
+
+An audit of the heaviest consumer of this tool — a workspace with 885 issues,
+1177 comments, 1166 dependency edges and 6457 recorded `br` invocations over
+five weeks — found a large part of the data model and two whole subsystems
+that had never carried a non-default value or been invoked once, in that
+workspace or in any of the four others on the machine that produced it. This
+release removes them: the sync witness subsystem, the close-policy gates, the
+JSONL `format_version` marker, and fifteen never-populated `Issue` fields,
+followed by a schema v18 → v19 migration that drops the corresponding SQLite
+columns and rebuilds every stored `content_hash`. Nothing here was dead code —
+`task lint:dead` reported zero unreferenced items for all of it — this is a
+product decision to stop carrying surface nobody used, not a dead-code sweep.
+
+### Highlights
+
+- **The sync witness subsystem is gone.** `--witness`, `--witness-chunk-lines`
+  and `--witness-parallelism`, the `Witness` sync operation, and its artefact
+  paths are removed along with `src/sync/witness.rs`. This is unrelated to the
+  JSONL mtime/size staleness witness, the dependency-cycle witness, or the
+  startup-cache witness, which share the name and are untouched.
+- **The close-policy gates are gone.** `ClosePolicy` and its evaluator, the
+  `--bypass-policy` and `--bypass-reason` flags, and the `close_policy:`
+  section of `.beads/policy.yaml` are removed. `Workflow` and `CapacityPolicy`
+  share the same module and are untouched — they are enforced on every status
+  transition, not just on close, and remain fully live.
+- **The JSONL `format_version` marker is gone.** `issues.jsonl` goes back to
+  carrying no generation marker at all: a record is `Issue`'s own derived
+  `Serialize` output, nothing wrapped around it. A file written by a build
+  that still stamped the marker imports cleanly — the key is simply an
+  unmodelled field, dropped on read with no error and no warning.
+- **Fifteen never-populated fields leave `Issue`:** `compaction_level`,
+  `compacted_at`, `compacted_at_commit`, `original_size`, `sender`,
+  `ephemeral`, `pinned`, `is_template`, `estimated_minutes`, `due_at`,
+  `closed_by_session`, `source_system`, `source_repo_path`, `agent_context`
+  and `assignee`, along with the flags that fed them (`--ephemeral`,
+  `-e`/`--estimate`, `--due`/`--due-after`/`--due-before`/`--overdue`,
+  `--session`, `--agent-context`, `--source-repo-path`,
+  `-a`/`--assignee`/`--unassigned`/`--claim`/`--if-assignee`/`--by-assignee`).
+  `owner`, `defer_until`, `former_ids`, `external_ref` and `source_repo` are
+  kept — each is populated in real workspaces and sits adjacent to something
+  removed.
+- **Schema v19 drops the columns and rebuilds every hash.** The SQLite columns
+  behind the fifteen removed fields stayed in place, unread, through the field
+  removal so no `content_hash` moved before this step; v19 drops them and
+  their indexes and recomputes every stored digest in the same transaction.
+
+### Two behavior changes that fall out of the column drop, not a redesign
+
+- **`br stats`' "Pinned" count now counts only `Status::Pinned`.** It used to
+  also count the boolean `pinned` column, which no workspace on this machine
+  ever set to true; with the column gone, the status value is the only thing
+  left to count, which is what the field was presumably meant to mean anyway.
+- **A former template epic now counts toward `epics_eligible_for_closure`.**
+  The `is_template` flag used to exclude an epic from that count regardless of
+  its children's status; with the column gone, an epic that used to be flagged
+  as a template is evaluated the same as any other epic once its children are
+  closed.
+
+### Upgrading is one-way
+
+Schema v19 migrates a workspace's `beads.db` irreversibly. Once it has run,
+an older `br` binary (v1.5.0 and earlier) cannot read that database again: it
+fails on the export path with `Database error: no such column: ephemeral`,
+and the failure mode is nasty rather than clean — the mutation succeeds in
+SQLite while the JSONL flush fails, so the workspace silently stops
+exporting from that point on. `beads.db` is gitignored and derived, so a
+teammate who pulls the new JSONL and rebuilds their own database is
+unaffected; the hazard is a single machine carrying two `br` binaries at
+once — an older release still on `PATH` alongside a newer build — pointed at
+the same already-migrated workspace.
+
+### ⚠ Breaking Changes
+
+- [93a2795](https://github.com/Toshik1978/beads/commit/93a279557c88ccf5ef1cced86cdb920955842327) remove the witness subsystem
+- [098b379](https://github.com/Toshik1978/beads/commit/098b37916cd071551031eb2371cf42a21daa5747) remove the close-policy gates and bypass flags
+- [5a9b0c4](https://github.com/Toshik1978/beads/commit/5a9b0c46c0d82f614eb6d03b8dbc0ebfa5ebf822) remove the JSONL format marker
+- [e183ade](https://github.com/Toshik1978/beads/commit/e183ade2df9160db2c501ca40f10f24cd754fbb0) remove fifteen never-populated fields from Issue
+- [cb7e5b7](https://github.com/Toshik1978/beads/commit/cb7e5b7cd06e062c7f891c0f49aa9194162b125a) schema v19 drops the dead columns and rebuilds hashes
+
+### Features
+
+- [cb7e5b7](https://github.com/Toshik1978/beads/commit/cb7e5b7cd06e062c7f891c0f49aa9194162b125a) feat(storage)!: schema v19 drops the dead columns and rebuilds hashes
+
+### Documentation
+
+- [4f72584](https://github.com/Toshik1978/beads/commit/4f72584379f1e985b8538659eddb390d20492285) docs: record the cleanup spec, the br remote spec, and the cleanup plan
+
+### Others
+
+- [93a2795](https://github.com/Toshik1978/beads/commit/93a279557c88ccf5ef1cced86cdb920955842327) refactor(sync)!: remove the witness subsystem
+- [098b379](https://github.com/Toshik1978/beads/commit/098b37916cd071551031eb2371cf42a21daa5747) refactor(close)!: remove the close-policy gates and bypass flags
+- [5a9b0c4](https://github.com/Toshik1978/beads/commit/5a9b0c46c0d82f614eb6d03b8dbc0ebfa5ebf822) refactor(sync)!: remove the JSONL format marker
+- [e183ade](https://github.com/Toshik1978/beads/commit/e183ade2df9160db2c501ca40f10f24cd754fbb0) refactor(model)!: remove fifteen never-populated fields from Issue
+
+---
+
 ## v1.5.0 — 2026-08-08
 
 `issues.jsonl` is the artefact this project is actually about. It is the file

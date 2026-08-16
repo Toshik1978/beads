@@ -157,10 +157,11 @@ piping through `tail`, too: a pipeline reports the *last* command's status, so
 (`set: [pipefail]` covers this inside the Taskfile; an ad-hoc shell command is
 on its own.)
 
-A full run at the time of writing: **3164 tests, 0 failed, 4 skipped**, in 88s
-under nextest, plus the doctest pass. The `cargo test` runner it replaced took
-roughly twice as long on a suite of comparable size; that figure has not been
-re-measured since, and is here only to say why the switch was worth making.
+A full run at the time of writing: **3203 tests, 0 failed, 4 skipped (1
+leaky)**, in 80s under nextest, plus the doctest pass. The `cargo test` runner
+it replaced took roughly twice as long on a suite of comparable size; that
+figure has not been re-measured since, and is here only to say why the switch
+was worth making.
 
 **Treat that number as perishable, and never as a floor.** It read 3162 for a
 while after it stopped being true, which is the worse direction to be wrong
@@ -172,6 +173,27 @@ tests with it, taking the total down to roughly 3093, and the multi-key
 nothing hidden in them; the paginated-envelope work then added eleven more
 across `search`, `blocked` and `ready`, the error-hint fix four more, and the
 routing-abbreviation fix five, to 3164.
+
+The paragraph then went stale again, silently, for longer than the first
+time: a run of ordinary feature work (`br rename`, `statuses`/`types`,
+`stale --limit`, the exclusion filters on `list`/`search`/`ready`, the
+date-range filters, the compare-and-set guards, `close --reason-file`/
+`--continue`) landed commit after commit without anyone touching this
+number, and by the time epic `bds-b4f` started the true count — verified by
+`cargo nextest list --workspace`, not carried forward by memory — was
+**3344**, not 3164. That gap is exactly the failure mode this paragraph
+exists to name, just uncaught for a longer stretch.
+
+`bds-b4f` then removed two whole subsystems (the sync witness and the
+close-policy gates, each with its own test module) and fifteen
+never-populated `Issue` fields, retired the leading marker record that used
+to stamp every exported JSONL line with a format generation, and closed with
+a schema v18→v19 migration that dropped the corresponding SQLite columns and
+rebuilt every stored `content_hash`. Each removal deleted
+the tests that existed only to pin the thing being removed — migration-shape
+tests, hash-parity proptests, CLI flag tests, fixture assertions — taking the
+total from 3344 down to **3203**: a net loss of 141, all accounted for by
+the five `!`-marked commits, not a silent skip.
 
 The rule this exists to serve is the one at the end of this section: verify a
 change in the total by diffing `cargo nextest list --workspace`, never by

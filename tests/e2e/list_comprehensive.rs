@@ -98,8 +98,9 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
     );
     assert!(issue4.status.success());
     let id4 = parse_created_id(&issue4.stdout);
-    // beads#301: terminal-state transitions go through `br close` so
-    // close-policy fires uniformly. `br update --status closed` is rejected.
+    // beads#301: terminal-state transitions go through `br close` so its own
+    // dedicated pipeline applies uniformly. `br update --status closed` is
+    // rejected.
     run_br(
         &workspace,
         ["close", &id4, "--reason", "fixture: closed in setup"],

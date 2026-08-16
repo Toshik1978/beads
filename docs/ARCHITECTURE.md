@@ -92,27 +92,11 @@ for consistency, though a future task may narrow its surface.
 ## Schema versioning
 
 The schema version lives at `CURRENT_SCHEMA_VERSION` in
-`src/storage/schema.rs`; as of this writing it is **15**. It is stamped into
+`src/storage/schema.rs`; as of this writing it is **19**. It is stamped into
 SQLite's `PRAGMA user_version` on a freshly created database, and an existing
 database is brought forward by a sequence of migrations gated on the stored
 `user_version` (`if user_version < N { ... }`), run automatically whenever
 the database is opened — there is no separate migration command.
-
-## Interchange format has no generation marker
-
-`issues.jsonl` carries no version marker. A record is `Issue`'s own derived
-`Serialize` output (`src/sync/jsonl_format.rs`'s `to_line`/`write_line`),
-nothing wrapped around it. There is exactly one shape a reader has ever had to
-handle, so there is nothing to migrate and nothing to refuse: an unrecognised
-key from some other tool is dropped by `serde`'s ordinary "unknown field"
-behaviour, the same as any other JSON consumer that does not model it.
-
-A file written by an earlier build that *did* stamp a leading
-`format_version` key still imports cleanly — the key is simply an unmodelled
-field like any other and is dropped on read, with no error and no warning.
-Two fixtures under `tests/fixtures/workspace_failures/` keep that stamped key
-in their checked-in payload for exactly this reason; see that directory's
-`README.md`.
 
 ## The `Issue` field set is a published interface
 

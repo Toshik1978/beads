@@ -64,7 +64,7 @@ br ready                # list issues that are open and unblocked
 br list
 ```
 
-`br --help` lists all 24 top-level commands. Full documentation for every
+`br --help` lists all 27 top-level commands. Full documentation for every
 command, its flags, exit codes, and `--json` output schemas lives in
 [`docs/CLI_REFERENCE.md`](docs/CLI_REFERENCE.md).
 
@@ -72,7 +72,7 @@ command, its flags, exit codes, and `--json` output schemas lives in
 
 Each workspace is a `.beads/` directory holding a SQLite database plus an
 `issues.jsonl` export. The JSONL file's serialized field set is a stable,
-tested interface (`tests/storage_schema_shape.rs`) so that external tools
+tested interface (`tests/storage/schema_shape.rs`) so that external tools
 built against it keep working across releases.
 
 ## License

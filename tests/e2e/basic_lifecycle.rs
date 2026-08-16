@@ -270,8 +270,9 @@ fn e2e_basic_lifecycle() {
     );
 
     // Upstream #301: terminal-state transitions must go through `br close` so
-    // close-policy (close reason / acceptance criteria / attribution) is
-    // enforced; `update --status closed` is rejected on purpose.
+    // its own dedicated pipeline (close reason, attribution, dependency
+    // rewiring) is applied instead of a bare field write; `update --status
+    // closed` is rejected on purpose.
     let rejected_close = run_br(
         &workspace,
         vec![
@@ -284,7 +285,7 @@ fn e2e_basic_lifecycle() {
     );
     assert!(
         !rejected_close.status.success(),
-        "update --status closed must be refused by close policy (#301)"
+        "update --status closed must be refused; use `br close` (#301)"
     );
 
     let close_args = vec![

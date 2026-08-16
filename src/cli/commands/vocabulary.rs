@@ -124,8 +124,8 @@ pub fn statuses(json: bool, cli: &config::CliOverrides, ctx: &OutputContext) -> 
     // two are never reached through `--status` in the first place.
     ctx.print_line(
         "closed and tombstone are not settable with `br update --status`: use \
-         `br close` and `br delete`, which enforce close policy and rewire \
-         dependencies.",
+         `br close` and `br delete`, which apply their own transition and \
+         capacity checks and rewire dependencies.",
     );
 
     Ok(())

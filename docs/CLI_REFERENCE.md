@@ -980,8 +980,8 @@ distinguished, the middle one deliberately:
 | `strict: true`, `statuses:` non-empty | Enforcing; a status outside the set is rejected by `create`/`update`. |
 
 `closed` and `tombstone` are never settable through `br update --status`
-regardless of policy — use `br close` and `br delete`, which enforce close policy
-and rewire dependencies.
+regardless of policy — use `br close` and `br delete`, which apply their own
+transition and capacity checks and rewire dependencies.
 
 **Examples:**
 ```bash

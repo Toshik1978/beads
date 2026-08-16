@@ -3641,8 +3641,9 @@ fn e2e_json_failure_emits_parseable_json_on_stdout() {
 }
 
 /// bds-04l.12. `--acceptance-criteria "- [x] Exercised"` -- the natural
-/// spelling, since the close-policy engine parses `- [x]` / `- [ ]` to decide
-/// whether criteria are satisfied -- is rejected by clap before br runs, with
+/// spelling, since the workflow transition required-fields check parses
+/// `- [x]` / `- [ ]` to decide whether criteria are satisfied -- is rejected
+/// by clap before br runs, with
 /// `unexpected argument '- ' found` and a `tip` that does not name the flag
 /// responsible. Among several arguments, that leaves the operator guessing.
 ///
