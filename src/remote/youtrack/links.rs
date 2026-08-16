@@ -57,9 +57,25 @@ pub struct RemoteLink {
     pub issues: Vec<LinkedIssue>,
 }
 
+/// Page size for [`LinkTypes::resolve`].
+const LINK_TYPES_PAGE_SIZE: u32 = 100;
+
 impl LinkTypes {
     /// Resolve `Subtask`, `Depend` and `Relates` by exact name from
-    /// `/api/issueLinkTypes`.
+    /// `/api/issueLinkTypes`, paged.
+    ///
+    /// This had the same truncation-reads-as-absence bug as the admin reads
+    /// in `admin.rs` before those were paged, just missed at the time because
+    /// it is a link read rather than an admin read: an unpaginated
+    /// `$top=100` here made a type past the first page indistinguishable
+    /// from one the instance simply does not define, and `resolve` refuses
+    /// both the same way — a `RemoteError::Config` naming a "missing" link
+    /// type an operator cannot act on, because the type is not missing, the
+    /// read just could not see it. Pages on `$skip`/`$top` the same way
+    /// `fetch::fetch_snapshot` does, stopping on the first short page. It
+    /// carries no sort clause: the link type list is a small, effectively
+    /// static collection for the life of one run, not a set of issues
+    /// someone else is editing concurrently.
     ///
     /// # Errors
     /// Returns `RemoteError::Config` naming any of the three types that is
@@ -71,11 +87,22 @@ impl LinkTypes {
     /// `missing` check above has already returned early for any of the
     /// three names whose lookup came back `None`.
     pub fn resolve(http: &HttpClient) -> Result<Self, RemoteError> {
-        let raw = http.get_json(
-            "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed&$top=100",
-            "issue link types",
-        )?;
-        let types = raw.as_array().cloned().unwrap_or_default();
+        let mut types = Vec::new();
+        let mut skip = 0_u32;
+        loop {
+            let path = format!(
+                "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed\
+&$skip={skip}&$top={LINK_TYPES_PAGE_SIZE}"
+            );
+            let raw = http.get_json(&path, "issue link types")?;
+            let page = raw.as_array().cloned().unwrap_or_default();
+            let count = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            types.extend(page);
+            if count < LINK_TYPES_PAGE_SIZE {
+                break;
+            }
+            skip += LINK_TYPES_PAGE_SIZE;
+        }
         let find = |name: &str| -> Option<String> {
             types
                 .iter()
@@ -230,8 +257,14 @@ mod tests {
     use test_support::mock_http::MockServer;
     use test_support::youtrack_fixtures::LINK_DELETE_NOT_FOUND;
 
-    const TYPES_PATH: &str =
-        "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed&$top=100";
+    const TYPES_PATH: &str = "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed&$skip=0&$top=100";
+
+    fn types_page_path(skip: u32) -> String {
+        format!(
+            "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed\
+&$skip={skip}&$top=100"
+        )
+    }
 
     /// The reference instance's link types. Ids live here, never in `src/`.
     const REFERENCE_TYPES: &str = r#"[
@@ -289,6 +322,37 @@ mod tests {
         let err = LinkTypes::resolve(&client(&server)).expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("Subtask"), "must name what is missing: {msg}");
+    }
+
+    #[test]
+    fn resolve_pages_past_the_first_hundred_link_types() {
+        // The original bug: `resolve` asked for `$top=100` with no `$skip`,
+        // so a link type past the first page was indistinguishable from one
+        // the instance does not define at all, and `resolve` refused naming
+        // it "missing" for a reason the operator could not act on. This pins
+        // that the read itself now pages: none of the three required types
+        // are on the first page, all three are on the second, and `resolve`
+        // must still find them.
+        let server = MockServer::start();
+        let first_page: Vec<_> = (0..100)
+            .map(|n| {
+                serde_json::json!({"id": format!("900-{n}"), "name": format!("Custom {n}"),
+                    "directed": false})
+            })
+            .collect();
+        server.on(
+            "GET",
+            &types_page_path(0),
+            200,
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on("GET", &types_page_path(100), 200, REFERENCE_TYPES);
+
+        let types = LinkTypes::resolve(&client(&server))
+            .expect("a required type on the second page must still resolve");
+        assert_eq!(types.subtask, "173-3");
+        assert_eq!(types.depend, "173-1");
+        assert_eq!(types.relates, "173-0");
     }
 
     #[test]

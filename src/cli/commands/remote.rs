@@ -531,15 +531,12 @@ fn print_init_report(report: &InitReport, json: bool, ctx: &OutputContext) {
         return;
     }
 
-    ctx.print_line(&format!(
-        "sharedness scanned across {} project(s): {}",
-        report.projects_seen.len(),
-        if report.projects_seen.is_empty() {
-            "none".to_string()
-        } else {
-            report.projects_seen.join(", ")
-        }
-    ));
+    // The sharedness-scan disclosure is not repeated here: `init::run` already
+    // announces it to stderr (as "bundle sharedness scanned across …") before
+    // the first bundle write, which is the moment that disclosure exists to
+    // serve — by the time this report prints, any write it should have
+    // informed has already happened. `report.projects_seen` still carries the
+    // same data for `--json` callers below.
     if report.dry_run {
         ctx.print_line("br remote init --dry-run: nothing was written.");
     }

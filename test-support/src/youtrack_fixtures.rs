@@ -23,9 +23,10 @@ pub const COUNT_PENDING: &str = r#"{"count":-1,"$type":"IssueCountResponse"}"#;
 /// The same endpoint once it has settled.
 pub const COUNT_SETTLED: &str = r#"{"count":0,"$type":"IssueCountResponse"}"#;
 
-/// `GET /api/issueLinkTypes` — the path `LinkTypes::resolve` requests.
+/// `GET /api/issueLinkTypes` — the path `LinkTypes::resolve` requests for its
+/// first (and, for the reference instance's three types, only) page.
 pub const LINK_TYPES_PATH: &str =
-    "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed&$top=100";
+    "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed&$skip=0&$top=100";
 
 /// The reference instance's link types, ids included.
 ///

@@ -1112,6 +1112,69 @@ mod tests {
     }
 
     #[test]
+    fn a_field_found_only_on_the_second_summary_page_is_not_re_attached() {
+        // The original bug this pins: `read_project_field_summaries` feeds
+        // `attached` in `provision_fields`, so a field instance living past
+        // the first page read as unattached and produced a redundant attach
+        // POST plus a false entry in `report.fields_attached` — even though
+        // the field was already attached and every prototype and bundle
+        // value was already in place. None of the five provisioned fields
+        // appear on the first page here; all eight of the project's field
+        // instances (the five beads fields plus Type/State/Priority) appear
+        // only on the second.
+        let server = provisioned_server();
+        let filler_page: Vec<_> = (0..FIELD_SUMMARY_PAGE_SIZE)
+            .map(|n| {
+                serde_json::json!({"id": format!("999-{n}"), "field": {"name": format!("Filler {n}")},
+                    "defaultValues": []})
+            })
+            .collect();
+        server.on(
+            "GET",
+            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$skip=0&$top=200",
+            200,
+            &serde_json::Value::Array(filler_page).to_string(),
+        );
+        server.on(
+            "GET",
+            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$skip=200&$top=200",
+            200,
+            &serde_json::json!([
+                {"id":"189-8","field":{"name":"Type"},"defaultValues":[{"name":"Task"}]},
+                {"id":"189-9","field":{"name":"State"},"defaultValues":[{"name":"Open"}]},
+                {"id":"189-10","field":{"name":"Priority"},"defaultValues":[{"name":"Major"}]},
+                {"id":"189-30","field":{"name":"Beads ID"},"defaultValues":[]},
+                {"id":"189-31","field":{"name":"Design"},"defaultValues":[]},
+                {"id":"189-32","field":{"name":"Acceptance Criteria"},"defaultValues":[]},
+                {"id":"189-33","field":{"name":"Notes"},"defaultValues":[]},
+                {"id":"189-34","field":{"name":"Close Reason"},"defaultValues":[]},
+            ])
+            .to_string(),
+        );
+        bundle_fields_route(&server, &complete_bundles());
+
+        let report = run(
+            &config(),
+            &admin(&server),
+            &vocab(&["task"], &["open"]),
+            InitOptions::default(),
+        )
+        .expect("init");
+
+        assert!(
+            report.fields_attached.is_empty(),
+            "every field was found on the second page, so none may read as newly attached: {:?}",
+            report.fields_attached
+        );
+        assert!(
+            server.write_requests().is_empty(),
+            "a field the paginated read actually found (on its second page) must not be \
+             re-attached, and every default already matches: {:?}",
+            server.write_requests()
+        );
+    }
+
+    #[test]
     fn the_reference_project_needs_exactly_seven_value_posts() {
         let server = provisioned_server();
         // Stock Types and States, private (one user each in the scan above).
