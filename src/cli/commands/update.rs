@@ -1215,7 +1215,6 @@ fn build_update(args: &UpdateArgs) -> Result<IssueUpdate> {
         deleted_by: None,
         delete_reason: None,
         transition_comment: args.transition_comment.clone(),
-        workflow_policy_bypass_reason: None,
         skip_cache_rebuild: false,
         // Parsed through `Status` rather than passed through as text so
         // `--if-status IN_PROGRESS` and `--if-status in_progress` guard the same

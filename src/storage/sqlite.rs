@@ -2985,13 +2985,11 @@ impl SqliteStorage {
     ) -> Result<()> {
         for (id, update) in updates {
             let Some(to_status) = update.status.as_ref() else {
-                if update.transition_comment.is_some()
-                    || update.workflow_policy_bypass_reason.is_some()
-                {
+                if update.transition_comment.is_some() {
                     return Err(BeadsError::validation(
                         "status",
                         format!(
-                            "issue {id}: transition comments and workflow-policy bypasses require a real status transition"
+                            "issue {id}: a transition comment requires a real status transition"
                         ),
                     ));
                 }
@@ -3001,24 +2999,12 @@ impl SqliteStorage {
             let issue = Self::get_issue_from_conn(conn, id)?
                 .ok_or_else(|| BeadsError::IssueNotFound { id: id.clone() })?;
             if issue.status == *to_status {
-                if update.transition_comment.is_some()
-                    || update.workflow_policy_bypass_reason.is_some()
-                {
+                if update.transition_comment.is_some() {
                     return Err(BeadsError::validation(
                         "status",
                         format!(
-                            "issue {id}: transition comments and workflow-policy bypasses cannot be attached to a same-status update"
+                            "issue {id}: a transition comment cannot be attached to a same-status update"
                         ),
-                    ));
-                }
-                continue;
-            }
-
-            if let Some(reason) = update.workflow_policy_bypass_reason.as_deref() {
-                if reason.trim().is_empty() {
-                    return Err(BeadsError::validation(
-                        "bypass_reason",
-                        format!("issue {id}: workflow-policy bypass reason must not be empty"),
                     ));
                 }
                 continue;
@@ -10744,12 +10730,6 @@ pub struct IssueUpdate {
     /// New comment bound to this status transition. Storage validates and
     /// inserts it in the same transaction as the status change.
     pub transition_comment: Option<String>,
-    /// Audited reason for explicitly bypassing workflow transition gates and
-    /// required fields. A non-empty value skips those checks for this issue.
-    /// (It used to also record a `workflow_policy_bypassed` event, but the
-    /// events subsystem was removed in schema v17; the reason is no longer
-    /// recorded anywhere beyond skipping the checks.)
-    pub workflow_policy_bypass_reason: Option<String>,
     /// If true, do not rebuild the blocked cache after update.
     /// Caller is responsible for rebuilding cache if needed.
     pub skip_cache_rebuild: bool,
@@ -10796,7 +10776,6 @@ impl IssueUpdate {
             && self.deleted_by.is_none()
             && self.delete_reason.is_none()
             && self.transition_comment.is_none()
-            && self.workflow_policy_bypass_reason.is_none()
             && self.append_notes.is_none()
     }
 }
@@ -12864,32 +12843,6 @@ mod tests {
             assert!(issue.acceptance_criteria.is_none());
             assert!(storage.get_comments(id).unwrap().is_empty());
         }
-    }
-
-    #[test]
-    fn workflow_policy_bypass_is_atomic_and_audited() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        storage.set_workflow_policy(required_review_fields_workflow());
-        let issue = make_issue(
-            "bd-bypass",
-            "emergency transition",
-            Status::InProgress,
-            2,
-            Utc::now(),
-            None,
-        );
-        storage.create_issue(&issue, "tester").unwrap();
-        storage
-            .update_issue(
-                "bd-bypass",
-                &IssueUpdate {
-                    status: Some(Status::Custom("in_review".to_string())),
-                    workflow_policy_bypass_reason: Some("incident response".to_string()),
-                    ..Default::default()
-                },
-                "operator",
-            )
-            .unwrap();
     }
 
     #[test]
