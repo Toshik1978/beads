@@ -23,6 +23,12 @@ pub const MIRRORED_STATUSES: [&str; 7] = [
     "closed",
 ];
 
+/// Every built-in beads priority, as the string keys `priority_map` carries
+/// (serde deserializes the YAML's bare integers into `String` keys). A fixed
+/// five-value range, so — like `BUILTIN_TYPES` and `MIRRORED_STATUSES` —
+/// it is a closed set that can be checked for total coverage the same way.
+pub const BUILTIN_PRIORITIES: [&str; 5] = ["0", "1", "2", "3", "4"];
+
 fn default_page_size() -> u32 {
     100
 }
@@ -93,6 +99,7 @@ impl RemoteConfig {
         }
         check_total("type_map", &self.type_map, &BUILTIN_TYPES)?;
         check_total("status_map", &self.status_map, &MIRRORED_STATUSES)?;
+        check_total("priority_map", &self.priority_map, &BUILTIN_PRIORITIES)?;
         check_injective("type_map", &self.type_map)?;
         check_injective("status_map", &self.status_map)?;
         check_injective("priority_map", &self.priority_map)?;
@@ -232,6 +239,24 @@ page_size: 100
         let yaml = GOOD.replace("  blocked: Blocked\n", "");
         let err = RemoteConfig::from_yaml_str(&yaml).expect_err("must reject");
         assert!(err.to_string().contains("blocked"), "{err}");
+    }
+
+    #[test]
+    fn an_omitted_builtin_priority_is_rejected() {
+        let yaml = GOOD.replace(
+            "priority_map: { 0: Show-stopper, 1: Critical, 2: Major, 3: Normal, 4: Minor }",
+            "priority_map: { 0: Show-stopper, 1: Critical, 2: Major, 3: Normal }",
+        );
+        let err = RemoteConfig::from_yaml_str(&yaml).expect_err("must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains('4'),
+            "message must name the missing key: {msg}"
+        );
+        assert!(
+            msg.contains("priority_map"),
+            "message must name the map: {msg}"
+        );
     }
 
     #[test]

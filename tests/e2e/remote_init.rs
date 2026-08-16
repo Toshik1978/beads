@@ -169,6 +169,43 @@ fn e2e_remote_init_refuses_an_unmapped_type_before_any_write() {
     );
 }
 
+/// `priority_map` must be total over 0..4, exactly like `type_map`/
+/// `status_map` must be total over their own built-in vocabularies — a
+/// priority with nowhere to go cannot be pushed and cannot be recognised
+/// coming back. Unlike a type or status, the gap here is caught even before
+/// `init`'s own pre-flight runs: `RemoteConfig::load` refuses to parse an
+/// incomplete `priority_map` at all, so the run never gets far enough to
+/// open a socket.
+#[test]
+fn e2e_remote_init_refuses_an_incomplete_priority_map_before_any_write() {
+    let _log =
+        common::test_log("e2e_remote_init_refuses_an_incomplete_priority_map_before_any_write");
+    let workspace = initialised_workspace();
+    let server = MockServer::start();
+
+    let template = include_str!("../fixtures/remote_em.yaml");
+    let yaml = template
+        .replace("https://example.invalid", &server.base_url())
+        .replace("  4: Minor\n", "");
+    let path = workspace.root.join(".beads").join("remote.yaml");
+    std::fs::write(&path, yaml).expect("write remote.yaml");
+
+    let run = run_br_with_env(&workspace, ["remote", "init"], TOKEN, "remote_init");
+
+    assert!(!run.status.success(), "must refuse: {}", run.stdout);
+    assert!(
+        run.stderr.contains("priority_map") || run.stdout.contains("priority_map"),
+        "must name the config key; stdout={} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        server.requests().is_empty(),
+        "an incomplete priority_map must refuse before any network access, got {:?}",
+        server.requests()
+    );
+}
+
 /// The pre-flight is only worth as much as the rows it reads.
 ///
 /// A `git pull` lands new issues in `issues.jsonl` and leaves SQLite behind.

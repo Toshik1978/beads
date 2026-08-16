@@ -31,11 +31,21 @@ use std::collections::BTreeSet;
 /// The bundle-backed fields `init` reconciles, in the order it visits them.
 pub const RECONCILED_FIELDS: [&str; 3] = ["Type", "State", "Priority"];
 
-/// The distinct `issue_type` and `status` values a workspace actually holds.
+/// The distinct `issue_type`, `status` and `priority` values a workspace
+/// actually holds. `priority` is carried as the same string form
+/// `priority_map`'s keys take (`"0"`..`"4"`), even though it is a closed
+/// range and — unlike `types`/`statuses`, which can hold a `Custom(..)`
+/// value the built-in totality check does not require — `RemoteConfig`
+/// already guarantees every priority is covered before this vocabulary is
+/// even built. Checking it here too is deliberate belt-and-braces: it keeps
+/// the three fields structurally identical, and it is the check that would
+/// catch a priority value outside the built-in range if one were ever
+/// possible.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceVocabulary {
     pub types: BTreeSet<String>,
     pub statuses: BTreeSet<String>,
+    pub priorities: BTreeSet<String>,
 }
 
 /// What the two flags on `br remote init` turn off.
@@ -176,6 +186,11 @@ pub fn preflight_vocabulary(
         // absent from status_map; it is not an uncovered value.
         if value != "tombstone" && !cfg.status_map.contains_key(value) {
             problems.push(format!("  status '{value}' — add it to status_map"));
+        }
+    }
+    for value in &vocab.priorities {
+        if !cfg.priority_map.contains_key(value) {
+            problems.push(format!("  priority '{value}' — add it to priority_map"));
         }
     }
     if problems.is_empty() {
@@ -785,12 +800,24 @@ mod tests {
     }
 
     fn vocab(types: &[&str], statuses: &[&str]) -> WorkspaceVocabulary {
+        vocab_with_priorities(types, statuses, &[])
+    }
+
+    fn vocab_with_priorities(
+        types: &[&str],
+        statuses: &[&str],
+        priorities: &[&str],
+    ) -> WorkspaceVocabulary {
         WorkspaceVocabulary {
             types: types
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect::<BTreeSet<_>>(),
             statuses: statuses
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<BTreeSet<_>>(),
+            priorities: priorities
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect::<BTreeSet<_>>(),
@@ -831,6 +858,25 @@ mod tests {
         let err = preflight_vocabulary(&config(), &vocab(&["task"], &["open", "on_hold"]))
             .expect_err("must fail");
         assert!(err.to_string().contains("on_hold"), "{err}");
+    }
+
+    #[test]
+    fn an_unmapped_priority_fails_preflight_naming_the_config_key() {
+        // `priority_map` is total over 0..4 by construction (`RemoteConfig`
+        // refuses to load otherwise), so the only way to reach this branch is
+        // a priority value outside the built-in range — exactly the
+        // belt-and-braces case `WorkspaceVocabulary::priorities` exists for.
+        let err = preflight_vocabulary(
+            &config(),
+            &vocab_with_priorities(&["task"], &["open"], &["5"]),
+        )
+        .expect_err("must fail");
+        let msg = err.to_string();
+        assert!(msg.contains('5'), "must name the value: {msg}");
+        assert!(
+            msg.contains("priority_map"),
+            "must name the config key to add: {msg}"
+        );
     }
 
     #[test]

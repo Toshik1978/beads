@@ -1606,7 +1606,7 @@ pub enum RemoteCommands {
     Push(RemotePushArgs),
     /// Pull remote changes into this workspace
     Pull(RemotePullArgs),
-    /// Push, then pull
+    /// Pull, then push
     Sync(RemoteSyncArgs),
 }
 
