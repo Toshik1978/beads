@@ -46,33 +46,18 @@ fn make_issue(id: &str, title: &str, now: chrono::DateTime<Utc>) -> Issue {
         design: None,
         acceptance_criteria: None,
         notes: None,
-        assignee: None,
         owner: None,
-        estimated_minutes: None,
         created_by: None,
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        due_at: None,
         defer_until: None,
         external_ref: None,
-        source_system: None,
         source_repo: None,
-        source_repo_path: None,
-        agent_context: None,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        sender: None,
-        ephemeral: false,
-        pinned: false,
-        is_template: false,
         labels: vec![],
         dependencies: vec![],
         comments: vec![],
@@ -242,8 +227,6 @@ fn e2e_basic_lifecycle() {
         "in_progress".to_string(),
         "--priority".to_string(),
         "1".to_string(),
-        "--assignee".to_string(),
-        "alice".to_string(),
     ];
     let update = run_br(&workspace, update_args, "update");
     assert!(update.status.success(), "update failed: {}", update.stderr);
@@ -578,102 +561,6 @@ fn e2e_non_hermetic_smoke_existing_workspace_preserves_env_sensitive_paths() {
         serde_json::from_str(&extract_json_payload(&sync_status_cmd.stdout))
             .expect("sync status smoke json");
     assert_eq!(sync_status_json["jsonl_exists"].as_bool(), Some(true));
-}
-
-#[test]
-fn e2e_update_claim_multiple_ids_is_all_or_nothing() {
-    let _log = common::test_log("e2e_update_claim_multiple_ids_is_all_or_nothing");
-    let workspace = BrWorkspace::new();
-
-    let init = run_br(&workspace, ["init"], "init_claim_multiple_ids");
-    assert!(init.status.success(), "init failed: {}", init.stderr);
-
-    let create_first = run_br(
-        &workspace,
-        ["create", "First claim target", "--json"],
-        "create_first_claim_target",
-    );
-    assert!(
-        create_first.status.success(),
-        "first create failed: {}",
-        create_first.stderr
-    );
-    let first_issue: Value = serde_json::from_str(&extract_json_payload(&create_first.stdout))
-        .expect("first create json");
-    let first_id = first_issue["id"]
-        .as_str()
-        .expect("first issue id")
-        .to_string();
-
-    let create_second = run_br(
-        &workspace,
-        ["create", "Second claim target", "--json"],
-        "create_second_claim_target",
-    );
-    assert!(
-        create_second.status.success(),
-        "second create failed: {}",
-        create_second.stderr
-    );
-    let second_issue: Value = serde_json::from_str(&extract_json_payload(&create_second.stdout))
-        .expect("second create json");
-    let second_id = second_issue["id"]
-        .as_str()
-        .expect("second issue id")
-        .to_string();
-
-    let claim_second = run_br(
-        &workspace,
-        ["--actor", "bob", "update", &second_id, "--claim", "--json"],
-        "claim_second_issue_bob",
-    );
-    assert!(
-        claim_second.status.success(),
-        "claim second failed: {}",
-        claim_second.stderr
-    );
-
-    let claim_both = run_br(
-        &workspace,
-        [
-            "--actor", "alice", "update", &first_id, &second_id, "--claim", "--json",
-        ],
-        "claim_multiple_ids_atomic",
-    );
-    assert!(
-        !claim_both.status.success(),
-        "expected multi-id claim to fail when one issue is already assigned"
-    );
-
-    let show_first = run_br(
-        &workspace,
-        ["show", &first_id, "--json"],
-        "show_first_after_failed_multi_claim",
-    );
-    assert!(
-        show_first.status.success(),
-        "show first failed: {}",
-        show_first.stderr
-    );
-    let first_after: Vec<Value> =
-        serde_json::from_str(&extract_json_payload(&show_first.stdout)).expect("show first json");
-    assert_eq!(first_after[0]["status"].as_str(), Some("open"));
-    assert!(first_after[0]["assignee"].is_null());
-
-    let show_second = run_br(
-        &workspace,
-        ["show", &second_id, "--json"],
-        "show_second_after_failed_multi_claim",
-    );
-    assert!(
-        show_second.status.success(),
-        "show second failed: {}",
-        show_second.stderr
-    );
-    let second_after: Vec<Value> =
-        serde_json::from_str(&extract_json_payload(&show_second.stdout)).expect("show second json");
-    assert_eq!(second_after[0]["status"].as_str(), Some("in_progress"));
-    assert_eq!(second_after[0]["assignee"].as_str(), Some("bob"));
 }
 
 #[test]
@@ -1557,7 +1444,6 @@ fn e2e_sync_flush_export_parallelism_preserves_jsonl_bytes() {
             issue.description = Some(format!(
                 "Synthetic JSONL export payload {index:04} with enough stable text to exercise ordered line preparation."
             ));
-            issue.assignee = Some(format!("agent-{:03}", index % 64));
             issue.labels = vec![
                 "parallel-export".to_string(),
                 "jsonl".to_string(),
@@ -2056,5 +1942,48 @@ fn e2e_jsonl_discovery_uses_legacy_when_no_issues() {
     assert_eq!(
         show_json[0]["title"], "Legacy issue",
         "legacy issue should be imported from beads.jsonl"
+    );
+}
+
+/// `owner` is populated in real workspaces and `--owner` stays on `create`;
+/// `assignee` and its whole query surface were removed (bds-b4f.2.6). This
+/// pins that the two did not get conflated during the removal: `owner` must
+/// still round-trip through `create` and `show --json`, and `assignee` must
+/// no longer appear in the JSON at all.
+#[test]
+fn e2e_owner_survives_the_assignee_removal() {
+    let _log = common::test_log("e2e_owner_survives_the_assignee_removal");
+    let workspace = BrWorkspace::new();
+
+    let init = run_br(&workspace, ["init"], "init_owner_survives");
+    assert!(init.status.success(), "init failed: {}", init.stderr);
+
+    let create = run_br(
+        &workspace,
+        [
+            "create",
+            "Owned work",
+            "--owner",
+            "anton@example.invalid",
+            "--silent",
+        ],
+        "create_owner_survives",
+    );
+    assert!(create.status.success(), "create failed: {}", create.stderr);
+    let id = create.stdout.trim().to_string();
+    assert!(!id.is_empty(), "missing created id");
+
+    let show = run_br(&workspace, ["show", &id, "--json"], "show_owner_survives");
+    assert!(show.status.success(), "show failed: {}", show.stderr);
+    let payload = extract_json_payload(&show.stdout);
+    let show_json: Vec<Value> = serde_json::from_str(&payload).expect("show json");
+    assert_eq!(
+        show_json[0]["owner"].as_str(),
+        Some("anton@example.invalid"),
+        "owner is live data and must survive the assignee removal: {payload}"
+    );
+    assert!(
+        show_json[0].get("assignee").is_none(),
+        "assignee was removed: {payload}"
     );
 }

@@ -271,7 +271,6 @@ fn execute_route(
             status: Some(Status::Open),
             closed_at: Some(None),
             close_reason: Some(None),
-            closed_by_session: Some(None),
             defer_until: Some(None),
             deleted_at: Some(None),
             deleted_by: Some(None),

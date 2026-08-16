@@ -413,29 +413,37 @@ fn import_collision_by_external_ref() {
     assert_eq!(updated.title, "Incoming updated");
 }
 
-// ===== Ephemeral Issue Tests =====
+// ===== Wisp Issue Tests =====
 
 #[test]
-fn import_skips_ephemeral_issues() {
-    // Ephemeral issues should be skipped during import
+fn import_skips_wisp_issues() {
+    // `ephemeral` no longer exists on `Issue` (bds-b4f.2.2); it was set only
+    // by wisp-ID detection, so exercise the import skip path directly via a
+    // wisp-pattern ID.
     let mut storage = SqliteStorage::open_memory().unwrap();
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("issues.jsonl");
 
-    // Create JSONL with ephemeral issue
-    let mut ephemeral = issue_with_id("test-eph", "Ephemeral issue");
-    ephemeral.ephemeral = true;
-    let json = serde_json::to_string(&ephemeral).unwrap();
+    // Create JSONL with a wisp-ID issue
+    let wisp = issue_with_id("test-wisp-1", "Wisp issue");
+    let json = serde_json::to_string(&wisp).unwrap();
     fs::write(&path, format!("{json}\n")).unwrap();
 
-    // Import should skip
-    let result =
-        import_from_jsonl(&mut storage, &path, &ImportConfig::default(), Some("test-")).unwrap();
+    // Import should skip. `parse_id` treats the ID's last `-` as the
+    // prefix/hash boundary (hyphenated prefixes are supported), so a wisp
+    // ID's expected prefix includes the `wisp` segment.
+    let result = import_from_jsonl(
+        &mut storage,
+        &path,
+        &ImportConfig::default(),
+        Some("test-wisp-"),
+    )
+    .unwrap();
     assert_eq!(result.skipped_count, 1);
     assert_eq!(result.imported_count, 0);
 
     // Verify the issue was not created
-    assert!(storage.get_issue("test-eph").unwrap().is_none());
+    assert!(storage.get_issue("test-wisp-1").unwrap().is_none());
 }
 
 // ===== Prefix Validation Tests =====

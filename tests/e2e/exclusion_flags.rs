@@ -5,10 +5,12 @@
 //! reach the query — the failure mode being a flag that parses, does nothing,
 //! and exits 0, which no amount of storage-level testing would catch.
 //!
-//! Also pinned: `--no-assignee` does **not** exist. `--unassigned` already is
-//! that filter, and the decision not to ship a synonym is worth a test, because
-//! the natural drift is for someone to add it later for symmetry with the other
-//! three `--no-*` flags.
+//! Also pinned: neither `--no-assignee` nor `--unassigned` exists.
+//! `assignee` and its whole query surface were removed from `Issue`
+//! (bds-b4f.2.6), and the decision not to ship a `--no-assignee` synonym for
+//! a filter that no longer exists either is worth a test, because the
+//! natural drift is for someone to add one back later for symmetry with the
+//! other three `--no-*` flags.
 
 use crate::common;
 
@@ -181,7 +183,9 @@ fn an_unfamiliar_excluded_type_behaves_like_the_positive_form() {
     );
 }
 
-/// `--no-assignee` is not a flag here. `--unassigned` is, and shipping both
+/// Neither `--no-assignee` nor `--unassigned` is a flag here: `assignee` and
+/// its whole query surface were removed from `Issue` (bds-b4f.2.6), and
+/// shipping a `--no-assignee` synonym for a filter that no longer exists
 /// would be a synonym to maintain forever — see `ExclusionArgs`.
 #[test]
 fn no_assignee_is_deliberately_not_a_flag() {
@@ -191,9 +195,12 @@ fn no_assignee_is_deliberately_not_a_flag() {
     let rejected = run_br(&workspace, ["list", "--no-assignee"], "exclude synonym");
     assert!(
         !rejected.status.success(),
-        "--no-assignee must not exist; --unassigned already is it"
+        "--no-assignee must not exist; assignee's whole query surface is gone"
     );
 
-    let accepted = run_br(&workspace, ["list", "--unassigned", "--json"], "unassigned");
-    assert!(accepted.status.success(), "{}", accepted.stderr);
+    let also_rejected = run_br(&workspace, ["list", "--unassigned", "--json"], "unassigned");
+    assert!(
+        !also_rejected.status.success(),
+        "--unassigned must not exist either; assignee's whole query surface is gone"
+    );
 }

@@ -30,7 +30,6 @@ pub struct IssueTableColumns {
     pub status: bool,
     pub issue_type: bool,
     pub title: bool,
-    pub assignee: bool,
     pub labels: bool,
     pub created: bool,
     pub updated: bool,
@@ -46,7 +45,6 @@ impl IssueTableColumns {
             status: true,
             issue_type: true,
             title: true,
-            assignee: true,
             ..Default::default()
         }
     }
@@ -148,9 +146,6 @@ impl<'a> IssueTable<'a> {
                     .max_width(title_max_width),
             );
         }
-        if self.columns.assignee {
-            table = table.with_column(Column::new("Assignee").max_width(20));
-        }
         if self.columns.labels {
             table = table.with_column(Column::new("Labels").max_width(30));
         }
@@ -200,19 +195,6 @@ impl<'a> IssueTable<'a> {
                 };
                 let title_text = highlight_text(&title, highlight_regex.as_ref(), self.theme);
                 cells.push(Cell::new(title_text).style(self.theme.issue_title.clone()));
-            }
-            if self.columns.assignee {
-                cells.push(
-                    Cell::new(Text::new(
-                        issue
-                            .assignee
-                            .as_deref()
-                            .map_or_else(String::new, |assignee| {
-                                sanitize_terminal_inline(assignee).into_owned()
-                            }),
-                    ))
-                    .style(self.theme.username.clone()),
-                );
             }
             if self.columns.labels {
                 cells.push(

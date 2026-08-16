@@ -36,35 +36,20 @@ fn make_valid_issue(title: &str) -> Issue {
         status: Status::Open,
         priority: Priority::MEDIUM,
         issue_type: IssueType::Task,
-        assignee: None,
         owner: None,
-        estimated_minutes: None,
         created_at: now,
         created_by: None,
         updated_at: now,
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        due_at: None,
         defer_until: None,
         external_ref: None,
-        source_system: None,
         source_repo: None,
-        source_repo_path: None,
-        agent_context: None,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        sender: None,
-        ephemeral: false,
-        pinned: false,
-        is_template: false,
         labels: vec![],
         dependencies: vec![],
         comments: vec![],
@@ -246,33 +231,28 @@ proptest! {
         IssueValidator::validate(&issue).expect("long rich-text fields must validate cleanly");
     }
 
-    /// Property: actor/source metadata over 200 chars fails validation.
+    /// Property: actor metadata over 200 chars fails validation.
+    ///
+    /// `source_system` used to be exercised here too (`field_index in 0..4`);
+    /// removed in bds-b4f.2.4 along with its `ACTOR_MAX_CHARS` validation.
+    /// `assignee` was the third field (`field_index in 0..3`); removed in
+    /// bds-b4f.2.6 along with its own `ACTOR_MAX_CHARS` validation, so the
+    /// domain shrank to the two actor fields that remain bounded.
     #[test]
     fn long_actor_fields_fail(
-        field_index in 0usize..4usize,
+        field_index in 0usize..2usize,
         extra_chars in 1usize..50usize,
     ) {
         init_test_logging();
         let payload = "x".repeat(200 + extra_chars);
 
         let mut issue = make_valid_issue("Test Issue");
-        let expected_field = match field_index {
-            0 => {
-                issue.assignee = Some(payload);
-                "assignee"
-            }
-            1 => {
-                issue.owner = Some(payload);
-                "owner"
-            }
-            2 => {
-                issue.created_by = Some(payload);
-                "created_by"
-            }
-            _ => {
-                issue.source_system = Some(payload);
-                "source_system"
-            }
+        let expected_field = if field_index == 0 {
+            issue.owner = Some(payload);
+            "owner"
+        } else {
+            issue.created_by = Some(payload);
+            "created_by"
         };
 
         assert_validation_error_for_field(IssueValidator::validate(&issue), expected_field);

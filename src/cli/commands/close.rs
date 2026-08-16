@@ -31,8 +31,6 @@ pub struct CloseArgs {
     pub transition_comment: Option<String>,
     /// Force close even if blocked
     pub force: bool,
-    /// Session ID for `closed_by_session` field
-    pub session: Option<String>,
     /// Return newly unblocked issues (single ID only)
     pub suggest_next: bool,
     /// Keep going past a per-issue unresolvable ID, and make the exit code
@@ -69,7 +67,6 @@ impl TryFrom<&CliCloseArgs> for CloseArgs {
             reason,
             transition_comment: cli.transition_comment.clone(),
             force: cli.force,
-            session: cli.session.clone(),
             suggest_next: cli.suggest_next,
             keep_going: cli.keep_going,
         })
@@ -861,7 +858,6 @@ fn execute_route(
             status: Some(Status::Closed),
             closed_at: Some(Some(now)),
             close_reason: Some(Some(close_reason.clone())),
-            closed_by_session: args.session.clone().map(Some),
             transition_comment: args.transition_comment.clone(),
             skip_cache_rebuild: true,
             ..Default::default()
@@ -1068,7 +1064,6 @@ mod tests {
         assert!(args.reason.is_none());
         assert!(args.transition_comment.is_none());
         assert!(!args.force);
-        assert!(args.session.is_none());
         assert!(!args.suggest_next);
     }
 
@@ -1079,7 +1074,6 @@ mod tests {
             reason: Some("Fixed in PR #123".to_string()),
             transition_comment: Some("Verified in staging".to_string()),
             force: true,
-            session: Some("session-456".to_string()),
             suggest_next: true,
             keep_going: false,
         };
@@ -1091,7 +1085,6 @@ mod tests {
             Some("Verified in staging")
         );
         assert!(args.force);
-        assert_eq!(args.session.as_deref(), Some("session-456"));
         assert!(args.suggest_next);
     }
 
@@ -1511,7 +1504,6 @@ mod tests {
             reason: Some("Clone test".to_string()),
             transition_comment: Some("Fresh transition evidence".to_string()),
             force: true,
-            session: Some("sess".to_string()),
             suggest_next: true,
             keep_going: false,
         };
@@ -1520,7 +1512,6 @@ mod tests {
         assert_eq!(cloned.reason, args.reason);
         assert_eq!(cloned.transition_comment, args.transition_comment);
         assert_eq!(cloned.force, args.force);
-        assert_eq!(cloned.session, args.session);
         assert_eq!(cloned.suggest_next, args.suggest_next);
     }
 

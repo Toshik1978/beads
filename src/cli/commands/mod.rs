@@ -604,14 +604,14 @@ pub fn resolve_exclusion_filters(
     })
 }
 
-/// Resolve `--created-after` and its nine siblings onto a `ListFilters`
+/// Resolve `--created-after` and its seven siblings onto a `ListFilters`
 /// (bds-lf1).
 ///
 /// `br list` and `br search` each build their own `ListFilters`, and both call
 /// this rather than parsing the flags themselves: the two must agree on what
 /// `--updated-after -7d` means down to the instant, or the same argument would
 /// select a different set in each command. `apply_date_range_filters` writing
-/// the fields is also what keeps the ten flags from being enumerated twice.
+/// the fields is also what keeps the eight flags from being enumerated twice.
 ///
 /// # Errors
 ///
@@ -632,7 +632,6 @@ pub fn apply_date_range_filters(
     filters.created_after = lower(&args.created_after, "created_after")?;
     filters.updated_after = lower(&args.updated_after, "updated_after")?;
     filters.closed_after = lower(&args.closed_after, "closed_after")?;
-    filters.due_after = lower(&args.due_after, "due_after")?;
     filters.defer_after = lower(&args.defer_after, "defer_after")?;
 
     let upper = |value: &Option<String>, field: &str| {
@@ -644,7 +643,6 @@ pub fn apply_date_range_filters(
     filters.created_before = upper(&args.created_before, "created_before")?;
     filters.updated_before = upper(&args.updated_before, "updated_before")?;
     filters.closed_before = upper(&args.closed_before, "closed_before")?;
-    filters.due_before = upper(&args.due_before, "due_before")?;
     filters.defer_before = upper(&args.defer_before, "defer_before")?;
 
     Ok(())

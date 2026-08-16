@@ -111,8 +111,8 @@ pub enum RangeBound {
 /// difference is the bare `YYYY-MM-DD` form.
 ///
 /// `parse_flexible_timestamp` reads a bare date as **09:00 local**, which is the
-/// right guess for `--due 2026-03-01` (a deadline is a moment in a working day)
-/// and the wrong one for a range. `--created-after 2026-03-01 --created-before
+/// right guess for `--defer 2026-03-01` (a deferral is a moment in a working
+/// day) and the wrong one for a range. `--created-after 2026-03-01 --created-before
 /// 2026-03-01` would be a range of zero width at 09:00 and would match almost
 /// nothing, when the only thing a reader could mean by it is "created on the
 /// 1st". So a bare date widens to the day it names: the start of it for a lower
@@ -384,8 +384,8 @@ mod tests {
         );
     }
 
-    /// The relative and keyword forms are shared with `--due` / `--defer`
-    /// wholesale; a range bound must not quietly grow its own dialect.
+    /// The relative and keyword forms are shared with `--defer` wholesale; a
+    /// range bound must not quietly grow its own dialect.
     #[test]
     fn relative_and_keyword_range_bounds_match_the_flexible_parser() {
         for spelling in ["-7d", "+2w", "yesterday", "tomorrow", "next-week"] {

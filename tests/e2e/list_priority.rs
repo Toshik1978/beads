@@ -50,7 +50,7 @@ fn test_list_csv_default_header_and_escaping() {
     let header = list.stdout.lines().next().unwrap_or_default();
     assert_eq!(
         header.trim(),
-        "id,title,status,priority,issue_type,assignee,created_at,updated_at"
+        "id,title,status,priority,issue_type,created_at,updated_at"
     );
     assert!(
         list.stdout.contains("\"Hello, \"\"CSV\"\", world\""),

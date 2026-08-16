@@ -130,11 +130,17 @@ bug
     assert!(payload.contains("\"Two\""));
 }
 
-/// beads#304: `### Agent Context` maps to the issue's `agent_context`
-/// field and surfaces in `--json` output when set; issues without the
-/// section omit the field.
+/// beads#304, then bds-b4f.2.5: `Issue.agent_context` was removed as a
+/// dedicated field (never populated in any real workspace). Deleting the
+/// `### Agent Context` header mapping outright would have made a section a
+/// user already wrote in an import file vanish silently, since an
+/// unrecognized H3 heading's content is dropped
+/// (`markdown_import::apply_section_to_issue`'s `Section::Unknown` arm). So
+/// `### Agent Context` (and its punctuation aliases) now map to the general
+/// `notes` field instead of a bespoke one; this test pins that the content
+/// survives, landing in `notes` and surfacing in `--json` output when set.
 #[test]
-fn test_markdown_import_agent_context_json() {
+fn test_markdown_import_agent_context_heading_survives_into_notes() {
     let workspace = BrWorkspace::new();
 
     let output = run_br(&workspace, ["init"], "init_agent_ctx");
@@ -173,17 +179,22 @@ task
         .iter()
         .find(|issue| issue.get("title").and_then(Value::as_str) == Some("With Context"))
         .expect("expected an issue titled \"With Context\"");
-    let agent_context = with_ctx
-        .get("agent_context")
+    let notes = with_ctx
+        .get("notes")
         .and_then(Value::as_str)
-        .expect("agent_context must be present in JSON when set");
+        .expect("notes must be present in JSON when the Agent Context heading was used");
     assert!(
-        agent_context.contains("porting-to-rust"),
-        "agent_context content not preserved: {agent_context}"
+        notes.contains("porting-to-rust"),
+        "Agent Context heading content not preserved in notes: {notes}"
     );
     assert!(
-        agent_context.contains("no unsafe code; std only"),
-        "agent_context content not preserved: {agent_context}"
+        notes.contains("no unsafe code; std only"),
+        "Agent Context heading content not preserved in notes: {notes}"
+    );
+    // Must not resurrect the removed dedicated field.
+    assert!(
+        with_ctx.get("agent_context").is_none(),
+        "agent_context must not appear in JSON output, got: {with_ctx}"
     );
 
     let without_ctx = array
@@ -191,11 +202,11 @@ task
         .find(|issue| issue.get("title").and_then(Value::as_str) == Some("Without Context"))
         .expect("expected an issue titled \"Without Context\"");
     assert!(
-        without_ctx.get("agent_context").is_none(),
-        "agent_context must be omitted from JSON when unset, got: {without_ctx}"
+        without_ctx.get("notes").is_none(),
+        "notes must be omitted from JSON when no Agent Context/Notes section was given, got: {without_ctx}"
     );
 
-    // Confirm persistence: `br show --json` echoes the stored agent_context.
+    // Confirm persistence: `br show --json` echoes the stored notes.
     let with_id = with_ctx
         .get("id")
         .and_then(Value::as_str)
@@ -204,8 +215,62 @@ task
     assert!(show.status.success(), "show failed: {}", show.stderr);
     assert!(
         show.stdout.contains("porting-to-rust"),
-        "stored agent_context should round-trip through show --json: {}",
+        "notes populated from the Agent Context heading should round-trip through show --json: {}",
         show.stdout
+    );
+}
+
+/// Pins a user-visible precedence: a per-item `### Agent Context` (or
+/// `### Notes`) section overrides an explicit `--notes` CLI flag, the same
+/// precedence `### Acceptance` already has over `--acceptance-criteria`.
+/// Before agent_context existed as a distinct field, the section and the
+/// CLI flag landed in different fields and both survived; now that the
+/// section feeds the same `notes` field as the flag, one must win, and the
+/// per-item block wins.
+#[test]
+fn test_markdown_import_agent_context_heading_overrides_notes_flag() {
+    let workspace = BrWorkspace::new();
+
+    let output = run_br(&workspace, ["init"], "init_notes_precedence");
+    assert!(output.status.success(), "init failed");
+
+    let md_path = workspace.root.join("issues.md");
+    let content = r"## Issue
+### Agent Context
+from the markdown section
+";
+    fs::write(&md_path, content).expect("write md");
+
+    let output = run_br(
+        &workspace,
+        [
+            "create",
+            "--file",
+            "issues.md",
+            "--notes",
+            "from the CLI flag",
+            "--json",
+        ],
+        "create_notes_precedence",
+    );
+    assert!(
+        output.status.success(),
+        "create --file --json failed: {}",
+        output.stderr
+    );
+
+    let payload = extract_json_payload(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&payload).expect("json parse");
+    let array = json.as_array().expect("json array");
+    assert_eq!(array.len(), 1);
+
+    let notes = array[0]
+        .get("notes")
+        .and_then(Value::as_str)
+        .expect("notes must be present");
+    assert_eq!(
+        notes, "from the markdown section",
+        "the per-item Agent Context/Notes section must win over the CLI --notes flag"
     );
 }
 

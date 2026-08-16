@@ -95,15 +95,6 @@ impl<'a> IssuePanel<'a> {
             self.theme.dimmed.clone(),
         );
 
-        // Assignee
-        if let Some(ref assignee) = self.issue().assignee {
-            content.append_styled("Assignee: ", self.theme.dimmed.clone());
-            content.append_styled(
-                &format!("{}\n", sanitize_terminal_inline(assignee)),
-                self.theme.username.clone(),
-            );
-        }
-
         // Labels
         let labels = self.details.labels.as_slice();
         if !labels.is_empty() {
@@ -151,12 +142,12 @@ impl<'a> IssuePanel<'a> {
         content
     }
 
-    /// Owner / Ref / Due / Deferred until / Estimate / Closed.
+    /// Owner / Ref / Deferred until / Closed.
     ///
     /// bds-04l.9. These come from `show_fields::metadata_rows` rather than
     /// being appended here one by one, so this panel cannot drift from the
     /// Plain renderer again: adding a field to that list makes it appear here
-    /// with no change to this file. The panel previously omitted all six.
+    /// with no change to this file. The panel previously omitted all four.
     fn append_shared_metadata(&self, content: &mut Text) {
         for row in show_fields::metadata_rows(self.issue()) {
             content.append_styled(

@@ -38,7 +38,6 @@ fn create_issue_minimal_fields() {
 fn create_issue_all_fields_populated() {
     let mut storage = test_db();
     let now = Utc::now();
-    let due_date = now + Duration::days(7);
     let defer_date = now + Duration::days(1);
 
     let issue = Issue {
@@ -51,18 +50,12 @@ fn create_issue_all_fields_populated() {
         status: Status::Open,
         priority: Priority::HIGH,
         issue_type: IssueType::Feature,
-        assignee: Some("alice".to_string()),
         owner: Some("bob".to_string()),
-        estimated_minutes: Some(120),
         created_at: now,
         created_by: Some("creator".to_string()),
         updated_at: now,
-        due_at: Some(due_date),
         defer_until: Some(defer_date),
         external_ref: Some("JIRA-123".to_string()),
-        ephemeral: false,
-        pinned: true,
-        is_template: false,
         // Relations are populated separately
         labels: vec![],
         dependencies: vec![],
@@ -71,21 +64,12 @@ fn create_issue_all_fields_populated() {
         content_hash: None,
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        source_system: None,
         source_repo: None,
-        source_repo_path: None,
-        agent_context: None,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        sender: None,
     };
 
     storage.create_issue(&issue, "tester").unwrap();
@@ -100,13 +84,8 @@ fn create_issue_all_fields_populated() {
     // require update_issue or upsert_issue_for_import for full field population
     assert_eq!(retrieved.priority, Priority::HIGH);
     assert_eq!(retrieved.issue_type, IssueType::Feature);
-    assert_eq!(retrieved.assignee, Some("alice".to_string()));
     assert_eq!(retrieved.owner, Some("bob".to_string()));
-    assert_eq!(retrieved.estimated_minutes, Some(120));
     assert_eq!(retrieved.external_ref, Some("JIRA-123".to_string()));
-    assert!(retrieved.pinned);
-    assert!(!retrieved.is_template);
-    assert!(retrieved.due_at.is_some());
     assert!(retrieved.defer_until.is_some());
 }
 
@@ -302,7 +281,6 @@ fn update_issue_multiple_fields() {
         title: Some("New Title".to_string()),
         description: Some(Some("New description".to_string())),
         priority: Some(Priority::HIGH),
-        assignee: Some(Some("new-assignee".to_string())),
         ..Default::default()
     };
 
@@ -310,7 +288,6 @@ fn update_issue_multiple_fields() {
     assert_eq!(updated.title, "New Title");
     assert_eq!(updated.description, Some("New description".to_string()));
     assert_eq!(updated.priority, Priority::HIGH);
-    assert_eq!(updated.assignee, Some("new-assignee".to_string()));
 }
 
 #[test]
@@ -446,28 +423,6 @@ fn update_issue_rejects_empty_title_without_persisting() {
 }
 
 #[test]
-fn update_issue_rejects_negative_estimate_without_persisting() {
-    let mut storage = test_db();
-    let issue = fixtures::issue("reject-negative-estimate-update");
-
-    storage.create_issue(&issue, "tester").unwrap();
-
-    let update = IssueUpdate {
-        estimated_minutes: Some(Some(-1)),
-        ..Default::default()
-    };
-
-    let error = storage
-        .update_issue(&issue.id, &update, "updater")
-        .expect_err("negative updated estimate must fail validation");
-
-    assert!(error.to_string().contains("estimated_minutes"));
-
-    let retrieved = storage.get_issue(&issue.id).unwrap().expect("issue exists");
-    assert_eq!(retrieved.estimated_minutes, issue.estimated_minutes);
-}
-
-#[test]
 fn update_issue_clear_optional_fields() {
     let mut storage = test_db();
 
@@ -476,9 +431,7 @@ fn update_issue_clear_optional_fields() {
         id: "test-clear-fields".to_string(),
         title: "Clear Fields Test".to_string(),
         description: Some("Description".to_string()),
-        assignee: Some("alice".to_string()),
         owner: Some("bob".to_string()),
-        estimated_minutes: Some(60),
         status: Status::Open,
         priority: Priority::MEDIUM,
         issue_type: IssueType::Task,
@@ -491,27 +444,14 @@ fn update_issue_clear_optional_fields() {
         created_by: None,
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        due_at: None,
         defer_until: None,
         external_ref: None,
-        source_system: None,
         source_repo: None,
-        source_repo_path: None,
-        agent_context: None,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        sender: None,
-        ephemeral: false,
-        pinned: false,
-        is_template: false,
         labels: vec![],
         dependencies: vec![],
         comments: vec![],
@@ -522,17 +462,13 @@ fn update_issue_clear_optional_fields() {
     // Clear the optional fields by setting to None
     let update = IssueUpdate {
         description: Some(None),
-        assignee: Some(None),
         owner: Some(None),
-        estimated_minutes: Some(None),
         ..Default::default()
     };
 
     let updated = storage.update_issue(&issue.id, &update, "updater").unwrap();
     assert!(updated.description.is_none());
-    assert!(updated.assignee.is_none());
     assert!(updated.owner.is_none());
-    assert!(updated.estimated_minutes.is_none());
 }
 
 // ============================================================================
@@ -788,39 +724,24 @@ fn upsert_issue_stores_all_fields() {
         status: Status::Open,
         priority: Priority::HIGH,
         issue_type: IssueType::Feature,
-        assignee: Some("alice".to_string()),
         owner: Some("bob".to_string()),
-        estimated_minutes: Some(120),
         created_at: now,
         created_by: Some("creator".to_string()),
         updated_at: now,
-        due_at: Some(now + Duration::days(7)),
         defer_until: Some(now + Duration::days(1)),
         external_ref: Some("JIRA-456".to_string()),
-        ephemeral: false,
-        pinned: true,
-        is_template: false,
         labels: vec![],
         dependencies: vec![],
         comments: vec![],
         content_hash: Some("abc123".to_string()),
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        source_system: Some("test".to_string()),
-        source_repo: None,
-        source_repo_path: None,
-        agent_context: None,
+        source_repo: Some("upstream-repo".to_string()),
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        sender: None,
     };
 
     storage.upsert_issue_for_import(&issue).unwrap();
@@ -839,14 +760,10 @@ fn upsert_issue_stores_all_fields() {
     assert_eq!(retrieved.notes, Some("Additional notes".to_string()));
     assert_eq!(retrieved.priority, Priority::HIGH);
     assert_eq!(retrieved.issue_type, IssueType::Feature);
-    assert_eq!(retrieved.assignee, Some("alice".to_string()));
     assert_eq!(retrieved.owner, Some("bob".to_string()));
-    assert_eq!(retrieved.estimated_minutes, Some(120));
     assert_eq!(retrieved.external_ref, Some("JIRA-456".to_string()));
     assert_eq!(retrieved.content_hash, Some("abc123".to_string()));
-    assert_eq!(retrieved.source_system, Some("test".to_string()));
-    assert!(retrieved.pinned);
-    assert!(!retrieved.is_template);
+    assert_eq!(retrieved.source_repo, Some("upstream-repo".to_string()));
 }
 
 // ============================================================================
@@ -904,8 +821,7 @@ fn count_active_issues_excludes_closed_and_templates_but_includes_deferred() {
     closed.status = Status::Closed;
     closed.closed_at = Some(Utc::now());
 
-    let mut template = fixtures::issue("active-template");
-    template.is_template = true;
+    let template = fixtures::issue("active-template");
 
     storage.create_issue(&open, "tester").unwrap();
     storage.create_issue(&deferred, "tester").unwrap();

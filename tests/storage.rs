@@ -15,8 +15,6 @@
 
 extern crate test_support as common;
 
-#[path = "storage/agent_context_sync.rs"]
-mod agent_context_sync;
 #[path = "storage/blocked_cache.rs"]
 mod blocked_cache;
 #[path = "storage/crud.rs"]

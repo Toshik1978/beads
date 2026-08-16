@@ -89,9 +89,7 @@ impl NormalizationRules {
             "updated_at",
             "closed_at",
             "defer_until",
-            "due_at",
             "deleted_at",
-            "compacted_at",
         ]
         .into_iter()
         .map(String::from)

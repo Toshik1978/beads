@@ -403,11 +403,6 @@ fn issue_detail_lines(issue: &Issue, include_extended: bool) -> Vec<String> {
         format!("Type: {}", format_type_label(&issue.issue_type)),
     ];
 
-    if let Some(assignee) = issue.assignee.as_deref()
-        && !assignee.is_empty()
-    {
-        details.push(format!("Assignee: {}", sanitize_terminal_inline(assignee)));
-    }
     if let Some(owner) = issue.owner.as_deref()
         && !owner.is_empty()
     {
@@ -415,9 +410,6 @@ fn issue_detail_lines(issue: &Issue, include_extended: bool) -> Vec<String> {
     }
     if !labels.is_empty() {
         details.push(format!("Labels: {}", labels.join(", ")));
-    }
-    if let Some(due_at) = issue.due_at {
-        details.push(format!("Due: {}", to_local(due_at).format("%Y-%m-%d")));
     }
     if let Some(defer_until) = issue.defer_until {
         details.push(format!(
@@ -503,35 +495,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc::now(),
             created_by: None,
             updated_at: Utc::now(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -687,14 +664,14 @@ mod tests {
     #[test]
     fn test_format_issue_long_with_includes_extended_fields() {
         let mut issue = make_test_issue();
-        issue.assignee = Some("alice".to_string());
+        issue.owner = Some("alice".to_string());
         issue.labels = vec!["core".to_string(), "frontend".to_string()];
 
         let output = format_issue_long_with(&issue, TextFormatOptions::plain());
 
         assert!(output.contains("Status: open"));
         assert!(output.contains("Priority: P2"));
-        assert!(output.contains("Assignee: alice"));
+        assert!(output.contains("Owner: alice"));
         assert!(output.contains("Labels: core, frontend"));
         assert!(output.contains("Created: "));
         assert!(output.contains("Updated: "));
@@ -719,13 +696,13 @@ mod tests {
     #[test]
     fn test_format_issue_pretty_with_uses_tree_connectors() {
         let mut issue = make_test_issue();
-        issue.assignee = Some("alice".to_string());
+        issue.owner = Some("alice".to_string());
 
         let output = format_issue_pretty_with(&issue, TextFormatOptions::plain(), false);
 
         assert!(output.contains("├── Status: open"));
         assert!(output.contains("├── Priority: P2"));
-        assert!(output.contains("└── Assignee: alice"));
+        assert!(output.contains("└── Owner: alice"));
         assert!(!output.contains("Created: "));
     }
 

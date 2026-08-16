@@ -40,8 +40,8 @@ pub struct ProseSection<'a> {
 
 /// The scalar metadata rows for `issue`, in render order.
 ///
-/// Absent and empty values are skipped, so an issue with no due date does not
-/// render an empty `Due:` row.
+/// Absent and empty values are skipped, so an issue with no defer date does
+/// not render an empty `Deferred until:` row.
 #[must_use]
 pub fn metadata_rows(issue: &Issue) -> Vec<MetadataRow> {
     let mut rows = Vec::new();
@@ -59,17 +59,11 @@ pub fn metadata_rows(issue: &Issue) -> Vec<MetadataRow> {
     {
         push("Ref", reference.to_string());
     }
-    if let Some(due) = issue.due_at {
-        push("Due", to_local(due).format("%Y-%m-%d").to_string());
-    }
     if let Some(defer) = issue.defer_until {
         push(
             "Deferred until",
             to_local(defer).format("%Y-%m-%d").to_string(),
         );
-    }
-    if let Some(minutes) = issue.estimated_minutes.filter(|minutes| *minutes > 0) {
-        push("Estimate", format_estimate(minutes));
     }
     if let Some(closed) = issue.closed_at {
         let reason = issue.close_reason.as_deref().unwrap_or("closed");
@@ -96,15 +90,4 @@ pub fn prose_sections(issue: &Issue) -> Vec<ProseSection<'_>> {
             .map(|body| ProseSection { heading, body })
     })
     .collect()
-}
-
-/// `90` -> `"1h 30m"`, `120` -> `"2h"`, `45` -> `"45m"`.
-fn format_estimate(minutes: i32) -> String {
-    let hours = minutes / 60;
-    let remaining = minutes % 60;
-    match (hours, remaining) {
-        (0, _) => format!("{remaining}m"),
-        (_, 0) => format!("{hours}h"),
-        _ => format!("{hours}h {remaining}m"),
-    }
 }

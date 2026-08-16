@@ -17,7 +17,6 @@ pub enum SortField {
     Priority,
     Status,
     Type,
-    Assignee,
     CreatedAt,
     UpdatedAt,
     Title,
@@ -26,9 +25,9 @@ pub enum SortField {
     Id,
 }
 
-/// What one sort field expands to, in order. Two slots because `status`,
-/// `type` and `assignee` each need a pair and nothing needs more; the shorter
-/// fields leave the second `None`.
+/// What one sort field expands to, in order. Two slots because `status` and
+/// `type` each need a pair and nothing needs more; the shorter fields leave
+/// the second `None`.
 ///
 /// A fixed array rather than a `Vec` for two reasons. It costs no allocation,
 /// which matters because [`SortField::compare_fragments`] runs inside a
@@ -50,7 +49,6 @@ impl SortField {
         Self::Priority,
         Self::Status,
         Self::Type,
-        Self::Assignee,
         Self::CreatedAt,
         Self::UpdatedAt,
         Self::Title,
@@ -63,7 +61,6 @@ impl SortField {
             Self::Priority => "priority",
             Self::Status => "status",
             Self::Type => "type",
-            Self::Assignee => "assignee",
             Self::CreatedAt => "created_at",
             Self::UpdatedAt => "updated_at",
             Self::Title => "title",
@@ -127,13 +124,6 @@ impl SortField {
                 )),
                 Some(("issue_type".to_string(), FragmentDirection::Follow)),
             ],
-            Self::Assignee => [
-                Some((
-                    "CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END".to_string(),
-                    FragmentDirection::ForceAsc,
-                )),
-                Some(("NULLIF(assignee,'')".to_string(), FragmentDirection::Follow)),
-            ],
             Self::CreatedAt => [
                 Some(("created_at".to_string(), FragmentDirection::Follow)),
                 None,
@@ -194,27 +184,6 @@ impl SortField {
                     FragmentDirection::Follow,
                 )),
             ],
-            Self::Assignee => {
-                // Matches NULLIF(assignee,''): only the empty string folds,
-                // not whitespace. A nested `fn` rather than a closure so the
-                // borrow of each issue ends with the call.
-                fn fold(issue: &Issue) -> Option<&str> {
-                    issue.assignee.as_deref().filter(|value| !value.is_empty())
-                }
-                let (left_name, right_name) = (fold(left), fold(right));
-                [
-                    Some((
-                        u8::from(left_name.is_none()).cmp(&u8::from(right_name.is_none())),
-                        FragmentDirection::ForceAsc,
-                    )),
-                    Some((
-                        left_name
-                            .unwrap_or_default()
-                            .cmp(right_name.unwrap_or_default()),
-                        FragmentDirection::Follow,
-                    )),
-                ]
-            }
             Self::CreatedAt => [
                 Some((
                     left.created_at.cmp(&right.created_at),
@@ -282,8 +251,11 @@ impl SortDirection {
 enum FragmentDirection {
     /// Use the key's direction.
     Follow,
-    /// Always ascending, whatever the key says. Used for the assignee
-    /// null-rank so unassigned sorts last in both directions.
+    /// Always ascending, whatever the key says. For a null-rank fragment that
+    /// should sort last in both directions, whatever field eventually needs
+    /// that. Currently unused: the assignee sort key was the only field that
+    /// needed it, and it was removed with the field (bds-b4f.2.6).
+    #[allow(dead_code)]
     ForceAsc,
 }
 
@@ -613,27 +585,6 @@ mod tests {
     }
 
     #[test]
-    fn unassigned_sorts_last_in_both_directions() {
-        let mut anna = issue("a");
-        anna.assignee = Some("anna".to_string());
-        let mut zoe = issue("z");
-        zoe.assignee = Some("zoe".to_string());
-        let nobody = issue("n"); // assignee: None
-        let mut blank = issue("e");
-        blank.assignee = Some(String::new()); // folded to unassigned like NULLIF
-
-        let ascending = order(
-            "assignee",
-            false,
-            vec![zoe.clone(), nobody.clone(), blank.clone(), anna.clone()],
-        );
-        assert_eq!(ascending, vec!["a", "z", "e", "n"]);
-
-        let descending = order("-assignee", false, vec![zoe, nobody, blank, anna]);
-        assert_eq!(descending, vec!["z", "a", "e", "n"]);
-    }
-
-    #[test]
     fn title_folds_ascii_case_only() {
         let mut upper = issue("a");
         upper.title = "Beta".to_string();
@@ -784,7 +735,6 @@ mod tests {
             "priority",
             "status",
             "type",
-            "assignee",
             "created_at",
             "updated_at",
             "title",
@@ -888,28 +838,8 @@ mod tests {
     }
 
     #[test]
-    fn assignee_keeps_unassigned_last_in_both_directions() {
-        assert_eq!(
-            spec("assignee").order_by_sql(false),
-            " ORDER BY CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END ASC, \
-             NULLIF(assignee,'') ASC, id ASC"
-        );
-        // The null-rank fragment stays ASC; only the name flips.
-        assert_eq!(
-            spec("-assignee").order_by_sql(false),
-            " ORDER BY CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END ASC, \
-             NULLIF(assignee,'') DESC, id ASC"
-        );
-        assert_eq!(
-            spec("assignee").order_by_sql(true),
-            " ORDER BY CASE WHEN NULLIF(assignee,'') IS NULL THEN 1 ELSE 0 END ASC, \
-             NULLIF(assignee,'') DESC, id ASC"
-        );
-    }
-
-    #[test]
     fn the_id_terminator_never_flips() {
-        for input in ["priority,updated", "status", "assignee", "title"] {
+        for input in ["priority,updated", "status", "title"] {
             assert!(
                 spec(input).order_by_sql(true).ends_with(", id ASC"),
                 "{input} should still end with id ASC under reverse"

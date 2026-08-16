@@ -17,7 +17,6 @@ const FIELDS: &[&str] = &[
     "priority",
     "status",
     "type",
-    "assignee",
     "created_at",
     "updated_at",
     "title",
@@ -102,17 +101,6 @@ fn issue_type_strategy() -> impl Strategy<Value = IssueType> {
     ]
 }
 
-fn assignee_strategy() -> impl Strategy<Value = Option<String>> {
-    prop_oneof![
-        2 => Just(None),
-        1 => Just(Some(String::new())),
-        3 => prop_oneof![
-            Just(Some("alice".to_string())),
-            Just(Some("bob".to_string())),
-        ],
-    ]
-}
-
 /// Mixed casing plus a non-ASCII entry, so `title` exercises the ASCII-only
 /// case fold both engines apply (`compare_fragments` lower-cases with
 /// `to_ascii_lowercase`, matching SQLite's `COLLATE NOCASE`).
@@ -136,37 +124,31 @@ fn arb_issue() -> impl Strategy<Value = Issue> {
         (0i32..=4).prop_map(Priority),
         status_strategy(),
         issue_type_strategy(),
-        assignee_strategy(),
         title_strategy(),
         0usize..4,
         0usize..4,
     )
-        .prop_map(
-            |(priority, status, issue_type, assignee, title, ts_a, ts_b)| {
-                let pool = timestamp_pool();
-                let created_at = pool[ts_a.min(ts_b)];
-                let updated_at = pool[ts_a.max(ts_b)];
-                let is_closed = status == Status::Closed;
+        .prop_map(|(priority, status, issue_type, title, ts_a, ts_b)| {
+            let pool = timestamp_pool();
+            let created_at = pool[ts_a.min(ts_b)];
+            let updated_at = pool[ts_a.max(ts_b)];
+            let is_closed = status == Status::Closed;
 
-                let mut builder = IssueBuilder::new(&title)
-                    .with_priority(priority)
-                    .with_type(issue_type)
-                    .with_status(status);
-                if let Some(name) = assignee {
-                    builder = builder.with_assignee(&name);
-                }
+            let builder = IssueBuilder::new(&title)
+                .with_priority(priority)
+                .with_type(issue_type)
+                .with_status(status);
 
-                let mut issue = builder.build();
-                issue.created_at = created_at;
-                issue.updated_at = updated_at;
-                // `IssueBuilder::with_status` stamps `Utc::now()` into
-                // `closed_at` for `Closed`; pin it to `updated_at` instead so
-                // the issue's story is fully told by the fixed pool above,
-                // not by wall-clock time.
-                issue.closed_at = is_closed.then_some(updated_at);
-                issue
-            },
-        )
+            let mut issue = builder.build();
+            issue.created_at = created_at;
+            issue.updated_at = updated_at;
+            // `IssueBuilder::with_status` stamps `Utc::now()` into
+            // `closed_at` for `Closed`; pin it to `updated_at` instead so
+            // the issue's story is fully told by the fixed pool above,
+            // not by wall-clock time.
+            issue.closed_at = is_closed.then_some(updated_at);
+            issue
+        })
 }
 
 /// Assign unique, validation-satisfying ids to a batch after every other
@@ -191,10 +173,10 @@ proptest! {
         issues in prop::collection::vec(arb_issue(), 1..12).prop_map(assign_unique_ids),
         // Up to 8 draws, not 3: duplicate fields collapse in `spec_string`,
         // so a cap of 3 could never generate a spec chaining more than three
-        // keys — and `FIELDS` has seven. The upper bound exceeds that length
+        // keys — and `FIELDS` has six. The upper bound exceeds that length
         // on purpose, so specs using every field are reachable despite the
         // collapse.
-        picks in prop::collection::vec((0usize..7, 0u8..3), 1..8),
+        picks in prop::collection::vec((0usize..6, 0u8..3), 1..8),
         reverse in any::<bool>(),
     ) {
         let Some(spec_text) = spec_string(&picks) else {

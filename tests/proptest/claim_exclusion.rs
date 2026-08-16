@@ -1,7 +1,16 @@
 //! Metamorphic property test: claimed issues disappear from ready list.
 //!
-//! If issue x is in `ready()` and we claim x (set status=in_progress + assignee),
-//! then x must NOT appear in subsequent `ready()` results.
+//! If issue x is in `ready()` and we claim x (set status=in_progress via
+//! `br update --status in_progress` -- claiming *is* assigning, and the
+//! dedicated `--claim`/assignee mechanism was removed, bds-b4f.2.6), then x
+//! must NOT appear in subsequent `ready()` results.
+//!
+//! The file name is now a misnomer left over from before that removal: there
+//! is no `--claim` flag left to exercise, so "claiming" here means exactly
+//! the `--status in_progress` transition above, nothing more specific. Do
+//! not rename or move this file to match -- `.proptest-regressions` files
+//! are keyed to the source path, and a move silently drops every pinned
+//! failing seed with nothing printed to say so.
 
 use beads::model::{Issue, IssueType, Priority, Status};
 use beads::storage::{IssueUpdate, ReadyFilters, ReadySortPolicy, SqliteStorage};
@@ -21,35 +30,20 @@ fn make_open_issue(suffix: &str, title: &str, priority: Priority) -> Issue {
         status: Status::Open,
         priority,
         issue_type: IssueType::Task,
-        assignee: None,
         owner: None,
-        estimated_minutes: None,
         created_at: now,
         created_by: Some("proptest".to_string()),
         updated_at: now,
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        due_at: None,
         defer_until: None,
         external_ref: None,
-        source_system: None,
         source_repo: Some(".".to_string()),
-        source_repo_path: None,
-        agent_context: None,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        sender: None,
-        ephemeral: false,
-        pinned: false,
-        is_template: false,
         labels: Vec::new(),
         dependencies: Vec::new(),
         comments: Vec::new(),
@@ -66,7 +60,6 @@ proptest! {
     fn claimed_issue_excluded_from_ready(
         suffix in "[a-z0-9]{6,10}",
         title in "[A-Za-z][A-Za-z0-9 ]{1,40}",
-        actor in "[a-z]{3,10}",
         priority in (0i32..=4).prop_map(Priority),
     ) {
         let mut storage = SqliteStorage::open_memory().unwrap();
@@ -85,8 +78,6 @@ proptest! {
                 &issue_id,
                 &IssueUpdate {
                     status: Some(Status::InProgress),
-                    assignee: Some(Some(actor.clone())),
-                    claim_actor: Some(actor),
                     ..Default::default()
                 },
                 "proptest",

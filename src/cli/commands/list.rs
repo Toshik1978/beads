@@ -19,7 +19,6 @@ use crate::model::{IssueType, Priority, Status};
 use crate::output::{IssueTable, IssueTableColumns, JsonArrayPageMeta, OutputContext, OutputMode};
 use crate::storage::ListFilters;
 use crate::storage::sqlite::ListRelationMetadata;
-use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
@@ -255,7 +254,6 @@ fn execute_inner(
                         status: true,
                         issue_type: true,
                         title: true,
-                        assignee: true,
                         created: true,
                         updated: true,
                         ..Default::default()
@@ -442,8 +440,6 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
         statuses,
         types,
         priorities,
-        assignee: args.assignee.clone(),
-        unassigned: args.unassigned,
         include_closed,
         include_deferred,
         include_templates: false,
@@ -482,7 +478,6 @@ fn needs_client_filters(args: &ListArgs) -> bool {
         || args.desc_contains.is_some()
         || args.notes_contains.is_some()
         || args.deferred
-        || args.overdue
 }
 
 fn should_use_full_relation_scan(
@@ -497,8 +492,6 @@ fn should_use_full_relation_scan(
         && args.status.is_empty()
         && args.type_.is_empty()
         && args.priority.is_empty()
-        && args.assignee.is_none()
-        && !args.unassigned
         && args.title_contains.is_none()
         && args.label.is_empty()
         && args.label_any.is_empty()
@@ -519,8 +512,6 @@ fn should_use_full_default_visible_structured_scan(
         && args.status.is_empty()
         && args.type_.is_empty()
         && args.priority.is_empty()
-        && args.assignee.is_none()
-        && !args.unassigned
         && args.title_contains.is_none()
         && args.label.is_empty()
         && args.label_any.is_empty()
@@ -539,16 +530,14 @@ fn apply_client_filters(
     };
 
     let mut filtered = Vec::new();
-    let now = Utc::now();
     let min_priority = args.priority_min.map(i32::from);
     let max_priority = args.priority_max.map(i32::from);
     let desc_needle = args.desc_contains.as_deref().map(str::to_lowercase);
     let notes_needle = args.notes_contains.as_deref().map(str::to_lowercase);
-    // Deferred issues are included by default when no status filter is specified,
-    // except `--overdue` keeps deferred work hidden unless requested.
+    // Deferred issues are included by default when no status filter is specified.
     let include_deferred = args.deferred
         || args.all
-        || (!args.overdue && args.status.is_empty())
+        || args.status.is_empty()
         || args
             .status
             .iter()
@@ -590,13 +579,6 @@ fn apply_client_filters(
 
         if !include_deferred && matches!(issue.status, Status::Deferred) {
             continue;
-        }
-
-        if args.overdue {
-            let overdue = issue.due_at.is_some_and(|due| due < now) && !issue.status.is_terminal();
-            if !overdue {
-                continue;
-            }
         }
 
         filtered.push(issue);
@@ -661,7 +643,6 @@ mod tests {
     use super::*;
     use crate::cli;
     use crate::model::Issue;
-    use chrono::Duration;
     use tracing::info;
 
     fn init_logging() {
@@ -796,72 +777,6 @@ mod tests {
             .expect("apply client filters");
         let ids: Vec<_> = filtered.iter().map(|issue| issue.id.as_str()).collect();
         assert_eq!(ids, vec!["bd-2"]);
-    }
-
-    #[test]
-    fn test_apply_client_filters_excludes_deferred_from_overdue_unless_requested() {
-        init_logging();
-        let now = Utc::now();
-
-        let mut overdue_open = issue_with_id("bd-1", "overdue open");
-        overdue_open.due_at = Some(now - Duration::days(1));
-
-        let mut overdue_deferred = issue_with_id("bd-2", "overdue deferred");
-        overdue_deferred.status = Status::Deferred;
-        overdue_deferred.due_at = Some(now - Duration::days(1));
-
-        let mut future_open = issue_with_id("bd-3", "future open");
-        future_open.due_at = Some(now + Duration::days(1));
-
-        let mut overdue_closed = issue_with_id("bd-4", "overdue closed");
-        overdue_closed.status = Status::Closed;
-        overdue_closed.due_at = Some(now - Duration::days(1));
-
-        let overdue_only = apply_client_filters(
-            vec![
-                overdue_open.clone(),
-                overdue_deferred.clone(),
-                future_open,
-                overdue_closed,
-            ],
-            &ListArgs {
-                overdue: true,
-                ..Default::default()
-            },
-        )
-        .expect("overdue filter");
-        let overdue_only_ids: Vec<_> = overdue_only.iter().map(|issue| issue.id.as_str()).collect();
-        assert_eq!(overdue_only_ids, vec!["bd-1"]);
-
-        let overdue_with_deferred = apply_client_filters(
-            vec![overdue_open.clone(), overdue_deferred.clone()],
-            &ListArgs {
-                overdue: true,
-                deferred: true,
-                ..Default::default()
-            },
-        )
-        .expect("overdue with deferred filter");
-        let overdue_with_deferred_ids: Vec<_> = overdue_with_deferred
-            .iter()
-            .map(|issue| issue.id.as_str())
-            .collect();
-        assert_eq!(overdue_with_deferred_ids, vec!["bd-1", "bd-2"]);
-
-        let overdue_with_all = apply_client_filters(
-            vec![overdue_open, overdue_deferred],
-            &ListArgs {
-                overdue: true,
-                all: true,
-                ..Default::default()
-            },
-        )
-        .expect("overdue with all filter");
-        let overdue_with_all_ids: Vec<_> = overdue_with_all
-            .iter()
-            .map(|issue| issue.id.as_str())
-            .collect();
-        assert_eq!(overdue_with_all_ids, vec!["bd-1", "bd-2"]);
     }
 
     #[test]

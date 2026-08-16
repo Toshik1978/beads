@@ -117,7 +117,7 @@ in their checked-in payload for exactly this reason; see that directory's
 ## The `Issue` field set is a published interface
 
 `Issue` (see `src/model/mod.rs`) serializes to both `issues.jsonl` lines and
-every command's `--json` output. That serialized field set — currently 41
+every command's `--json` output. That serialized field set — currently 26
 keys, enumerated in `EXPECTED_JSONL_KEYS` in `tests/storage/schema_shape.rs`,
 which is the authority — is not free to change: an external consumer parses
 `issues.jsonl`

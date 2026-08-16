@@ -4040,16 +4040,6 @@ pub fn resolve_actor(layer: &ConfigLayer) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Read the `claim-exclusive` config key.
-///
-/// When true, `--claim` rejects re-claims even by the same actor.
-/// Accepts `claim.exclusive`, `claim_exclusive`, or `claim-exclusive`.
-#[must_use]
-pub fn claim_exclusive_from_layer(layer: &ConfigLayer) -> bool {
-    get_startup_value(layer, &["claim-exclusive", "claim.exclusive"])
-        .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
-}
-
 /// Determine if a key is startup-only.
 ///
 /// Startup-only keys can only be set in YAML config files, not in the database.
@@ -6344,8 +6334,6 @@ routing:
                 .with_timezone(&Utc),
             created_by: Some("ubuntu".to_string()),
             source_repo: Some(".".to_string()),
-            compaction_level: Some(0),
-            original_size: Some(0),
             ..Issue::default()
         };
         write_issue_jsonl(&jsonl_path, &issue);

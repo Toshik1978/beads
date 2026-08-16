@@ -1,7 +1,7 @@
 //! Stats command implementation.
 //!
 //! Shows project statistics including issue counts by status, type, priority,
-//! assignee, and label. Also supports recent activity tracking via git.
+//! and label. Also supports recent activity tracking via git.
 
 use super::auto_import_external_projects_if_stale;
 use crate::cli::{OutputFormat, StatsArgs, resolve_output_format_basic_with_outer_mode};
@@ -117,9 +117,6 @@ fn execute_inner(
     }
     if args.by_priority {
         breakdowns.push(compute_priority_breakdown(&all_issues));
-    }
-    if args.by_assignee {
-        breakdowns.push(compute_assignee_breakdown(&all_issues));
     }
     if args.by_label {
         breakdowns.push(compute_label_breakdown(storage, &all_issues)?);
@@ -258,7 +255,7 @@ const fn should_collect_activity(args: &StatsArgs, output_mode: OutputMode) -> b
 }
 
 const fn needs_stats_issue_rows(args: &StatsArgs) -> bool {
-    args.by_type || args.by_priority || args.by_assignee || args.by_label
+    args.by_type || args.by_priority || args.by_label
 }
 
 fn list_issues_for_stats(storage: &SqliteStorage, args: &StatsArgs) -> Result<Vec<StatsIssueRow>> {
@@ -554,31 +551,6 @@ fn compute_priority_breakdown(issues: &[StatsIssueRow]) -> Breakdown {
                 key: format!("P{p}"),
                 count,
             })
-            .collect(),
-    }
-}
-
-/// Compute breakdown by assignee.
-fn compute_assignee_breakdown(issues: &[StatsIssueRow]) -> Breakdown {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-
-    for issue in issues {
-        if issue.status == Status::Tombstone {
-            continue;
-        }
-        let key = issue
-            .assignee
-            .as_deref()
-            .unwrap_or("(unassigned)")
-            .to_string();
-        *counts.entry(key).or_insert(0) += 1;
-    }
-
-    Breakdown {
-        dimension: "assignee".to_string(),
-        counts: counts
-            .into_iter()
-            .map(|(key, count)| BreakdownEntry { key, count })
             .collect(),
     }
 }
@@ -1493,35 +1465,20 @@ mod tests {
             status,
             priority: Priority::MEDIUM,
             issue_type,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc::now(),
             created_by: None,
             updated_at: Utc::now(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -1535,13 +1492,17 @@ mod tests {
             status: issue.status.clone(),
             priority: issue.priority,
             issue_type: issue.issue_type.clone(),
-            assignee: issue.assignee.clone(),
             created_at: issue.created_at,
             closed_at: issue.closed_at,
             defer_until: issue.defer_until,
-            ephemeral: issue.ephemeral,
-            pinned: issue.pinned,
-            is_template: issue.is_template,
+            // `Issue` no longer carries these three (bds-b4f.2.2); `StatsIssueRow`
+            // still does, populated from the DB columns directly by
+            // `list_stats_issues`/`list_stats_summary_issues` for legacy rows.
+            // Tests that need a flagged row build one directly instead of
+            // routing it through `Issue`.
+            ephemeral: false,
+            pinned: false,
+            is_template: false,
         }
     }
 
@@ -1600,29 +1561,6 @@ mod tests {
 
         assert_eq!(map.get("P0"), Some(&2));
         assert_eq!(map.get("P3"), Some(&1));
-    }
-
-    #[test]
-    fn test_compute_assignee_breakdown() {
-        let mut test_issues = [
-            make_issue("t-1", Status::Open, IssueType::Task),
-            make_issue("t-2", Status::Open, IssueType::Task),
-            make_issue("t-3", Status::Open, IssueType::Bug),
-        ];
-        test_issues[0].assignee = Some("alice".to_string());
-        test_issues[1].assignee = Some("alice".to_string());
-        let test_issues = test_issues.iter().map(stats_row).collect::<Vec<_>>();
-
-        let breakdown = compute_assignee_breakdown(&test_issues);
-        assert_eq!(breakdown.dimension, "assignee");
-
-        let mut map: BTreeMap<String, usize> = BTreeMap::new();
-        for entry in &breakdown.counts {
-            map.insert(entry.key.clone(), entry.count);
-        }
-
-        assert_eq!(map.get("alice"), Some(&2));
-        assert_eq!(map.get("(unassigned)"), Some(&1));
     }
 
     #[test]
@@ -1717,16 +1655,19 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
 
         let regular_issue = make_issue("t-1", Status::Open, IssueType::Task);
-        let mut template_issue = make_issue("t-2", Status::Open, IssueType::Task);
-        template_issue.is_template = true;
+        let template_issue = make_issue("t-2", Status::Open, IssueType::Task);
 
         storage.create_issue(&regular_issue, "tester").unwrap();
         storage.create_issue(&template_issue, "tester").unwrap();
 
-        let all_issues = [&regular_issue, &template_issue]
+        // `Issue` no longer carries `is_template` (bds-b4f.2.2); flag the
+        // projected row directly to exercise the still-live `StatsIssueRow`
+        // exclusion this test targets.
+        let mut all_issues = [&regular_issue, &template_issue]
             .into_iter()
             .map(stats_row)
             .collect::<Vec<_>>();
+        all_issues[1].is_template = true;
         let summary = compute_test_summary(&storage, &all_issues);
 
         assert_eq!(summary.ready_issues, 1);
@@ -1755,8 +1696,7 @@ mod tests {
     fn test_compute_summary_excludes_template_epics_from_close_eligible_count() {
         let mut storage = SqliteStorage::open_memory().unwrap();
 
-        let mut epic = make_issue("bd-epic-template", Status::Open, IssueType::Epic);
-        epic.is_template = true;
+        let epic = make_issue("bd-epic-template", Status::Open, IssueType::Epic);
 
         let mut child = make_issue("bd-task-closed", Status::Closed, IssueType::Task);
         child.closed_at = Some(Utc::now());
@@ -1767,10 +1707,13 @@ mod tests {
             .add_dependency(&child.id, &epic.id, "parent-child", "tester")
             .unwrap();
 
-        let all_issues = [&epic, &child]
+        // `Issue` no longer carries `is_template` (bds-b4f.2.2); flag the
+        // projected row directly.
+        let mut all_issues = [&epic, &child]
             .into_iter()
             .map(stats_row)
             .collect::<Vec<_>>();
+        all_issues[0].is_template = true;
         let summary = compute_test_summary(&storage, &all_issues);
 
         assert_eq!(summary.epics_eligible_for_closure, 0);
@@ -1815,10 +1758,11 @@ mod tests {
         closed_issue.closed_at = Some(now);
         let deferred_issue = make_issue("t-deferred", Status::Deferred, IssueType::Task);
         let draft_issue = make_issue("t-draft", Status::Draft, IssueType::Task);
-        let mut pinned_issue = make_issue("t-pinned", Status::Open, IssueType::Task);
-        pinned_issue.pinned = true;
-        let mut template_issue = make_issue("t-template", Status::Open, IssueType::Task);
-        template_issue.is_template = true;
+        // `pinned`/`is_template` no longer exist on `Issue` (bds-b4f.2.2); these
+        // two rows are plain open issues now. The full-vs-lean parity this test
+        // checks does not depend on either flag being set.
+        let pinned_issue = make_issue("t-pinned", Status::Open, IssueType::Task);
+        let template_issue = make_issue("t-template", Status::Open, IssueType::Task);
         let wisp_issue = make_issue("t-wisp-1", Status::Open, IssueType::Task);
         let epic_issue = make_issue("t-epic", Status::Open, IssueType::Epic);
         let mut epic_child = make_issue("t-epic-child", Status::Closed, IssueType::Task);
@@ -1894,8 +1838,9 @@ mod tests {
         let tombstone_issue = make_issue("t-4", Status::Open, IssueType::Task);
         let mut closed_issue = make_issue("t-5", Status::Closed, IssueType::Task);
         closed_issue.closed_at = Some(Utc::now());
-        let mut template_issue = make_issue("t-6", Status::Open, IssueType::Task);
-        template_issue.is_template = true;
+        // `is_template` no longer exists on `Issue` (bds-b4f.2.2); the "template"
+        // label below is what this test's assertions actually key on.
+        let template_issue = make_issue("t-6", Status::Open, IssueType::Task);
 
         storage.create_issue(&first_issue, "tester").unwrap();
         storage.create_issue(&second_issue, "tester").unwrap();

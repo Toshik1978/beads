@@ -19,8 +19,6 @@ extern crate test_support as common;
 mod basic_lifecycle;
 #[path = "e2e/cas_guards.rs"]
 mod cas_guards;
-#[path = "e2e/claim_atomic.rs"]
-mod claim_atomic;
 #[path = "e2e/comments.rs"]
 mod comments;
 #[path = "e2e/comments_stdin.rs"]
@@ -91,8 +89,6 @@ mod report_generation;
 mod routing;
 #[path = "e2e/search_scenarios.rs"]
 mod search_scenarios;
-#[path = "e2e/show_inherited_context.rs"]
-mod show_inherited_context;
 #[path = "e2e/sort_multi_key.rs"]
 mod sort_multi_key;
 #[path = "e2e/stale.rs"]

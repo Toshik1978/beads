@@ -1,5 +1,8 @@
-//! bds-o9a: compare-and-set guards on `br update` (`--if-status`,
-//! `--if-assignee`).
+//! bds-o9a: compare-and-set guard on `br update` (`--if-status`).
+//!
+//! `--if-assignee` was the other half of this pair; it was removed along with
+//! `assignee` itself (bds-b4f.2.6), since claiming *is* assigning and
+//! `--status in_progress` already covers the workflow.
 //!
 //! The guard exists so that concurrent agents sharing one workspace can say
 //! "move this to in_progress only if it is still open" without a
@@ -28,7 +31,7 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-fn seed_issue(storage: &mut SqliteStorage, id: &str, assignee: Option<&str>) {
+fn seed_issue(storage: &mut SqliteStorage, id: &str) {
     let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
     let issue = beads::model::Issue {
         id: id.to_string(),
@@ -38,7 +41,6 @@ fn seed_issue(storage: &mut SqliteStorage, id: &str, assignee: Option<&str>) {
         issue_type: beads::model::IssueType::Task,
         created_at: t,
         updated_at: t,
-        assignee: assignee.map(str::to_string),
         ..beads::model::Issue::default()
     };
     storage.create_issue(&issue, "seed").unwrap();
@@ -55,7 +57,7 @@ fn guard_on_status(expected: &str) -> IssueUpdate {
 #[test]
 fn a_status_guard_that_holds_applies_the_update() {
     let mut storage = SqliteStorage::open_memory().unwrap();
-    seed_issue(&mut storage, "cas-hold", None);
+    seed_issue(&mut storage, "cas-hold");
 
     let issue = storage
         .update_issue("cas-hold", &guard_on_status("open"), "alice")
@@ -66,7 +68,7 @@ fn a_status_guard_that_holds_applies_the_update() {
 #[test]
 fn a_status_guard_that_does_not_hold_names_both_values() {
     let mut storage = SqliteStorage::open_memory().unwrap();
-    seed_issue(&mut storage, "cas-miss", None);
+    seed_issue(&mut storage, "cas-miss");
 
     let error = storage
         .update_issue("cas-miss", &guard_on_status("in_progress"), "alice")
@@ -101,13 +103,12 @@ fn a_status_guard_that_does_not_hold_names_both_values() {
 #[test]
 fn a_failed_guard_writes_nothing_at_all() {
     let mut storage = SqliteStorage::open_memory().unwrap();
-    seed_issue(&mut storage, "cas-inert", None);
+    seed_issue(&mut storage, "cas-inert");
     let before = storage.get_issue("cas-inert").unwrap().expect("seeded");
 
     let update = IssueUpdate {
         status: Some(Status::InProgress),
         title: Some("should never land".to_string()),
-        assignee: Some(Some("alice".to_string())),
         transition_comment: Some("should never be inserted".to_string()),
         expect_status: Some("blocked".to_string()),
         ..IssueUpdate::default()
@@ -123,123 +124,11 @@ fn a_failed_guard_writes_nothing_at_all() {
     assert_eq!(after.updated_at, before.updated_at, "updated_at moved");
     assert_eq!(after.title, before.title);
     assert_eq!(after.status, before.status);
-    assert_eq!(after.assignee, before.assignee);
     assert!(
         storage.get_comments("cas-inert").unwrap().is_empty(),
         "the transition comment is inserted by the same function and must be \
          downstream of the guard, not beside it"
     );
-}
-
-#[test]
-fn an_assignee_guard_matches_exactly_and_reports_the_holder() {
-    let mut storage = SqliteStorage::open_memory().unwrap();
-    seed_issue(&mut storage, "cas-who", Some("bob"));
-
-    let held = IssueUpdate {
-        status: Some(Status::InProgress),
-        expect_assignee: Some(Some("bob".to_string())),
-        ..IssueUpdate::default()
-    };
-    assert!(storage.update_issue("cas-who", &held, "bob").is_ok());
-
-    let stolen = IssueUpdate {
-        status: Some(Status::Open),
-        expect_assignee: Some(Some("alice".to_string())),
-        ..IssueUpdate::default()
-    };
-    let error = storage
-        .update_issue("cas-who", &stolen, "alice")
-        .expect_err("bob holds it");
-    assert!(
-        matches!(error, BeadsError::PreconditionFailed { ref field, ref actual, .. }
-            if field == "assignee" && actual == "bob"),
-        "unexpected error: {error:?}"
-    );
-}
-
-/// The empty string means "still nobody", the same convention `--assignee ""`
-/// already uses for "clear it". `NULL`, `""` and `"  "` all have to read as the
-/// same value or the guard would hold for one unassigned row and not its
-/// neighbour — see `normalized_assignee` in `src/storage/sqlite.rs`.
-#[test]
-fn an_empty_assignee_guard_means_still_unassigned() {
-    let mut storage = SqliteStorage::open_memory().unwrap();
-    seed_issue(&mut storage, "cas-nul", None);
-    seed_issue(&mut storage, "cas-ws", Some("   "));
-    seed_issue(&mut storage, "cas-taken", Some("bob"));
-
-    let guard = IssueUpdate {
-        status: Some(Status::InProgress),
-        expect_assignee: Some(None),
-        ..IssueUpdate::default()
-    };
-
-    assert!(storage.update_issue("cas-nul", &guard, "alice").is_ok());
-    assert!(
-        storage.update_issue("cas-ws", &guard, "alice").is_ok(),
-        "whitespace survives a shell quote and must not read as an assignee"
-    );
-    assert!(storage.update_issue("cas-taken", &guard, "alice").is_err());
-}
-
-/// Both guards at once: each is a separate `AND` on the same predicate, so a
-/// composite guard holds only if every part does.
-#[test]
-fn composed_guards_all_have_to_hold() {
-    let mut storage = SqliteStorage::open_memory().unwrap();
-    seed_issue(&mut storage, "cas-both", Some("bob"));
-
-    let wrong_half = IssueUpdate {
-        priority: Some(Priority(0)),
-        expect_status: Some("open".to_string()),
-        expect_assignee: Some(Some("alice".to_string())),
-        ..IssueUpdate::default()
-    };
-    assert!(
-        storage
-            .update_issue("cas-both", &wrong_half, "alice")
-            .is_err(),
-        "the status half holds; the assignee half does not; the whole must fail"
-    );
-
-    let both = IssueUpdate {
-        priority: Some(Priority(0)),
-        expect_status: Some("open".to_string()),
-        expect_assignee: Some(Some("bob".to_string())),
-        ..IssueUpdate::default()
-    };
-    assert!(storage.update_issue("cas-both", &both, "bob").is_ok());
-}
-
-/// A guard composed with `--claim`: the claim guard and the status guard are
-/// independent predicates on the same statement, and the caller gets whichever
-/// fired.
-#[test]
-fn a_guard_composes_with_claim() {
-    let mut storage = SqliteStorage::open_memory().unwrap();
-    seed_issue(&mut storage, "cas-claim", None);
-
-    let claim_only_if_open = IssueUpdate {
-        status: Some(Status::InProgress),
-        assignee: Some(Some("alice".to_string())),
-        expect_unassigned: true,
-        claim_actor: Some("alice".to_string()),
-        expect_status: Some("open".to_string()),
-        ..IssueUpdate::default()
-    };
-    assert!(
-        storage
-            .update_issue("cas-claim", &claim_only_if_open, "alice")
-            .is_ok()
-    );
-
-    // Now it is in_progress and held by alice; the same command from bob has to
-    // fail, and it does not matter which of the two guards reports it.
-    let mut from_bob = claim_only_if_open.clone();
-    from_bob.assignee = Some(Some("bob".to_string()));
-    from_bob.claim_actor = Some("bob".to_string());
-    assert!(storage.update_issue("cas-claim", &from_bob, "bob").is_err());
 }
 
 /// Criterion: two concurrent updates with the same guard produce exactly one
@@ -255,7 +144,7 @@ fn two_writers_racing_one_guarded_transition_produce_one_winner() {
     let db_path = tmp.path().join("beads.db");
     {
         let mut storage = SqliteStorage::open(&db_path).unwrap();
-        seed_issue(&mut storage, "cas-race", None);
+        seed_issue(&mut storage, "cas-race");
     }
 
     let barrier = Arc::new(Barrier::new(2));
@@ -275,7 +164,6 @@ fn two_writers_racing_one_guarded_transition_produce_one_winner() {
                 let mut storage = SqliteStorage::open(Path::new(&path)).unwrap();
                 let update = IssueUpdate {
                     status: Some(Status::InProgress),
-                    assignee: Some(Some(actor.clone())),
                     expect_status: Some("open".to_string()),
                     ..IssueUpdate::default()
                 };
@@ -410,8 +298,6 @@ fn the_cli_holds_a_guard_that_still_matches() {
             "in_progress",
             "--if-status",
             "open",
-            "--if-assignee",
-            "",
         ],
         "cas cli applied",
     );
@@ -444,7 +330,7 @@ fn the_cli_refuses_a_guard_with_no_field_update_to_guard() {
             refused.stdout
         );
         assert!(
-            refused.stderr.contains("guard a field update"),
+            refused.stderr.contains("guards a field update"),
             "stderr={}",
             refused.stderr
         );

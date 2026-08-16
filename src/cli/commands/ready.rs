@@ -90,12 +90,6 @@ fn execute_inner(
         config_layer = Some(loaded.clone());
         Ok(loaded)
     };
-    let assignee = match args.assignee.as_deref() {
-        Some("") => Some(config::resolve_actor(&load_config_layer()?)),
-        Some(value) => Some(value.to_string()),
-        None => None,
-    };
-
     // `--epic <id>` is sugar for `--parent <id> --recursive` (they conflict at
     // the clap layer, so at most one of these is set).
     let parent_spec = args.epic.as_deref().or(args.parent.as_deref());
@@ -117,8 +111,6 @@ fn execute_inner(
     let ready_statuses = workflow.ready_status_group();
 
     let filters = ReadyFilters {
-        assignee,
-        unassigned: args.unassigned,
         labels_and: args.label.clone(),
         labels_or: args.label_any.clone(),
         types: parse_types(&args.type_)?,

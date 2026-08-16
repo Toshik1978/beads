@@ -99,26 +99,14 @@ fn execute_inner(args: &StaleArgs, ctx: &OutputContext, storage: &SqliteStorage)
             let days_stale = (now - issue.updated_at).num_days().max(0);
             let status = format_status_label(&issue.status, false);
             let issue_id = stale_display_text(&issue.id);
-            if let Some(assignee) = issue.assignee.as_deref() {
-                println!(
-                    "{}. [{}] {}d {} {} ({assignee})",
-                    idx + 1,
-                    status,
-                    days_stale,
-                    issue_id,
-                    sanitize_terminal_inline(&issue.title),
-                    assignee = sanitize_terminal_inline(assignee)
-                );
-            } else {
-                println!(
-                    "{}. [{}] {}d {} {}",
-                    idx + 1,
-                    status,
-                    days_stale,
-                    issue_id,
-                    sanitize_terminal_inline(&issue.title)
-                );
-            }
+            println!(
+                "{}. [{}] {}d {} {}",
+                idx + 1,
+                status,
+                days_stale,
+                issue_id,
+                sanitize_terminal_inline(&issue.title)
+            );
         }
     }
 
@@ -134,7 +122,6 @@ fn stale_issue_output(issue: &Issue) -> StaleIssue {
         status: issue.status.clone(),
         title: issue.title.clone(),
         updated_at: issue.updated_at,
-        assignee: issue.assignee.clone(),
     }
 }
 
@@ -217,14 +204,6 @@ fn render_stale_rich(
             theme.issue_title.clone(),
         );
 
-        // Assignee if present
-        if let Some(ref assignee) = issue.assignee {
-            line.append_styled(
-                &format!(" (@{})", sanitize_terminal_inline(assignee)),
-                theme.dimmed.clone(),
-            );
-        }
-
         ctx.render(&line);
     }
 }
@@ -254,35 +233,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: updated_at,
             created_by: None,
             updated_at,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],

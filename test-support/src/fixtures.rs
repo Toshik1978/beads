@@ -17,7 +17,6 @@ pub fn issue(title: &str) -> Issue {
         issue_type: IssueType::Task,
         status: Status::Open,
         priority: Priority::MEDIUM,
-        assignee: None,
         labels: vec![],
         created_at: base,
         updated_at: base + Duration::seconds(1),
@@ -26,31 +25,17 @@ pub fn issue(title: &str) -> Issue {
         acceptance_criteria: None,
         notes: None,
         owner: None,
-        estimated_minutes: None,
         created_by: None,
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        due_at: None,
         defer_until: None,
         external_ref: None,
-        source_system: None,
         source_repo: None,
-        source_repo_path: None,
-        agent_context: None,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        sender: None,
-        ephemeral: false,
-        pinned: false,
-        is_template: false,
         dependencies: vec![],
         comments: vec![],
     }
@@ -94,11 +79,6 @@ impl IssueBuilder {
         self
     }
 
-    pub fn with_assignee(mut self, assignee: &str) -> Self {
-        self.issue.assignee = Some(assignee.to_string());
-        self
-    }
-
     pub fn with_description(mut self, description: &str) -> Self {
         self.issue.description = Some(description.to_string());
         self
@@ -106,12 +86,6 @@ impl IssueBuilder {
 
     pub fn with_id(mut self, id: &str) -> Self {
         self.issue.id = id.to_string();
-        self
-    }
-
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn with_template(mut self) -> Self {
-        self.issue.is_template = true;
         self
     }
 

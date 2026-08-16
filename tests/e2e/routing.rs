@@ -2485,71 +2485,98 @@ fn e2e_routing_update_failure_does_not_print_partial_success() {
     assert_eq!(last_touched_after, last_touched_before);
 }
 
+/// A routed multi-target update commits each route independently: there is
+/// no cross-route rollback (see the comment at
+/// `src/cli/commands/update.rs:240`). Unlike
+/// `e2e_routing_update_failure_does_not_print_partial_success` above — which
+/// fails on a *nonexistent* ID and so aborts in `prepare_single_route` before
+/// any route ever commits — this uses `--if-status`, a guard checked only at
+/// commit time. The local route is listed first and its guard holds, so it
+/// commits; the external route is listed second and its guard is rejected,
+/// so the overall command fails. The earlier, already-committed write is not
+/// undone by the later failure.
 #[test]
-fn e2e_routing_update_claim_failure_does_not_mutate_earlier_routes() {
-    let _log = common::test_log("e2e_routing_update_claim_failure_does_not_mutate_earlier_routes");
+fn e2e_routing_update_guard_failure_on_a_later_route_does_not_undo_an_earlier_commit() {
+    let _log = common::test_log(
+        "e2e_routing_update_guard_failure_on_a_later_route_does_not_undo_an_earlier_commit",
+    );
 
     let main_workspace = BrWorkspace::new();
     let external_workspace = BrWorkspace::new();
 
-    init_workspace(&main_workspace, "init_routed_claim_failure_main");
-    init_workspace(&external_workspace, "init_routed_claim_failure_external");
+    init_workspace(&main_workspace, "init_guard_partial_commit_main");
+    init_workspace(&external_workspace, "init_guard_partial_commit_external");
     configure_external_route(&main_workspace, &external_workspace);
 
     let local_id = create_issue_and_get_id(
         &main_workspace,
-        "Local routed claim target",
-        "create_local_routed_claim_target",
+        "Local guard target",
+        "create_local_guard_target",
     );
     let external_id = create_issue_and_get_id(
         &external_workspace,
-        "External routed claim target",
-        "create_external_routed_claim_target",
+        "External guard target",
+        "create_external_guard_target",
     );
 
-    let claim_external = run_br(
+    // Move the external issue off "open" directly (unrouted), so the shared
+    // `--if-status open` guard below holds for the local route but is
+    // rejected for the external one.
+    let derail_external = run_br(
         &external_workspace,
-        [
-            "--actor",
-            "bob",
-            "update",
-            &external_id,
-            "--claim",
-            "--json",
-        ],
-        "claim_external_issue_bob",
+        ["update", &external_id, "--status", "blocked"],
+        "derail_external_off_open",
     );
     assert!(
-        claim_external.status.success(),
-        "claim external failed: {}",
-        claim_external.stderr
+        derail_external.status.success(),
+        "external derail failed: {}",
+        derail_external.stderr
     );
 
+    // Local route listed first, external route second: routes are grouped in
+    // first-seen order (`group_issue_inputs_by_route_preserves_first_seen_
+    // batch_order`), and each route commits as its turn in the loop is
+    // reached, so the local write lands before the external guard is even
+    // evaluated.
     let update = run_br(
         &main_workspace,
         [
-            "--actor",
-            "alice",
             "update",
             &local_id,
             &external_id,
-            "--claim",
-            "--json",
+            "--status",
+            "in_progress",
+            "--if-status",
+            "open",
         ],
-        "update_routed_claim_failure_atomic",
+        "update_guard_failure_later_route",
     );
     assert!(
         !update.status.success(),
-        "expected routed claim to fail when external issue is already assigned"
+        "expected the external route's guard to fail the overall command"
     );
 
-    let local_after = show_issue_json(
-        &main_workspace,
-        &local_id,
-        "show_local_after_failed_routed_claim",
+    // The earlier route's write persisted despite the later route's failure.
+    let local_after = show_issue_json(&main_workspace, &local_id, "show_local_after_guard_split");
+    assert_eq!(
+        local_after[0]["status"].as_str(),
+        Some("in_progress"),
+        "the local route committed before the external route's guard failed, \
+         and nothing rolls it back: {local_after:?}"
     );
-    assert_eq!(local_after[0]["status"].as_str(), Some("open"));
-    assert!(local_after[0]["assignee"].is_null());
+
+    // And the external route's own guard correctly protected it: it is still
+    // "blocked", not "in_progress".
+    let external_after = show_issue_json(
+        &external_workspace,
+        &external_id,
+        "show_external_after_guard_split",
+    );
+    assert_eq!(
+        external_after[0]["status"].as_str(),
+        Some("blocked"),
+        "the external route's guard should have rejected the update: {external_after:?}"
+    );
 }
 
 #[test]

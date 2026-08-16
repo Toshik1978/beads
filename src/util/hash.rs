@@ -42,18 +42,25 @@ fn hex_digit(nibble: u8) -> char {
 /// Fields included (stable order, each length-prefixed):
 /// - title, description, design, `acceptance_criteria`, notes
 /// - status, priority, `issue_type`
-/// - assignee, owner, `created_by`
-/// - `external_ref`, `source_system`
-/// - pinned, `is_template`
-/// - empty/default placeholders for reserved fields not represented in Rust
+/// - owner, `created_by`
+/// - `external_ref`
+/// - empty/default placeholders for reserved fields not represented in Rust,
+///   including `assignee`, `source_system`, `pinned` and `is_template`
+///   (removed from `Issue`; the digest is an on-disk value and must not move
+///   until the migration that rebuilds every stored hash). Unlike the other
+///   three, `assignee` was not uniformly default across every record, so this
+///   placeholder is the one accepted digest drift in the field-removal
+///   sequence — see bds-b4f.2.6.
 ///
 /// Fields excluded:
 /// - id, `content_hash` (circular)
 /// - labels, dependencies, comments, events (separate entities)
 /// - timestamps (`created_at`, `updated_at`, `closed_at`, etc.)
 /// - tombstone metadata (`deleted_at`, `deleted_by`, `delete_reason`)
-/// - `estimated_minutes`, `due_at`, `defer_until`
-/// - `close_reason`, `closed_by_session`
+/// - `defer_until`, `close_reason`
+/// - `estimated_minutes`, `due_at` and `closed_by_session` (removed from
+///   `Issue`, bds-b4f.2.3; they were never hash inputs, so removing them
+///   took no placeholder and moved no digest)
 ///
 /// `status` is included, so a live issue and a `Status::Tombstone` issue do
 /// not hash alike solely because deletion metadata is excluded. Tombstone
@@ -71,13 +78,21 @@ pub fn content_hash(issue: &Issue) -> String {
         &issue.status,
         &issue.priority,
         &issue.issue_type,
-        issue.assignee.as_deref(),
+        // Placeholder for a field no longer represented in Rust. Unlike the
+        // other placeholders below this one is not universally default — an
+        // issue that had an assignee now hashes differently — which is why
+        // the migration that rebuilds every stored hash lands immediately
+        // after this commit (bds-b4f.2.6).
+        None, // was issue.assignee.as_deref()
         issue.owner.as_deref(),
         issue.created_by.as_deref(),
         issue.external_ref.as_deref(),
-        issue.source_system.as_deref(),
-        issue.pinned,
-        issue.is_template,
+        // Placeholders for fields no longer represented in Rust. The digest is
+        // an on-disk value: it must not move until the migration that rebuilds
+        // every stored hash removes these slots.
+        None,  // was issue.source_system.as_deref()
+        false, // was issue.pinned
+        false, // was issue.is_template
     )
 }
 
@@ -196,35 +211,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: chrono::Utc::now(),
             created_by: None,
             updated_at: chrono::Utc::now(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -323,33 +323,11 @@ mod tests {
     }
 
     #[test]
-    fn test_content_hash_includes_pinned() {
-        let mut issue = make_test_issue();
-        let hash1 = content_hash(&issue);
-
-        issue.pinned = true;
-        let hash2 = content_hash(&issue);
-
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
     fn test_content_hash_includes_created_by() {
         let mut issue = make_test_issue();
         let hash1 = content_hash(&issue);
 
         issue.created_by = Some("tester@example.com".to_string());
-        let hash2 = content_hash(&issue);
-
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_content_hash_includes_source_system() {
-        let mut issue = make_test_issue();
-        let hash1 = content_hash(&issue);
-
-        issue.source_system = Some("imported".to_string());
         let hash2 = content_hash(&issue);
 
         assert_ne!(hash1, hash2);
@@ -368,13 +346,17 @@ mod tests {
             &issue.status,
             &issue.priority,
             &issue.issue_type,
-            issue.assignee.as_deref(),
+            // Mirrors the literal placeholder `content_hash` now passes for
+            // the removed `assignee` field.
+            None,
             issue.owner.as_deref(),
             issue.created_by.as_deref(),
             issue.external_ref.as_deref(),
-            issue.source_system.as_deref(),
-            issue.pinned,
-            issue.is_template,
+            // Mirrors the literal placeholders `content_hash` now passes for
+            // the removed `source_system`/`pinned`/`is_template` fields.
+            None,
+            false,
+            false,
         );
         assert_eq!(direct, from_parts);
     }

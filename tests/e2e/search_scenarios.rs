@@ -4,7 +4,7 @@
 //! - Basic text search
 //! - Case sensitivity
 //! - Regex patterns
-//! - Search with filters (status, type, priority, assignee, label)
+//! - Search with filters (status, type, priority, label)
 //! - Search in different fields (title, description)
 //! - Output formats (text, JSON)
 //! - Edge cases (empty results, special characters)

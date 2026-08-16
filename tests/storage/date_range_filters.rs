@@ -1,4 +1,4 @@
-//! bds-lf1: the ten date-range bounds on `br list` and `br search`.
+//! bds-lf1: the eight date-range bounds on `br list` and `br search`.
 //!
 //! Two things are pinned here that prose alone cannot hold:
 //!
@@ -8,9 +8,9 @@
 //! below places a row *exactly on* the bound, because a test a second away from
 //! it passes whichever choice was made.
 //!
-//! **NULL never matches.** `closed_at`, `due_at` and `defer_until` are nullable,
-//! and a bound on one of them excludes the rows that have no value. That falls
-//! out of SQL's three-valued logic rather than an explicit `IS NOT NULL`, which
+//! **NULL never matches.** `closed_at` and `defer_until` are nullable, and a
+//! bound on one of them excludes the rows that have no value. That falls out
+//! of SQL's three-valued logic rather than an explicit `IS NOT NULL`, which
 //! makes it exactly the kind of behaviour that would flip unnoticed if someone
 //! rewrote the clause — so it is asserted, not trusted.
 //!
@@ -35,8 +35,8 @@ fn boundary() -> DateTime<Utc> {
 /// Write a row with exact timestamps.
 ///
 /// `upsert_issue_for_import` rather than `create_issue`: the point of every test
-/// here is a specific `created_at` / `closed_at` / `due_at`, and the create path
-/// stamps its own.
+/// here is a specific `created_at` / `closed_at` / `defer_until`, and the create
+/// path stamps its own.
 fn write_issue(storage: &SqliteStorage, id: &str, shape: impl FnOnce(&mut Issue)) {
     let mut issue = Issue {
         id: id.to_string(),
@@ -154,13 +154,6 @@ boundary_case!(
 );
 
 boundary_case!(
-    due_bounds_are_inclusive_at_the_boundary_instant,
-    |issue: &mut Issue, at: DateTime<Utc>| issue.due_at = Some(at),
-    due_after,
-    due_before
-);
-
-boundary_case!(
     defer_bounds_are_inclusive_at_the_boundary_instant,
     |issue: &mut Issue, at: DateTime<Utc>| {
         issue.status = Status::Deferred;
@@ -173,8 +166,8 @@ boundary_case!(
 /// Criterion: a row whose nullable column is NULL never matches a bound on it.
 ///
 /// Stated the other way round, which is the version that matters: "closed in the
-/// last week" must not return everything still open, and "due before Friday"
-/// must not return every issue with no deadline.
+/// last week" must not return everything still open, and "deferred before
+/// Friday" must not return every issue that was never deferred.
 #[test]
 fn a_null_column_never_satisfies_a_bound_on_it() {
     let storage = test_db();
@@ -184,7 +177,6 @@ fn a_null_column_never_satisfies_a_bound_on_it() {
         issue.closed_at = Some(boundary());
     });
     write_issue(&storage, "bd-dated", |issue| {
-        issue.due_at = Some(boundary());
         issue.defer_until = Some(boundary());
     });
 
@@ -211,28 +203,16 @@ fn a_null_column_never_satisfies_a_bound_on_it() {
         );
     }
 
-    for (label, filters) in [
-        (
-            "due_before",
-            ListFilters {
-                due_before: Some(boundary() + Duration::days(365)),
-                ..unfiltered()
-            },
-        ),
-        (
-            "defer_after",
-            ListFilters {
-                defer_after: Some(boundary() - Duration::days(365)),
-                ..unfiltered()
-            },
-        ),
-    ] {
-        assert_eq!(
-            selected(&storage, &filters),
-            vec!["bd-dated".to_string()],
-            "{label} must exclude the rows with no value in that column"
-        );
-    }
+    let label = "defer_after";
+    let filters = ListFilters {
+        defer_after: Some(boundary() - Duration::days(365)),
+        ..unfiltered()
+    };
+    assert_eq!(
+        selected(&storage, &filters),
+        vec!["bd-dated".to_string()],
+        "{label} must exclude the rows with no value in that column"
+    );
 }
 
 /// Criterion: two ranges compose, and they compose as AND rather than as
@@ -330,7 +310,7 @@ fn no_fast_path_answers_a_bounded_query_unfiltered() {
             ..ListFilters::default()
         },
         ListFilters {
-            due_before: Some(boundary()),
+            defer_before: Some(boundary()),
             ..ListFilters::default()
         },
     ] {

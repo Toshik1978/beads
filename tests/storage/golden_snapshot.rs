@@ -37,35 +37,20 @@ fn fixed_issue() -> Issue {
         status: Status::Open,
         priority: Priority::MEDIUM,
         issue_type: IssueType::Task,
-        assignee: Some("alice".to_string()),
         owner: Some("storage-review".to_string()),
-        estimated_minutes: Some(30),
         created_at,
         created_by: Some("golden-create".to_string()),
         updated_at: created_at,
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        due_at: None,
         defer_until: None,
         external_ref: Some("GOLDEN-1".to_string()),
-        source_system: None,
         source_repo: Some(".".to_string()),
-        source_repo_path: None,
-        agent_context: None,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: Some(0),
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: Some(0),
-        sender: None,
-        ephemeral: false,
-        pinned: false,
-        is_template: false,
         labels: vec![],
         dependencies: vec![],
         comments: vec![],
@@ -76,7 +61,7 @@ fn push_issue_row_snapshot(out: &mut String, conn: &Connection) {
     let row = conn
         .query_row(
             "SELECT id, title, status, priority, issue_type, assignee, description, \
-                    close_reason, closed_by_session, created_at, updated_at, closed_at, content_hash \
+                    close_reason, created_at, updated_at, closed_at, content_hash \
              FROM issues WHERE id = 'storage-golden-1'",
         )
         .expect("issue row");
@@ -90,11 +75,10 @@ fn push_issue_row_snapshot(out: &mut String, conn: &Connection) {
     writeln!(out, "  assignee: {}", value_text(&row, 5)).unwrap();
     writeln!(out, "  description: {}", value_text(&row, 6)).unwrap();
     writeln!(out, "  close_reason: {}", value_text(&row, 7)).unwrap();
-    writeln!(out, "  closed_by_session: {}", value_text(&row, 8)).unwrap();
-    writeln!(out, "  created_at: {}", value_text(&row, 9)).unwrap();
+    writeln!(out, "  created_at: {}", value_text(&row, 8)).unwrap();
     writeln!(out, "  updated_at: <updated_at>").unwrap();
-    writeln!(out, "  closed_at: {}", value_text(&row, 11)).unwrap();
-    writeln!(out, "  content_hash: {}", value_text(&row, 12)).unwrap();
+    writeln!(out, "  closed_at: {}", value_text(&row, 10)).unwrap();
+    writeln!(out, "  content_hash: {}", value_text(&row, 11)).unwrap();
 }
 
 fn normalized_jsonl(jsonl: &[u8]) -> String {
@@ -144,7 +128,6 @@ fn golden_create_update_close_sqlite_rows_and_jsonl() {
                 status: Some(Status::Closed),
                 closed_at: Some(Some(closed_at)),
                 close_reason: Some(Some("completed golden flow".to_string())),
-                closed_by_session: Some(Some("golden-session".to_string())),
                 ..IssueUpdate::default()
             },
             "golden-close",

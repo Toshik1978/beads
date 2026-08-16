@@ -13,7 +13,6 @@ pub const DEFAULT_FIELDS: &[&str] = &[
     "status",
     "priority",
     "issue_type",
-    "assignee",
     "created_at",
     "updated_at",
 ];
@@ -26,12 +25,10 @@ pub const ALL_FIELDS: &[&str] = &[
     "status",
     "priority",
     "issue_type",
-    "assignee",
     "owner",
     "created_at",
     "updated_at",
     "closed_at",
-    "due_at",
     "defer_until",
     "notes",
     "external_ref",
@@ -73,14 +70,12 @@ pub fn get_field_value(issue: &Issue, field: &str) -> String {
         "status" => issue.status.as_str().to_string(),
         "priority" => issue.priority.0.to_string(),
         "issue_type" => issue.issue_type.as_str().to_string(),
-        "assignee" => issue.assignee.clone().unwrap_or_default(),
         "owner" => issue.owner.clone().unwrap_or_default(),
         "created_at" => issue.created_at.to_rfc3339(),
         "updated_at" => issue.updated_at.to_rfc3339(),
         "closed_at" => issue
             .closed_at
             .map_or_else(String::new, |dt| dt.to_rfc3339()),
-        "due_at" => issue.due_at.map_or_else(String::new, |dt| dt.to_rfc3339()),
         "defer_until" => issue
             .defer_until
             .map_or_else(String::new, |dt| dt.to_rfc3339()),
@@ -170,35 +165,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap(),
             created_by: None,
             updated_at: Utc.with_ymd_and_hms(2025, 1, 15, 14, 30, 0).unwrap(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -237,14 +217,12 @@ mod tests {
     #[test]
     fn test_get_field_value() {
         let mut issue = make_test_issue("bd-123", "Test Issue");
-        issue.assignee = Some("alice".to_string());
         issue.status = Status::InProgress;
 
         assert_eq!(get_field_value(&issue, "id"), "bd-123");
         assert_eq!(get_field_value(&issue, "title"), "Test Issue");
         assert_eq!(get_field_value(&issue, "status"), "in_progress");
         assert_eq!(get_field_value(&issue, "priority"), "2");
-        assert_eq!(get_field_value(&issue, "assignee"), "alice");
         assert_eq!(get_field_value(&issue, "unknown"), "");
     }
 

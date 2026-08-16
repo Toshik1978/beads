@@ -1,5 +1,6 @@
 ---
 source: tests/output_contracts/json_output.rs
+assertion_line: 728
 expression: normalized
 ---
 [
@@ -12,9 +13,7 @@ expression: normalized
     "created_at": "TIMESTAMP",
     "created_by": "ACTOR",
     "updated_at": "TIMESTAMP",
-    "source_repo": "SOURCE_REPO",
-    "compaction_level": 0,
-    "original_size": 0
+    "source_repo": "SOURCE_REPO"
   },
   {
     "id": "ISSUE_ID",
@@ -25,8 +24,6 @@ expression: normalized
     "created_at": "TIMESTAMP",
     "created_by": "ACTOR",
     "updated_at": "TIMESTAMP",
-    "source_repo": "SOURCE_REPO",
-    "compaction_level": 0,
-    "original_size": 0
+    "source_repo": "SOURCE_REPO"
   }
 ]

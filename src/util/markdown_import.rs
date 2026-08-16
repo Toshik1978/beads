@@ -8,8 +8,12 @@
 //! - Per-issue sections are H3 lines: `### Section Name`
 //! - Recognized sections (case-insensitive):
 //!   - ID, Priority, Type, Description, Design, Acceptance Criteria (alias Acceptance),
-//!     Assignee, Labels, Dependencies (alias Deps), Agent Context (alias Agent-Context)
-//! - Unknown sections are ignored
+//!     Labels, Dependencies (alias Deps), Notes (legacy aliases Agent Context,
+//!     Agent-Context, Agent_Context — see the note on `ParsedIssue::notes` below)
+//! - Unknown sections are ignored, including a legacy `### Assignee` header:
+//!   `assignee` was removed from `Issue` (bds-b4f.2.6) and its content is now
+//!   silently dropped like any other unrecognized section, matching the grammar's
+//!   own stated rule rather than a special case
 //!
 //! # Intra-file Dependency References
 //!
@@ -57,15 +61,22 @@ pub struct ParsedIssue {
     pub design: Option<String>,
     /// Acceptance criteria content.
     pub acceptance_criteria: Option<String>,
-    /// Assignee name.
-    pub assignee: Option<String>,
     /// Labels list.
     pub labels: Vec<String>,
     /// Dependencies list (format: "type:id" or "id").
     pub dependencies: Vec<String>,
-    /// Agent-context governance text (opaque, same semantics as
-    /// `br update --agent-context`). beads#304.
-    pub agent_context: Option<String>,
+    /// Free-text notes, from a `### Notes` section.
+    ///
+    /// Also accepts the legacy `### Agent Context` / `Agent-Context` /
+    /// `Agent_Context` headers (beads#304): that section used to feed a
+    /// dedicated `Issue.agent_context` field, which bds-b4f.2.5 removed as
+    /// dead weight (never non-null in any real workspace). Deleting the
+    /// header mapping outright would have made a heading a user already
+    /// wrote in an import file silently vanish — `Section::Unknown` drops
+    /// its content on the floor (see `apply_section_to_issue` below) — so
+    /// the aliases stay, now landing in the general-purpose `notes` field
+    /// instead of a bespoke one.
+    pub notes: Option<String>,
 }
 
 /// Section types recognized in the markdown.
@@ -80,10 +91,9 @@ enum Section {
     Description,
     Design,
     AcceptanceCriteria,
-    Assignee,
     Labels,
     Dependencies,
-    AgentContext,
+    Notes,
     Unknown,
 }
 
@@ -98,10 +108,12 @@ impl Section {
             "description" => Self::Description,
             "design" => Self::Design,
             "acceptance criteria" | "acceptance" => Self::AcceptanceCriteria,
-            "assignee" => Self::Assignee,
             "labels" => Self::Labels,
             "dependencies" | "deps" => Self::Dependencies,
-            "agent context" | "agent-context" | "agent_context" => Self::AgentContext,
+            // "agent context" and its punctuation variants are a legacy
+            // alias kept so pre-bds-b4f.2.5 import files keep working; see
+            // the doc comment on `ParsedIssue::notes`.
+            "notes" | "agent context" | "agent-context" | "agent_context" => Self::Notes,
             _ => Self::Unknown,
         }
     }
@@ -312,18 +324,26 @@ fn apply_section_to_issue(issue: &mut ParsedIssue, section: Section, lines: &[St
         Section::AcceptanceCriteria => {
             issue.acceptance_criteria = Some(content);
         }
-        Section::Assignee => {
-            issue.assignee = Some(content);
-        }
         Section::Labels => {
             issue.labels = split_list_content(&content);
         }
         Section::Dependencies => {
             issue.dependencies = split_dependency_content(&content);
         }
-        Section::AgentContext => {
-            // Opaque text, same semantics as `br update --agent-context`.
-            issue.agent_context = Some(content);
+        Section::Notes => {
+            // `Notes` and its legacy `Agent Context` aliases are not
+            // synonyms for one section the way `Acceptance`/`Acceptance
+            // Criteria` and `Dependencies`/`Deps` are — until this field
+            // merge they were distinct sections with distinct meanings, so
+            // a hand-authored file can legitimately carry both with
+            // different content. Overwriting would silently drop whichever
+            // one is not last, exactly the failure this alias mapping
+            // exists to avoid one level up (see `ParsedIssue::notes`), so
+            // concatenate in file order instead of last-wins.
+            issue.notes = Some(match issue.notes.take() {
+                Some(existing) => format!("{existing}\n\n{content}"),
+                None => content,
+            });
         }
         Section::Unknown => {
             // Ignore unknown sections
@@ -891,9 +911,9 @@ Explicit description content
     }
 
     #[test]
-    fn test_agent_context_section_parsing() {
-        let content = r"## Epic With Context
-### Agent Context
+    fn test_notes_section_parsing() {
+        let content = r"## Epic With Notes
+### Notes
 Use the porting-to-rust skill. Constraints: no unsafe code; std only.
 ### Type
 epic
@@ -901,27 +921,32 @@ epic
         let issues = parse_markdown_content(content).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(
-            issues[0].agent_context.as_deref(),
+            issues[0].notes.as_deref(),
             Some("Use the porting-to-rust skill. Constraints: no unsafe code; std only.")
         );
     }
 
     #[test]
-    fn test_agent_context_section_is_opaque_multiline() {
+    fn test_notes_section_is_opaque_multiline() {
         let content = r#"## Issue
-### Agent Context
+### Notes
 {"skills": ["porting-to-rust"], "constraints": ["no rusqlite"]}
 second line of opaque text
 "#;
         let issues = parse_markdown_content(content).unwrap();
-        let ctx = issues[0].agent_context.as_deref().unwrap();
-        assert!(ctx.contains("porting-to-rust"));
-        assert!(ctx.contains("second line of opaque text"));
+        let notes = issues[0].notes.as_deref().unwrap();
+        assert!(notes.contains("porting-to-rust"));
+        assert!(notes.contains("second line of opaque text"));
     }
 
+    /// beads#304, then bds-b4f.2.5: `agent_context` was removed as a
+    /// dedicated `Issue` field, but a user's existing `### Agent Context`
+    /// section must still land somewhere rather than vanish — these
+    /// headers are legacy aliases for `### Notes`.
     #[test]
-    fn test_agent_context_aliases() {
+    fn test_agent_context_aliases_map_to_notes() {
         for header in [
+            "Notes",
             "Agent Context",
             "agent-context",
             "AGENT CONTEXT",
@@ -930,34 +955,54 @@ second line of opaque text
             let content = format!("## Issue\n### {header}\nopaque body\n");
             let issues = parse_markdown_content(&content).unwrap();
             assert_eq!(
-                issues[0].agent_context.as_deref(),
+                issues[0].notes.as_deref(),
                 Some("opaque body"),
-                "header `{header}` should map to agent_context"
+                "header `{header}` should map to notes"
             );
         }
     }
 
+    /// `Notes` and `Agent Context` are not synonyms for one section the way
+    /// `Acceptance`/`Acceptance Criteria` are: a hand-authored file can
+    /// legitimately carry both, with different content, so both must
+    /// survive rather than the second silently clobbering the first.
     #[test]
-    fn test_agent_context_absent_when_section_missing() {
+    fn test_both_notes_and_agent_context_headers_concatenate_in_file_order() {
+        let content = r"## Issue
+### Notes
+first section body
+### Agent Context
+second section body
+";
+        let issues = parse_markdown_content(content).unwrap();
+        assert_eq!(
+            issues[0].notes.as_deref(),
+            Some("first section body\n\nsecond section body"),
+            "both headers' bodies must survive, in file order"
+        );
+    }
+
+    #[test]
+    fn test_notes_absent_when_section_missing() {
         let content = r"## Issue
 ### Description
 just a description
 ";
         let issues = parse_markdown_content(content).unwrap();
-        assert_eq!(issues[0].agent_context, None);
+        assert_eq!(issues[0].notes, None);
         assert_eq!(issues[0].description.as_deref(), Some("just a description"));
     }
 
     #[test]
-    fn test_unknown_h3_section_still_ignored_alongside_agent_context() {
+    fn test_unknown_h3_section_still_ignored_alongside_notes() {
         let content = r"## Issue
 ### Totally Unknown Section
 ignored content
-### Agent Context
+### Notes
 kept content
 ";
         let issues = parse_markdown_content(content).unwrap();
-        assert_eq!(issues[0].agent_context.as_deref(), Some("kept content"));
+        assert_eq!(issues[0].notes.as_deref(), Some("kept content"));
         // The unknown section did not leak into any recognized field.
         assert_eq!(issues[0].description, None);
         assert_eq!(issues[0].design, None);

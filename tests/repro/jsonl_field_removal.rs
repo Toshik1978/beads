@@ -85,11 +85,11 @@ fn a_field_deleted_from_the_jsonl_is_removed_from_the_database() {
         .expect("id is a string")
         .to_string();
     br(temp.path())
-        .args(["update", &id, "--assignee", "alice"])
+        .args(["update", &id, "--owner", "alice"])
         .assert()
         .success();
 
-    strip_key(temp.path(), "assignee");
+    strip_key(temp.path(), "owner");
     let report = import_only(temp.path());
 
     assert!(
@@ -108,7 +108,7 @@ fn a_field_deleted_from_the_jsonl_is_removed_from_the_database() {
         .find(|record| record["id"] == serde_json::json!(id))
         .expect("probe still present");
     assert!(
-        probe.get("assignee").is_none(),
+        probe.get("owner").is_none(),
         "a later flush restored the deleted field: {probe}"
     );
 }

@@ -26,7 +26,6 @@ pub mod config;
 pub mod error;
 pub mod format;
 pub mod health;
-pub mod inheritance;
 pub mod logging;
 pub mod model;
 pub mod output;

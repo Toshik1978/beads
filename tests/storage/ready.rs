@@ -1,6 +1,6 @@
 //! Storage unit tests for ready issues functionality.
 //!
-//! Tests: `get_ready_issues` with various filters (assignee, unassigned, types,
+//! Tests: `get_ready_issues` with various filters (types,
 //! priorities, `labels_and`, `labels_or`, `include_deferred`, limit) and sort policies
 //! (Hybrid, Priority, Oldest). Real `SQLite`, no mocks.
 
@@ -43,64 +43,6 @@ fn ready_issues(
     sort: ReadySortPolicy,
 ) -> Vec<Issue> {
     storage.get_ready_issues(filters, sort).unwrap()
-}
-
-// ============================================================================
-// ASSIGNEE FILTER TESTS
-// ============================================================================
-
-#[test]
-fn ready_filter_by_assignee() {
-    let mut storage = test_db();
-
-    let issue1 = fixtures::IssueBuilder::new("Assigned to Alice")
-        .with_assignee("alice")
-        .build();
-    let issue2 = fixtures::IssueBuilder::new("Assigned to Bob")
-        .with_assignee("bob")
-        .build();
-    let issue3 = fixtures::IssueBuilder::new("Unassigned issue").build();
-
-    storage.create_issue(&issue1, "tester").unwrap();
-    storage.create_issue(&issue2, "tester").unwrap();
-    storage.create_issue(&issue3, "tester").unwrap();
-
-    let filters = ReadyFilters {
-        assignee: Some("alice".to_string()),
-        ..Default::default()
-    };
-
-    let ids = ready_ids(&storage, &filters, ReadySortPolicy::Oldest);
-    assert_eq!(ids.len(), 1);
-    assert!(ids.contains(&issue1.id));
-    assert!(!ids.contains(&issue2.id));
-    assert!(!ids.contains(&issue3.id));
-}
-
-#[test]
-fn ready_filter_unassigned_only() {
-    let mut storage = test_db();
-
-    let assigned = fixtures::IssueBuilder::new("Assigned issue")
-        .with_assignee("someone")
-        .build();
-    let unassigned1 = fixtures::IssueBuilder::new("Unassigned 1").build();
-    let unassigned2 = fixtures::IssueBuilder::new("Unassigned 2").build();
-
-    storage.create_issue(&assigned, "tester").unwrap();
-    storage.create_issue(&unassigned1, "tester").unwrap();
-    storage.create_issue(&unassigned2, "tester").unwrap();
-
-    let filters = ReadyFilters {
-        unassigned: true,
-        ..Default::default()
-    };
-
-    let ids = ready_ids(&storage, &filters, ReadySortPolicy::Oldest);
-    assert_eq!(ids.len(), 2);
-    assert!(!ids.contains(&assigned.id));
-    assert!(ids.contains(&unassigned1.id));
-    assert!(ids.contains(&unassigned2.id));
 }
 
 // ============================================================================
@@ -505,38 +447,6 @@ fn ready_sort_policy_hybrid() {
 // ============================================================================
 // COMBINED FILTER TESTS
 // ============================================================================
-
-#[test]
-fn ready_combined_assignee_and_type_filter() {
-    let mut storage = test_db();
-
-    let alice_bug = fixtures::IssueBuilder::new("Alice bug")
-        .with_assignee("alice")
-        .with_type(IssueType::Bug)
-        .build();
-    let alice_task = fixtures::IssueBuilder::new("Alice task")
-        .with_assignee("alice")
-        .with_type(IssueType::Task)
-        .build();
-    let bob_bug = fixtures::IssueBuilder::new("Bob bug")
-        .with_assignee("bob")
-        .with_type(IssueType::Bug)
-        .build();
-
-    storage.create_issue(&alice_bug, "tester").unwrap();
-    storage.create_issue(&alice_task, "tester").unwrap();
-    storage.create_issue(&bob_bug, "tester").unwrap();
-
-    let filters = ReadyFilters {
-        assignee: Some("alice".to_string()),
-        types: Some(vec![IssueType::Bug]),
-        ..Default::default()
-    };
-
-    let ids = ready_ids(&storage, &filters, ReadySortPolicy::Oldest);
-    assert_eq!(ids.len(), 1);
-    assert!(ids.contains(&alice_bug.id));
-}
 
 #[test]
 fn ready_combined_priority_and_label_filter() {

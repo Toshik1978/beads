@@ -13,27 +13,21 @@ pub struct StaleIssue {
     pub status: Status,
     pub title: String,
     pub updated_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<String>,
 }
 
 /// Minimal issue output for ready command (bd parity).
 ///
 /// Contains only the fields that bd's ready command outputs.
-/// Does NOT include: `compaction_level`, `original_size`, `dependency_count`, `dependent_count`
+/// Does NOT include: `dependency_count`, `dependent_count`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyIssue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acceptance_criteria: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<String>,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub estimated_minutes: Option<i32>,
     pub id: String,
     pub issue_type: IssueType,
     /// Labels attached to the issue.
@@ -56,11 +50,9 @@ impl From<Issue> for ReadyIssue {
     fn from(issue: Issue) -> Self {
         Self {
             acceptance_criteria: issue.acceptance_criteria,
-            assignee: issue.assignee,
             created_at: issue.created_at,
             created_by: issue.created_by,
             description: issue.description,
-            estimated_minutes: issue.estimated_minutes,
             id: issue.id,
             issue_type: issue.issue_type,
             labels: issue.labels,
@@ -77,7 +69,6 @@ impl From<Issue> for ReadyIssue {
 /// Minimal issue output for blocked command (bd parity).
 ///
 /// Contains only the fields that bd's blocked command outputs, plus `blocked_by` info.
-/// Does NOT include: `compaction_level`, `original_size`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockedIssueOutput {
     pub blocked_by: Vec<String>,
@@ -105,7 +96,6 @@ impl From<Issue> for StaleIssue {
             status: issue.status,
             title: issue.title,
             updated_at: issue.updated_at,
-            assignee: issue.assignee,
         }
     }
 }
@@ -226,35 +216,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: crate::model::IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             created_by: None,
             updated_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],

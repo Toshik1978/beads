@@ -37,35 +37,20 @@ fn make_issue(title: &str, description: Option<&str>) -> Issue {
         status: Status::Open,
         priority: Priority::MEDIUM,
         issue_type: IssueType::Task,
-        assignee: None,
         owner: None,
-        estimated_minutes: None,
         created_at: Utc::now(),
         created_by: None,
         updated_at: Utc::now(),
         closed_at: None,
         close_reason: None,
-        closed_by_session: None,
-        due_at: None,
         defer_until: None,
         external_ref: None,
-        source_system: None,
         source_repo: None,
-        source_repo_path: None,
-        agent_context: None,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         original_type: None,
         former_ids: vec![],
-        compaction_level: None,
-        compacted_at: None,
-        compacted_at_commit: None,
-        original_size: None,
-        sender: None,
-        ephemeral: false,
-        pinned: false,
-        is_template: false,
         labels: vec![],
         dependencies: vec![],
         comments: vec![],
@@ -124,13 +109,20 @@ fn length_prefixed_reference_content_hash(issue: &Issue) -> String {
     push_length_prefixed_field(&mut hasher, issue.status.as_str());
     push_length_prefixed_field(&mut hasher, &issue.priority.0.to_string());
     push_length_prefixed_field(&mut hasher, issue.issue_type.as_str());
-    push_length_prefixed_field(&mut hasher, issue.assignee.as_deref().unwrap_or(""));
+    // `assignee` no longer exists on `Issue` (bds-b4f.2.6); `content_hash` now
+    // passes a literal `None` placeholder for this slot, so the reference
+    // writer emits the same permanent placeholder.
+    push_length_prefixed_field(&mut hasher, ""); // was `assignee`
     push_length_prefixed_field(&mut hasher, issue.owner.as_deref().unwrap_or(""));
     push_length_prefixed_field(&mut hasher, issue.created_by.as_deref().unwrap_or(""));
     push_length_prefixed_field(&mut hasher, issue.external_ref.as_deref().unwrap_or(""));
-    push_length_prefixed_field(&mut hasher, issue.source_system.as_deref().unwrap_or(""));
-    push_length_prefixed_field(&mut hasher, if issue.pinned { "pinned" } else { "" });
-    push_length_prefixed_field(&mut hasher, if issue.is_template { "template" } else { "" });
+    // `source_system`, `pinned` and `is_template` no longer exist on `Issue`
+    // (bds-b4f.2.4, bds-b4f.2.2); `content_hash` now passes a literal
+    // placeholder for each slot, so the reference writer emits the same
+    // permanent placeholder.
+    push_length_prefixed_field(&mut hasher, ""); // was `source_system`
+    push_length_prefixed_field(&mut hasher, ""); // was `pinned`
+    push_length_prefixed_field(&mut hasher, ""); // was `is_template`
     push_length_prefixed_field(&mut hasher, ""); // quality_score nil
     push_length_prefixed_field(&mut hasher, ""); // crystallizes false
     push_length_prefixed_field(&mut hasher, ""); // await_type
@@ -244,13 +236,18 @@ proptest! {
             &issue.status,
             &issue.priority,
             &issue.issue_type,
-            issue.assignee.as_deref(),
+            // Mirrors the literal placeholder `content_hash` now passes for
+            // the removed `assignee` field (bds-b4f.2.6).
+            None,
             issue.owner.as_deref(),
             issue.created_by.as_deref(),
             issue.external_ref.as_deref(),
-            issue.source_system.as_deref(),
-            issue.pinned,
-            issue.is_template,
+            // Mirrors the literal placeholders `content_hash` now passes for
+            // the removed `source_system`/`pinned`/`is_template` fields
+            // (bds-b4f.2.4, bds-b4f.2.2).
+            None,
+            false,
+            false,
         );
 
         prop_assert_eq!(direct, from_parts, "Direct and from_parts should match");
@@ -284,20 +281,6 @@ proptest! {
         prop_assert_ne!(hash_p2, hash_p0, "Priority change should change hash");
     }
 
-    /// Property: Hash changes when pinned flag changes
-    #[test]
-    fn hash_changes_with_pinned(title in "\\PC{1,50}") {
-        init_test_logging();
-
-        let mut issue = make_issue(&title, None);
-        let hash_unpinned = content_hash(&issue);
-
-        issue.pinned = true;
-        let hash_pinned = content_hash(&issue);
-
-        prop_assert_ne!(hash_unpinned, hash_pinned, "Pinned change should change hash");
-    }
-
     /// Property: Hash ignores timestamp changes
     #[test]
     fn hash_ignores_timestamps(title in "\\PC{1,50}") {
@@ -324,13 +307,9 @@ proptest! {
         status in status_strategy(),
         priority in 0i32..=4,
         issue_type in issue_type_strategy(),
-        assignee in optional_text_strategy(),
         owner in optional_text_strategy(),
         created_by in optional_text_strategy(),
         external_ref in optional_text_strategy(),
-        source_system in optional_text_strategy(),
-        pinned in any::<bool>(),
-        is_template in any::<bool>(),
     ) {
         init_test_logging();
 
@@ -341,13 +320,13 @@ proptest! {
         issue.status = status;
         issue.priority = Priority(priority);
         issue.issue_type = issue_type;
-        issue.assignee = assignee;
         issue.owner = owner;
         issue.created_by = created_by;
         issue.external_ref = external_ref;
-        issue.source_system = source_system;
-        issue.pinned = pinned;
-        issue.is_template = is_template;
+        // `assignee`, `source_system`, `pinned` and `is_template` no longer
+        // exist on `Issue` (bds-b4f.2.6, bds-b4f.2.4, bds-b4f.2.2); both
+        // `content_hash` and the reference writer now emit a fixed empty
+        // placeholder for those slots, so there is nothing left to vary here.
 
         prop_assert_eq!(
             content_hash(&issue),

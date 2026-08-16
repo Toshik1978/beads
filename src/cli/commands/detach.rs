@@ -318,8 +318,7 @@ fn reorder_routed_items_by_requested_inputs<T>(
 ///
 /// Beads encodes parent relationships as dependency rows: the canonical
 /// `ParentChild` type with the child as the dependent and the parent as the
-/// `depends_on` target. This mirrors `inheritance::find_immediate_parent_id`,
-/// which is private to that module and not reusable here.
+/// `depends_on` target.
 fn current_parent(storage: &SqliteStorage, issue_id: &str) -> Result<Option<String>> {
     let deps = storage.get_dependencies_full(issue_id)?;
     Ok(deps

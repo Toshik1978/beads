@@ -169,16 +169,12 @@ br create [OPTIONS] [TITLE]
 | `-d, --description <TEXT>` | Issue description |
 | `--notes <TEXT>` | Additional notes |
 | `--acceptance-criteria <TEXT>` | Acceptance criteria (alias: `--acceptance`) |
-| `-a, --assignee <NAME>` | Assign to person |
 | `--owner <EMAIL>` | Set owner email |
 | `-l, --labels <LABELS>` | Labels (comma-separated) |
 | `--parent <ID>` | Parent issue ID (creates parent-child dependency) |
 | `--deps <DEPS>` | Dependencies (format: `type:id,type:id`) |
-| `-e, --estimate <MINUTES>` | Time estimate in minutes |
-| `--due <DATE>` | Due date (RFC3339 or relative like `+2d`, `tomorrow`) |
 | `--defer <DATE>` | Defer until date |
 | `--external-ref <REF>` | External reference (e.g., `gh-123`) |
-| `--ephemeral` | Mark as ephemeral (not exported to JSONL) |
 | `-s, --status <STATUS>` | Initial status (`open`, `deferred`, `in_progress`, `closed`) |
 | `--dry-run` | Preview without creating |
 | `--silent` | Output only issue ID |
@@ -192,11 +188,8 @@ br create "Fix login bug"
 # High-priority bug with details
 br create "Critical security issue" -t bug -p 0 -d "XSS vulnerability in form input"
 
-# Feature with assignee and labels
-br create "Add dark mode" -t feature -a alice -l "ui,enhancement"
-
-# Task with due date
-br create "Deploy to production" --due "+3d"
+# Feature with an owner and labels
+br create "Add dark mode" -t feature --owner alice -l "ui,enhancement"
 
 # Bulk import from markdown
 br create -f issues.md
@@ -217,8 +210,6 @@ br list [OPTIONS]
 |--------|-------------|
 | `-s, --status <STATUS>` | Filter by status (can repeat) |
 | `-t, --type <TYPE>` | Filter by issue type (can repeat) |
-| `--assignee <NAME>` | Filter by assignee |
-| `--unassigned` | Show only unassigned issues |
 | `--id <ID>` | Filter by specific IDs (can repeat) |
 | `-l, --label <LABEL>` | Filter by label (AND logic, can repeat) |
 | `--label-any <LABEL>` | Filter by label (OR logic, can repeat) |
@@ -230,7 +221,6 @@ br list [OPTIONS]
 | `--notes-contains <TEXT>` | Notes contains substring |
 | `-a, --all` | Include closed issues |
 | `--deferred` | Include deferred issues |
-| `--overdue` | Filter for overdue issues |
 
 **Exclusion Options** (also on `br search` and `br ready`):
 | Option | Description |
@@ -246,8 +236,8 @@ this is the opposite of `--label`, which ANDs. Exclusions compose with the
 positive form of the same field, so `--label urgent --exclude-label wontfix`
 narrows twice.
 
-There is no `--no-assignee`: `--unassigned` already is that filter on all three
-commands, and a second spelling would be a synonym to keep working forever.
+There is no `--no-assignee` or `--unassigned`: `assignee` and its whole query
+surface were removed from `Issue`.
 
 `--no-parent` asks about the `parent-child` dependency row, which is where
 parenthood is recorded — not about the shape of the ID, which is a consequence of
@@ -259,7 +249,6 @@ it.
 | `--created-after <WHEN>` / `--created-before <WHEN>` | Bound on `created_at` |
 | `--updated-after <WHEN>` / `--updated-before <WHEN>` | Bound on `updated_at` |
 | `--closed-after <WHEN>` / `--closed-before <WHEN>` | Bound on `closed_at`; implies `--all` |
-| `--due-after <WHEN>` / `--due-before <WHEN>` | Bound on `due_at` |
 | `--defer-after <WHEN>` / `--defer-before <WHEN>` | Bound on `defer_until` |
 
 `<WHEN>` accepts a timestamp (`2026-03-01T09:00:00Z`), a bare date
@@ -271,7 +260,7 @@ start of it for `--*-after`, the last instant for `--*-before` — so
 `--created-after 2026-03-01 --created-before 2026-03-01` means "created on the
 1st". A timestamp given explicitly is used exactly as given.
 
-`closed_at`, `due_at` and `defer_until` are nullable, and **a row with no value
+`closed_at` and `defer_until` are nullable, and **a row with no value
 in the column never matches a bound on it**: "closed in the last week" does not
 include issues that are still open. Because a `closed_at` bound can only ever be
 satisfied by a closed issue, `--closed-after`/`--closed-before` turn on `--all`
@@ -279,7 +268,7 @@ for you rather than returning an empty list.
 
 Write a backwards offset attached with `=` — `--updated-after=-7d`. With a space
 the shell hands `-7d` to clap, which reads it as flags. This is the same
-convention `--sort=-updated` and `--due=-7d` already follow.
+convention `--sort=-updated` and `--defer=-7d` already follow.
 
 ```bash
 # Everything touched since last Monday, newest first
@@ -288,8 +277,8 @@ br list --updated-after=-7d --sort=-updated
 # What got closed yesterday
 br list --closed-after yesterday --closed-before yesterday
 
-# Overdue work that was filed this quarter
-br list --due-before today --created-after 2026-01-01
+# Deferred work that was filed this quarter
+br list --defer-before today --created-after 2026-01-01
 ```
 
 **Output Options:**
@@ -317,7 +306,6 @@ br list --due-before today --created-after 2026-01-01
 | `priority` | ascending — critical first |
 | `status` | ascending — open, in_progress, blocked, deferred, draft, closed, tombstone, pinned, then custom |
 | `type` | ascending — task, bug, feature, epic, chore, docs, question, then custom |
-| `assignee` | ascending — A-Z, unassigned always last |
 | `title` | ascending — A-Z, case-insensitive |
 | `created_at` (`created`) | descending — newest first |
 | `updated_at` (`updated`) | descending — newest first |
@@ -361,9 +349,6 @@ br list
 
 # High-priority bugs
 br list -t bug -p 0 -p 1
-
-# My assigned work
-br list --assignee $(whoami)
 
 # Export to CSV
 br list --format csv --fields id,title,status,priority > issues.csv
@@ -423,28 +408,19 @@ br update [OPTIONS] [IDS]...
 | `-s, --status <STATUS>` | Change status |
 | `-p, --priority <N>` | Change priority |
 | `-t, --type <TYPE>` | Change issue type |
-| `--assignee <NAME>` | Assign (empty string clears) |
 | `--owner <EMAIL>` | Set owner (empty string clears) |
-| `--claim` | Atomic claim (assignee=actor + status=in_progress) |
 | `--if-status <STATUS>` | Compare-and-set guard: apply only while the status is still this |
-| `--if-assignee <NAME>` | Compare-and-set guard on the assignee; `""` means "still unassigned" |
 | `--force` | Force update even if issue is blocked |
-| `--due <DATE>` | Set due date (empty string clears) |
 | `--defer <DATE>` | Set defer date (empty string clears) |
-| `--estimate <MINUTES>` | Set time estimate |
 | `--add-label <LABEL>` | Add label(s) |
 | `--remove-label <LABEL>` | Remove label(s) |
 | `--set-labels <LABELS>` | Replace all labels |
 | `--parent <ID>` | Reparent (empty string removes) |
 | `--external-ref <REF>` | Set external reference |
-| `--session <ID>` | Set `closed_by_session` when closing |
 
 **Examples:**
 ```bash
-# Claim a task
-br update bd-abc123 --claim
-
-# Change status
+# Claim a task (claiming is assigning: move it to in_progress)
 br update bd-abc123 -s in_progress
 
 # Update multiple issues
@@ -454,21 +430,20 @@ br update bd-abc123 bd-def456 -p 1
 br update bd-abc123 --add-label "urgent,reviewed"
 ```
 
-**Compare-and-set guards.** `--if-status` and `--if-assignee` make an update
-conditional on the value the issue still holds. The guard is evaluated inside
-the same write transaction as the update, so two agents racing the same
-transition produce exactly one winner — no read-then-write race:
+**Compare-and-set guard.** `--if-status` makes an update conditional on the
+status the issue still holds. The guard is evaluated inside the same write
+transaction as the update, so two agents racing the same transition produce
+exactly one winner — no read-then-write race:
 
 ```bash
 # Take this only if nobody else has moved it yet
-br update bd-abc123 -s in_progress --if-status open --if-assignee ""
+br update bd-abc123 -s in_progress --if-status open
 ```
 
-Both guards compose with each other and with `--claim`. When a guard does not
-hold, nothing is written — not the fields, not `updated_at`, not a
-`--transition-comment` — and the command exits **4** with error code
-`PRECONDITION_FAILED`, whose `context` names the field, the value expected and
-the value found. That exit code is deliberately not `3`: `3` is
+When the guard does not hold, nothing is written — not the fields, not
+`updated_at`, not a `--transition-comment` — and the command exits **4** with
+error code `PRECONDITION_FAILED`, whose `context` names the field, the value
+expected and the value found. That exit code is deliberately not `3`: `3` is
 `ISSUE_NOT_FOUND`, and a caller retrying a guarded update has to be able to tell
 "someone got there first" (re-read and decide) from "there is nothing to update"
 (stop).
@@ -496,7 +471,6 @@ br close [OPTIONS] [IDS]...
 | `-f, --force` | Close even if blocked by open dependencies |
 | `--continue` | Keep going past a per-issue failure, and make the exit code report the outcome (see below) |
 | `--suggest-next` | Return newly unblocked issues |
-| `--session <ID>` | Session ID for tracking |
 
 **`--continue` and the exit code.** By default one unresolvable ID fails the whole
 command before any issue is touched. `--continue` turns that into a recorded skip
@@ -587,8 +561,6 @@ br ready [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--limit <N>` | Maximum results (0=unlimited; default: unlimited — the full ready set). Pass `--limit N` to cap. |
-| `--assignee <NAME>` | Filter by assignee |
-| `--unassigned` | Show only unassigned |
 | `-l, --label <LABEL>` | Filter by label (AND logic) |
 | `--label-any <LABEL>` | Filter by label (OR logic) |
 | `-t, --type <TYPE>` | Filter by type |
@@ -603,11 +575,8 @@ br ready [OPTIONS]
 
 **Examples:**
 ```bash
-# My ready work
-br ready --assignee $(whoami)
-
-# Unassigned high-priority
-br ready --unassigned -p 0 -p 1
+# High-priority ready work
+br ready -p 0 -p 1
 
 # JSON for agent integration
 br ready --json --limit 10
@@ -700,7 +669,7 @@ workflow:
   `update` wraps its normal array as `{updated, warnings}` and `create` as
   `{created, warnings}`; commands that already return an object add `warnings`
   to that object. The wrapper is never introduced below the soft threshold.
-- Multi-target `update`/`--claim`, `close`, `reopen`, `defer`, and `undefer`
+- Multi-target `update`, `close`, `reopen`, `defer`, and `undefer`
   commands evaluate the repository's final prospective state and commit all
   status changes in one transaction. Hard-limit and late validation failures
   roll back the entire repository-local batch; capacity-neutral swaps do not
@@ -711,8 +680,8 @@ workflow:
   intentionally not claimed.
 - Omitting `workflow.capacity` preserves existing behavior exactly.
 - The current enforcement layer has fixed `repository` scope and `all`
-  counting. Hierarchy-aware counting, audited exemptions, actor/assignee/
-  harness/session/subtree scopes, and capacity observability are later phases
+  counting. Hierarchy-aware counting, audited exemptions, actor/harness/
+  session/subtree scopes, and capacity observability are later phases
   tracked in GitHub issue #384.
 
 ---
@@ -767,7 +736,7 @@ whether matches were dropped.
 br search "authentication"
 
 # Search with filters
-br search "bug" -t bug --assignee alice
+br search "bug" -t bug -p 0
 ```
 
 ---
@@ -787,10 +756,10 @@ br stale [OPTIONS]
 | `--status <STATUS>` | Filter by status (repeatable or comma-separated) |
 | `--limit <N>` | Maximum results (0 = unlimited, the default). Output is stalest-first, so a limit keeps the worst offenders |
 
-**Abandoned in-progress claims:**
+**Abandoned in-progress work:**
 
 `br ready` does not show `in_progress` issues. To audit hidden work, combine
-`stale` with an explicit in-progress listing and inspect the claim evidence:
+`stale` with an explicit in-progress listing and inspect the evidence:
 
 ```bash
 br stale --days 1 --json
@@ -799,23 +768,23 @@ br show <id> --json
 br comments list <id> --json
 ```
 
-An `in_progress` issue is a reclaim candidate when `updated_at` is old, the
-assignee or session metadata no longer points to an active worker, and recent
-comments or Agent Mail reservations do not show live work. Default thresholds
-are two hours for automated swarm claims and one business day for human or
-unclear claims.
+An `in_progress` issue is a reclaim candidate when `updated_at` is old and
+session metadata no longer points to an active worker, and recent comments or
+Agent Mail reservations do not show live work. Default thresholds are two
+hours for automated swarm claims and one business day for human or unclear
+claims.
 
-Before reclaiming, add an audit comment with the evidence, then claim:
+Before reclaiming, add an audit comment with the evidence, then move it back:
 
 ```bash
 br comments add <id> --author "$BD_ACTOR" \
-  --message "reclaim: previous in_progress claim appears abandoned; evidence: updated_at=<timestamp>, assignee=<name>, no active reservation or pane" \
+  --message "reclaim: previous in_progress work appears abandoned; evidence: updated_at=<timestamp>, no active reservation or pane" \
   --json
-br update <id> --claim --json
+br update <id> --status open --json
 ```
 
-There is not a separate reclaim command; the audit comment plus `update --claim`
-is the documented recovery workflow.
+There is not a separate reclaim command; the audit comment plus `update
+--status open` is the documented recovery workflow.
 
 ---
 
@@ -1216,7 +1185,6 @@ br stats [OPTIONS]
 |--------|-------------|
 | `--by-type` | Show breakdown by issue type |
 | `--by-priority` | Show breakdown by priority |
-| `--by-assignee` | Show breakdown by assignee |
 | `--by-label` | Show breakdown by label |
 | `--activity` | Include recent activity stats explicitly |
 | `--no-activity` | Skip recent activity stats |
@@ -1370,17 +1338,13 @@ unlimited command reports `"limit": 0` and `"has_more": false`.
   "status": "open",
   "priority": 2,
   "issue_type": "task",
-  "assignee": "alice",
   "owner": "owner@example.com",
   "created_at": "2025-01-15T10:30:00Z",
   "created_by": "bob",
   "updated_at": "2025-01-16T14:20:00Z",
   "close_reason": "",
-  "closed_by_session": "",
-  "source_system": "",
   "deleted_by": "",
   "delete_reason": "",
-  "sender": "",
   "dependency_count": 0,
   "dependent_count": 3
 }

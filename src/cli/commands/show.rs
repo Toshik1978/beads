@@ -237,48 +237,9 @@ fn execute_inner(
             ctx.json_array(details_list.iter());
         }
         crate::cli::OutputFormat::Text | crate::cli::OutputFormat::Csv => {
-            // beads#297: emit inherited governing context for each
-            // bead before its own details, when the project has opted
-            // in. Prefer the caller's preloaded storage; fall back to
-            // opening a transient read connection so the feature works
-            // from both `br show` and `br show --workspace …` paths.
-            // Failure to open is non-fatal — the alternative would be
-            // failing the entire show over an optional feature.
-            let inheritance_enabled = crate::inheritance::is_enabled(beads_dir);
-            let transient_ctx = if inheritance_enabled
-                && preloaded_storage.is_none()
-                && preloaded_storage_ctx.is_none()
-            {
-                config::open_storage_with_cli(beads_dir, cli).ok()
-            } else {
-                None
-            };
-            let inheritance_storage: Option<&SqliteStorage> = preloaded_storage
-                .or_else(|| preloaded_storage_ctx.map(|ctx| &ctx.storage))
-                .or_else(|| transient_ctx.as_ref().map(|ctx| &ctx.storage));
-            // beads#351: when showing several siblings, each child's
-            // ancestor chain resolves independently, so the same epic/parent
-            // block would be re-rendered once per sibling. Dedup across the
-            // whole invocation: each inherited source is emitted exactly
-            // once, before the first child that references it.
-            let mut emitted_sources: HashSet<String> = HashSet::new();
             for (i, details) in details_list.iter().enumerate() {
                 if i > 0 {
                     println!(); // Separate multiple issues
-                }
-                if inheritance_enabled
-                    && let Some(storage) = inheritance_storage
-                    && let Ok(mut blocks) =
-                        crate::inheritance::collect_inherited_blocks(storage, &details.issue.id)
-                {
-                    blocks.retain(|block| emitted_sources.insert(block.source_id.clone()));
-                    if !blocks.is_empty() {
-                        let rendered = crate::inheritance::render_text(&blocks);
-                        print!("{rendered}");
-                        if !rendered.ends_with('\n') {
-                            println!();
-                        }
-                    }
                 }
                 if matches!(ctx.mode(), OutputMode::Rich) {
                     let panel = IssuePanel::from_details(details, ctx.theme());
@@ -1156,10 +1117,6 @@ fn format_issue_details(details: &IssueDetails, use_color: bool, wrap: bool) -> 
         to_local(issue.updated_at).format("%Y-%m-%d")
     );
 
-    if let Some(assignee) = &issue.assignee {
-        let _ = writeln!(output, "Assignee: {}", sanitize_terminal_inline(assignee));
-    }
-
     if !details.labels.is_empty() {
         let labels = details
             .labels
@@ -1176,30 +1133,12 @@ fn format_issue_details(details: &IssueDetails, use_color: bool, wrap: bool) -> 
         let _ = writeln!(output, "Ref: {}", sanitize_terminal_inline(ext_ref));
     }
 
-    if let Some(due) = &issue.due_at {
-        let _ = writeln!(output, "Due: {}", to_local(*due).format("%Y-%m-%d"));
-    }
-
     if let Some(defer) = &issue.defer_until {
         let _ = writeln!(
             output,
             "Deferred until: {}",
             to_local(*defer).format("%Y-%m-%d")
         );
-    }
-
-    if let Some(minutes) = issue.estimated_minutes
-        && minutes > 0
-    {
-        let hours = minutes / 60;
-        let remaining = minutes % 60;
-        if hours > 0 && remaining > 0 {
-            let _ = writeln!(output, "Estimate: {hours}h {remaining}m");
-        } else if hours > 0 {
-            let _ = writeln!(output, "Estimate: {hours}h");
-        } else {
-            let _ = writeln!(output, "Estimate: {remaining}m");
-        }
     }
 
     if let Some(closed) = &issue.closed_at {
@@ -1339,9 +1278,7 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
             owner: Some("OWNER-MARKER".to_string()),
             external_ref: Some("REF-MARKER".to_string()),
-            due_at: Some(Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap()),
             defer_until: Some(Utc.with_ymd_and_hms(2029, 6, 1, 0, 0, 0).unwrap()),
-            estimated_minutes: Some(90),
             closed_at: Some(Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap()),
             close_reason: Some("CLOSE-REASON-MARKER".to_string()),
             design: Some("DESIGN-MARKER".to_string()),
@@ -1359,7 +1296,7 @@ mod tests {
             .collect();
         assert_eq!(
             rows.len(),
-            6,
+            4,
             "the fixture must populate every metadata row, or this proves less than it claims"
         );
         assert_eq!(sections.len(), 3, "the fixture must populate every section");
@@ -1411,35 +1348,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             created_by: None,
             updated_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],

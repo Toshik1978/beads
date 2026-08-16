@@ -975,3 +975,30 @@ fn deferred_issue_serializes_defer_until_into_jsonl() {
         "a hard-deferred issue must serialize status=deferred. Got: {line}"
     );
 }
+
+/// `defer_until` must keep working after `due_at` (its neighbour in both the
+/// struct and the argument list) was removed from `Issue` (bds-b4f.2.3).
+#[test]
+fn defer_survives_the_due_date_removal() {
+    common::init_test_logging();
+    info!("defer_survives_the_due_date_removal: starting");
+    let (workspace, id) = setup_workspace_with_issue();
+
+    let update = run_br(
+        &workspace,
+        ["update", &id, "--defer", "2030-01-01T00:00:00Z"],
+        "defer_survives_the_due_date_removal",
+    );
+    assert!(update.status.success(), "update failed: {}", update.stderr);
+
+    let show = run_br(&workspace, ["show", &id, "--json"], "show");
+    assert!(show.status.success());
+    let payload = extract_json_payload(&show.stdout);
+    let issues: Value = serde_json::from_str(&payload).expect("valid json");
+
+    assert!(
+        issues[0].get("defer_until").is_some(),
+        "defer_until must survive the removal of due_at: {payload}"
+    );
+    info!("defer_survives_the_due_date_removal: assertions passed");
+}

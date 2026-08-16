@@ -62,7 +62,7 @@ fn setup_workspace_with_issues() -> (BrWorkspace, Vec<String>) {
 
     let mut ids = Vec::new();
 
-    // Issue 1: High priority task assigned to alice with "backend" label
+    // Issue 1: High priority task with "backend" label
     let issue1 = run_br(
         &workspace,
         ["create", "Backend API", "-p", "1", "-t", "task"],
@@ -72,19 +72,12 @@ fn setup_workspace_with_issues() -> (BrWorkspace, Vec<String>) {
     let id1 = parse_created_id(&issue1.stdout);
     run_br(
         &workspace,
-        [
-            "update",
-            &id1,
-            "--assignee",
-            "alice",
-            "--add-label",
-            "backend",
-        ],
+        ["update", &id1, "--add-label", "backend"],
         "update_issue1",
     );
     ids.push(id1);
 
-    // Issue 2: Medium priority bug assigned to bob with "frontend" label
+    // Issue 2: Medium priority bug with "frontend" label
     let issue2 = run_br(
         &workspace,
         ["create", "Frontend Bug", "-p", "2", "-t", "bug"],
@@ -94,19 +87,12 @@ fn setup_workspace_with_issues() -> (BrWorkspace, Vec<String>) {
     let id2 = parse_created_id(&issue2.stdout);
     run_br(
         &workspace,
-        [
-            "update",
-            &id2,
-            "--assignee",
-            "bob",
-            "--add-label",
-            "frontend",
-        ],
+        ["update", &id2, "--add-label", "frontend"],
         "update_issue2",
     );
     ids.push(id2);
 
-    // Issue 3: Low priority feature unassigned with "backend" and "api" labels
+    // Issue 3: Low priority feature with "backend" and "api" labels
     let issue3 = run_br(
         &workspace,
         ["create", "New Feature", "-p", "3", "-t", "feature"],
@@ -128,7 +114,7 @@ fn setup_workspace_with_issues() -> (BrWorkspace, Vec<String>) {
     );
     ids.push(id3);
 
-    // Issue 4: Critical task unassigned with "urgent" label
+    // Issue 4: Critical task with "urgent" label
     let issue4 = run_br(
         &workspace,
         ["create", "Critical Fix", "-p", "0", "-t", "task"],
@@ -143,7 +129,7 @@ fn setup_workspace_with_issues() -> (BrWorkspace, Vec<String>) {
     );
     ids.push(id4);
 
-    // Issue 5: Backlog task assigned to alice
+    // Issue 5: Backlog task
     let issue5 = run_br(
         &workspace,
         ["create", "Backlog Item", "-p", "4", "-t", "task"],
@@ -151,11 +137,6 @@ fn setup_workspace_with_issues() -> (BrWorkspace, Vec<String>) {
     );
     assert!(issue5.status.success());
     let id5 = parse_created_id(&issue5.stdout);
-    run_br(
-        &workspace,
-        ["update", &id5, "--assignee", "alice"],
-        "update_issue5",
-    );
     ids.push(id5);
 
     (workspace, ids)
@@ -259,65 +240,6 @@ fn ready_cli_text_reports_no_ready_issues_when_work_exists() {
         !result.stdout.contains("No open issues"),
         "ready text should not claim there are no open issues when work is in progress: {}",
         result.stdout
-    );
-}
-
-#[test]
-fn ready_cli_filters_by_assignee() {
-    let _log = common::test_log("ready_cli_filters_by_assignee");
-    let (workspace, ids) = setup_workspace_with_issues();
-
-    let result = run_br(
-        &workspace,
-        ["ready", "--assignee", "alice", "--json"],
-        "ready_assignee",
-    );
-    assert!(result.status.success(), "ready failed: {}", result.stderr);
-
-    let issues = parse_issue_page_issues(&result.stdout);
-
-    // Should have alice's issues: issue 1 and issue 5
-    assert_eq!(issues.len(), 2);
-    assert!(
-        issues
-            .iter()
-            .map(|i| i["id"].as_str().unwrap())
-            .any(|id| id == ids[0].as_str())
-    ); // Backend API
-    assert!(
-        issues
-            .iter()
-            .map(|i| i["id"].as_str().unwrap())
-            .any(|id| id == ids[4].as_str())
-    ); // Backlog Item
-}
-
-#[test]
-fn ready_cli_assignee_flag_without_value_uses_actor() {
-    let _log = common::test_log("ready_cli_assignee_flag_without_value_uses_actor");
-    let (workspace, ids) = setup_workspace_with_issues();
-
-    let result = run_br(
-        &workspace,
-        ["--actor", "alice", "ready", "--assignee", "--json"],
-        "ready_assignee_actor_default",
-    );
-    assert!(result.status.success(), "ready failed: {}", result.stderr);
-
-    let issues = parse_issue_page_issues(&result.stdout);
-
-    assert_eq!(issues.len(), 2);
-    assert!(
-        issues
-            .iter()
-            .map(|i| i["id"].as_str().unwrap())
-            .any(|id| id == ids[0].as_str())
-    );
-    assert!(
-        issues
-            .iter()
-            .map(|i| i["id"].as_str().unwrap())
-            .any(|id| id == ids[4].as_str())
     );
 }
 
@@ -555,36 +477,6 @@ fn ready_imports_stale_external_jsonl_before_status_probe() {
 }
 
 #[test]
-fn ready_cli_filters_unassigned_only() {
-    let _log = common::test_log("ready_cli_filters_unassigned_only");
-    let (workspace, ids) = setup_workspace_with_issues();
-
-    let result = run_br(
-        &workspace,
-        ["ready", "--unassigned", "--json"],
-        "ready_unassigned",
-    );
-    assert!(result.status.success(), "ready failed: {}", result.stderr);
-
-    let issues = parse_issue_page_issues(&result.stdout);
-
-    // Should have unassigned issues: issue 3 and issue 4
-    assert_eq!(issues.len(), 2);
-    assert!(
-        issues
-            .iter()
-            .map(|i| i["id"].as_str().unwrap())
-            .any(|id| id == ids[2].as_str())
-    ); // New Feature
-    assert!(
-        issues
-            .iter()
-            .map(|i| i["id"].as_str().unwrap())
-            .any(|id| id == ids[3].as_str())
-    ); // Critical Fix
-}
-
-#[test]
 fn ready_cli_filters_by_type() {
     let _log = common::test_log("ready_cli_filters_by_type");
     let (workspace, _ids) = setup_workspace_with_issues();
@@ -670,6 +562,91 @@ fn ready_cli_filters_by_multiple_priorities() {
         let priority = issue["priority"].as_u64().unwrap();
         assert!(priority == 0 || priority == 1);
     }
+}
+
+/// Regression for the CLI -> `ReadyFilters` mapping combining two *different*
+/// filter dimensions at once (`--type` and `--priority`). Every other
+/// combined-filter test in this file repeats a single dimension
+/// (`--type task --type bug`, `--priority 0 --priority 1`, `--label backend
+/// --label api`); storage-level composition already has coverage
+/// (`ready_combined_priority_and_label_filter`), but nothing end to end
+/// pinned that the CLI actually passes both a type and a priority filter
+/// through together. Uses a dedicated four-issue fixture — one issue in
+/// every combination of {task, bug} x {P0, P1} — so that the combined result
+/// differs from *either* single-dimension result: dropping the type half of
+/// the mapping leaves the P0 filter matching both P0 issues, and dropping
+/// the priority half leaves the task filter matching both task issues.
+#[test]
+fn ready_cli_filters_by_type_and_priority() {
+    let _log = common::test_log("ready_cli_filters_by_type_and_priority");
+    let workspace = BrWorkspace::new();
+
+    let init = run_br(&workspace, ["init"], "init");
+    assert!(init.status.success(), "init failed: {}", init.stderr);
+
+    let matching = run_br(
+        &workspace,
+        ["create", "Task P0", "-p", "0", "-t", "task"],
+        "create_matching",
+    );
+    assert!(
+        matching.status.success(),
+        "create failed: {}",
+        matching.stderr
+    );
+    let matching_id = parse_created_id(&matching.stdout);
+
+    let wrong_priority = run_br(
+        &workspace,
+        ["create", "Task P1", "-p", "1", "-t", "task"],
+        "create_wrong_priority",
+    );
+    assert!(
+        wrong_priority.status.success(),
+        "create failed: {}",
+        wrong_priority.stderr
+    );
+
+    let wrong_type = run_br(
+        &workspace,
+        ["create", "Bug P0", "-p", "0", "-t", "bug"],
+        "create_wrong_type",
+    );
+    assert!(
+        wrong_type.status.success(),
+        "create failed: {}",
+        wrong_type.stderr
+    );
+
+    let neither = run_br(
+        &workspace,
+        ["create", "Bug P1", "-p", "1", "-t", "bug"],
+        "create_neither",
+    );
+    assert!(
+        neither.status.success(),
+        "create failed: {}",
+        neither.stderr
+    );
+
+    let result = run_br(
+        &workspace,
+        ["ready", "--type", "task", "--priority", "0", "--json"],
+        "ready_type_and_priority",
+    );
+    assert!(result.status.success(), "ready failed: {}", result.stderr);
+
+    let issues = parse_issue_page_issues(&result.stdout);
+
+    // Only the task+P0 issue satisfies both filters at once.
+    assert_eq!(
+        issues.len(),
+        1,
+        "expected exactly one issue matching both filters together: {issues:?}"
+    );
+    assert_eq!(issues[0]["id"].as_str().unwrap(), matching_id);
+    assert_eq!(issues[0]["issue_type"], "task");
+    assert_eq!(issues[0]["priority"].as_u64().unwrap(), 0);
 }
 
 #[test]
@@ -802,37 +779,6 @@ fn ready_cli_sort_priority() {
     assert_eq!(issues[0]["id"].as_str().unwrap(), ids[3]);
     // Second should be P1 (Backend API - ids[0])
     assert_eq!(issues[1]["id"].as_str().unwrap(), ids[0]);
-}
-
-#[test]
-fn ready_cli_combined_filters() {
-    let _log = common::test_log("ready_cli_combined_filters");
-    let (workspace, ids) = setup_workspace_with_issues();
-
-    // Filter by assignee "alice" AND type "task"
-    let result = run_br(
-        &workspace,
-        ["ready", "--assignee", "alice", "--type", "task", "--json"],
-        "ready_combined",
-    );
-    assert!(result.status.success(), "ready failed: {}", result.stderr);
-
-    let issues = parse_issue_page_issues(&result.stdout);
-
-    // Should have issue 1 and issue 5 (both alice's tasks)
-    assert_eq!(issues.len(), 2);
-    assert!(
-        issues
-            .iter()
-            .map(|i| i["id"].as_str().unwrap())
-            .any(|id| id == ids[0].as_str())
-    );
-    assert!(
-        issues
-            .iter()
-            .map(|i| i["id"].as_str().unwrap())
-            .any(|id| id == ids[4].as_str())
-    );
 }
 
 #[test]

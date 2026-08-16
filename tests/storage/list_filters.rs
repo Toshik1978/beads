@@ -4,7 +4,6 @@
 //! - Status filters (open, closed, `in_progress`)
 //! - Priority filters (P0-P4)
 //! - Type filters (bug, feature, task)
-//! - Assignee/unassigned filters
 //! - Title contains filter
 //! - Limit filter
 //! - Include closed filter
@@ -372,90 +371,6 @@ fn filter_by_all_issue_types() {
 }
 
 // ============================================================================
-// ASSIGNEE FILTER TESTS
-// ============================================================================
-
-#[test]
-fn filter_by_specific_assignee() {
-    let mut storage = test_db();
-
-    let alice_issue = IssueBuilder::new("assignee-alice")
-        .with_assignee("alice")
-        .build();
-    let bob_issue = IssueBuilder::new("assignee-bob")
-        .with_assignee("bob")
-        .build();
-    let unassigned_issue = IssueBuilder::new("assignee-none").build();
-
-    storage.create_issue(&alice_issue, "tester").unwrap();
-    storage.create_issue(&bob_issue, "tester").unwrap();
-    storage.create_issue(&unassigned_issue, "tester").unwrap();
-
-    let filters = ListFilters {
-        assignee: Some("alice".to_string()),
-        ..Default::default()
-    };
-
-    let results = storage.list_issues(&filters).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, alice_issue.id);
-    assert_eq!(results[0].assignee, Some("alice".to_string()));
-}
-
-#[test]
-fn filter_by_unassigned() {
-    let mut storage = test_db();
-
-    let assigned_issue = IssueBuilder::new("unassigned-test-assigned")
-        .with_assignee("someone")
-        .build();
-    let unassigned_issue1 = IssueBuilder::new("unassigned-test-1").build();
-    let unassigned_issue2 = IssueBuilder::new("unassigned-test-2").build();
-
-    storage.create_issue(&assigned_issue, "tester").unwrap();
-    storage.create_issue(&unassigned_issue1, "tester").unwrap();
-    storage.create_issue(&unassigned_issue2, "tester").unwrap();
-
-    let filters = ListFilters {
-        unassigned: true,
-        ..Default::default()
-    };
-
-    let results = storage.list_issues(&filters).unwrap();
-    assert_eq!(results.len(), 2);
-
-    for issue in &results {
-        assert!(issue.assignee.is_none());
-    }
-}
-
-#[test]
-fn assignee_filter_is_case_sensitive() {
-    let mut storage = test_db();
-
-    let issue = IssueBuilder::new("case-sensitive-assignee")
-        .with_assignee("Alice")
-        .build();
-    storage.create_issue(&issue, "tester").unwrap();
-
-    // Lowercase should not match
-    let filters_lowercase = ListFilters {
-        assignee: Some("alice".to_string()),
-        ..Default::default()
-    };
-    let results = storage.list_issues(&filters_lowercase).unwrap();
-    assert_eq!(results.len(), 0);
-
-    // Exact case should match
-    let filters_exact = ListFilters {
-        assignee: Some("Alice".to_string()),
-        ..Default::default()
-    };
-    let results = storage.list_issues(&filters_exact).unwrap();
-    assert_eq!(results.len(), 1);
-}
-
-// ============================================================================
 // TITLE CONTAINS FILTER TESTS
 // ============================================================================
 
@@ -694,50 +609,13 @@ fn tombstone_excluded_by_default() {
     assert_eq!(results[0].id, active_issue.id);
 }
 
-// ============================================================================
-// INCLUDE_TEMPLATES FILTER TESTS
-// ============================================================================
-
-#[test]
-fn default_excludes_templates() {
-    let mut storage = test_db();
-
-    let regular_issue = IssueBuilder::new("template-regular").build();
-    let template_issue = IssueBuilder::new("template-template")
-        .with_template()
-        .build();
-
-    storage.create_issue(&regular_issue, "tester").unwrap();
-    storage.create_issue(&template_issue, "tester").unwrap();
-
-    // Default filters (include_templates = false)
-    let filters = ListFilters::default();
-
-    let results = storage.list_issues(&filters).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, regular_issue.id);
-}
-
-#[test]
-fn include_templates_returns_all() {
-    let mut storage = test_db();
-
-    let regular_issue = IssueBuilder::new("include-tpl-regular").build();
-    let template_issue = IssueBuilder::new("include-tpl-template")
-        .with_template()
-        .build();
-
-    storage.create_issue(&regular_issue, "tester").unwrap();
-    storage.create_issue(&template_issue, "tester").unwrap();
-
-    let filters = ListFilters {
-        include_templates: true,
-        ..Default::default()
-    };
-
-    let results = storage.list_issues(&filters).unwrap();
-    assert_eq!(results.len(), 2);
-}
+// The INCLUDE_TEMPLATES filter tests that used to live here relied on
+// `IssueBuilder::with_template()`, which set `Issue.is_template`. That field
+// was removed in bds-b4f.2.2: `is_template` was never populated through any
+// live write path, and with it gone there is no longer a public API that can
+// construct an `is_template = true` row to filter on. `ListFilters
+// ::include_templates` and its SQL predicates are unaffected and still
+// compile; there is simply nothing left that can make a row match them.
 
 // ============================================================================
 // COMBINED FILTER TESTS
@@ -774,39 +652,6 @@ fn combined_status_and_priority_filters() {
     let results = storage.list_issues(&filters).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, open_p0.id);
-}
-
-#[test]
-fn combined_type_and_assignee_filters() {
-    let mut storage = test_db();
-
-    let bug_alice = IssueBuilder::new("combined-bug-alice")
-        .with_type(IssueType::Bug)
-        .with_assignee("alice")
-        .build();
-    let bug_bob = IssueBuilder::new("combined-bug-bob")
-        .with_type(IssueType::Bug)
-        .with_assignee("bob")
-        .build();
-    let feature_alice = IssueBuilder::new("combined-feature-alice")
-        .with_type(IssueType::Feature)
-        .with_assignee("alice")
-        .build();
-
-    storage.create_issue(&bug_alice, "tester").unwrap();
-    storage.create_issue(&bug_bob, "tester").unwrap();
-    storage.create_issue(&feature_alice, "tester").unwrap();
-
-    // Filter for bugs assigned to alice
-    let filters = ListFilters {
-        types: Some(vec![IssueType::Bug]),
-        assignee: Some("alice".to_string()),
-        ..Default::default()
-    };
-
-    let results = storage.list_issues(&filters).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, bug_alice.id);
 }
 
 #[test]

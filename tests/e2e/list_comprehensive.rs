@@ -6,11 +6,10 @@
 //! - Type filtering (--type)
 //! - Priority filtering (--priority, --priority-min, --priority-max)
 //! - Label filtering (--label AND, --label-any OR)
-//! - Assignee filtering (--assignee, --unassigned)
 //! - Text search (--title-contains, --desc-contains)
 //! - Sorting (--sort, --reverse)
 //! - Limiting (--limit)
-//! - Deferred and overdue filtering (--deferred, --overdue)
+//! - Deferred filtering (--deferred)
 //! - Output format variations (--long, --pretty)
 
 // `common` is now the `test-support` crate; aliased so that the 753
@@ -54,7 +53,7 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
     );
     ids.push(id1);
 
-    // Issue 2: Open bug, P0, labeled "urgent", assigned to "alice"
+    // Issue 2: Open bug, P0, labeled "urgent"
     let issue2 = run_br(
         &workspace,
         ["create", "Critical bug", "-t", "bug", "-p", "0"],
@@ -64,19 +63,12 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
     let id2 = parse_created_id(&issue2.stdout);
     run_br(
         &workspace,
-        [
-            "update",
-            &id2,
-            "--add-label",
-            "urgent",
-            "--assignee",
-            "alice",
-        ],
+        ["update", &id2, "--add-label", "urgent"],
         "update_bug1",
     );
     ids.push(id2);
 
-    // Issue 3: Open feature, P2, labeled "core" and "frontend", assigned to "bob"
+    // Issue 3: Open feature, P2, labeled "core" and "frontend"
     let issue3 = run_br(
         &workspace,
         ["create", "New feature", "-t", "feature", "-p", "2"],
@@ -93,8 +85,6 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
             "core",
             "--add-label",
             "frontend",
-            "--assignee",
-            "bob",
         ],
         "update_feature1",
     );
@@ -602,55 +592,6 @@ fn e2e_list_label_filter_or() {
 }
 
 // =============================================================================
-// ASSIGNEE FILTERING TESTS
-// =============================================================================
-
-#[test]
-fn e2e_list_assignee_filter() {
-    let _log = common::test_log("e2e_list_assignee_filter");
-    let (workspace, ids) = setup_diverse_workspace();
-
-    let list = run_br(
-        &workspace,
-        ["list", "--assignee", "alice", "--json"],
-        "list_assignee_alice",
-    );
-    assert!(list.status.success());
-
-    let issues = parse_list_issues(&list.stdout);
-
-    // Should have exactly 1 issue assigned to alice (bug1)
-    assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0]["id"], ids[1]);
-    assert_eq!(issues[0]["assignee"], "alice");
-}
-
-#[test]
-fn e2e_list_unassigned_filter() {
-    let _log = common::test_log("e2e_list_unassigned_filter");
-    let (workspace, _ids) = setup_diverse_workspace();
-
-    let list = run_br(
-        &workspace,
-        ["list", "--unassigned", "--json"],
-        "list_unassigned",
-    );
-    assert!(list.status.success());
-
-    let issues = parse_list_issues(&list.stdout);
-
-    // Should have 3 unassigned non-closed issues: task1, epic1 (deferred), task3
-    // bug1 assigned to alice, feature1 assigned to bob, task2 is closed
-    assert_eq!(issues.len(), 3);
-    for issue in &issues {
-        assert!(
-            issue["assignee"].is_null() || issue["assignee"] == "",
-            "issue should be unassigned"
-        );
-    }
-}
-
-// =============================================================================
 // TEXT SEARCH TESTS
 // =============================================================================
 
@@ -948,7 +889,7 @@ fn e2e_list_csv_custom_fields() {
             "--format",
             "csv",
             "--fields",
-            "id,title,priority,assignee",
+            "id,title,priority,owner",
         ],
         "list_csv_fields",
     );
@@ -959,7 +900,7 @@ fn e2e_list_csv_custom_fields() {
 
     // Check header has only requested fields
     let header = lines[0];
-    assert_eq!(header, "id,title,priority,assignee");
+    assert_eq!(header, "id,title,priority,owner");
 }
 
 #[test]
@@ -1075,8 +1016,8 @@ fn e2e_list_empty_result() {
             "list",
             "--type",
             "bug",
-            "--assignee",
-            "nonexistent",
+            "--title-contains",
+            "nonexistent-title-xyz",
             "--json",
         ],
         "list_empty",

@@ -8,25 +8,11 @@
 //! - `Comment` - Issue comments
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
 pub mod sort;
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-const fn is_false(b: &bool) -> bool {
-    !*b
-}
-
-/// Serialize Option<i32> as 0 when None (for bd conformance - bd expects integer, not null)
-#[allow(clippy::ref_option, clippy::trivially_copy_pass_by_ref)]
-fn serialize_compaction_level<S>(value: &Option<i32>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_i32(value.unwrap_or(0))
-}
 
 /// Deserialize an optional metadata string, coercing a degenerate empty (or
 /// whitespace-only) string to `None`.
@@ -448,17 +434,9 @@ pub struct Issue {
     #[serde(default)]
     pub issue_type: IssueType,
 
-    /// Assigned user.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<String>,
-
     /// Issue owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-
-    /// Estimated effort in minutes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_minutes: Option<i32>,
 
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
@@ -478,14 +456,6 @@ pub struct Issue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_reason: Option<String>,
 
-    /// Session ID that closed this issue.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub closed_by_session: Option<String>,
-
-    /// Due date.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub due_at: Option<DateTime<Utc>>,
-
     /// Defer until date.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer_until: Option<DateTime<Utc>>,
@@ -494,10 +464,6 @@ pub struct Issue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
 
-    /// Source system for imported issues.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_system: Option<String>,
-
     /// Source repository for multi-repo support — basename of the
     /// canonicalized parent of `.beads/`. Stable across clones of the
     /// same repo on different machines (different absolute paths
@@ -505,36 +471,6 @@ pub struct Issue {
     /// `cli::commands::create`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_repo: Option<String>,
-
-    /// Absolute canonical path of the source repository. Distinct from
-    /// `source_repo`: this field uniquely identifies the workspace on
-    /// the machine that produced the issue, which is what multi-repo
-    /// fleet automation needs to route beads back to the right
-    /// directory (see beads#289). Two clones of the same repo
-    /// under `~/Developer/foo` vs `~/Developer/scratch/foo` collide on
-    /// `source_repo` but disagree here. Optional — older databases and
-    /// hand-edited JSONL records without this field are valid.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_repo_path: Option<String>,
-
-    /// Canonical-JSON governing instructions inherited by descendant
-    /// beads (beads#297). When set on an ancestor and the project
-    /// has `inherited_context.enabled = true` in `.beads/config.yaml`,
-    /// `br update --status in_progress` / `--claim` and `br show` emit
-    /// the ancestor's `agent_context` alongside the child's normal
-    /// output so the working agent sees the constraints regardless of
-    /// context compaction or cold-start lookups.
-    ///
-    /// Storage: TEXT column holding a JSON document (typically an
-    /// object with `skills`, `constraints`, `references`, `workflow`,
-    /// `metadata` fields, but the schema is intentionally open).
-    /// `None` means "no inherited context"; emission for descendants
-    /// silently skips ancestors with `None` (no error, no noise).
-    ///
-    /// Not displayed in `br list` / `br search` — this is per-bead
-    /// governance metadata, not browsable content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_context: Option<String>,
 
     // Tombstone fields
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -554,30 +490,6 @@ pub struct Issue {
     /// `br delete --hard` may collect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub former_ids: Vec<String>,
-
-    // Compaction (legacy/compat)
-    // Note: Always serialize compaction_level as integer (0 when None) for bd conformance
-    // bd's Go sql scanner cannot handle NULL for integer columns
-    #[serde(default, serialize_with = "serialize_compaction_level")]
-    pub compaction_level: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compacted_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compacted_at_commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub original_size: Option<i32>,
-
-    // Messaging
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sender: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub ephemeral: bool,
-
-    // Context
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub pinned: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_template: bool,
 
     // Relations (for export/display, not always in DB table directly)
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -601,35 +513,20 @@ impl Default for Issue {
             status: Status::default(),
             priority: Priority::default(),
             issue_type: IssueType::default(),
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc::now(),
             created_by: None,
             updated_at: Utc::now(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
-            source_repo_path: None,
-            agent_context: None,
             source_repo: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: Vec::new(),
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: Vec::new(),
             dependencies: Vec::new(),
             comments: Vec::new(),
@@ -655,7 +552,7 @@ impl Issue {
     /// This ignores derived or volatile audit fields that would otherwise make
     /// semantically identical issues look different across import/export
     /// boundaries, while still comparing the full synced payload including
-    /// labels, dependencies, comments, and user-visible timestamps like `due_at`.
+    /// labels, dependencies, comments, and user-visible timestamps like `defer_until`.
     ///
     /// `former_ids` is compared (order matters — it is an append-only,
     /// oldest-first history, not a set): without this, a JSONL record whose
@@ -673,19 +570,6 @@ impl Issue {
     /// would also invalidate every stored `content_hash`/`export_hashes`
     /// value in every existing database, forcing a full re-export;
     /// `sync_equals` carries no such stored state to invalidate.
-    ///
-    /// `agent_context` is compared for the identical reason (bds-a23.15):
-    /// it is `#[serde]`-exported (see the field's doc comment above) but was
-    /// never added here, so an `agent_context`-only delta between the local
-    /// row and an incoming JSONL record read as "equal" and `merge_issue`'s
-    /// Case 6 short-circuited to `Keep(left)`, silently dropping the
-    /// incoming value. Unlike `former_ids`, the only production write path
-    /// for this field is the generic `update_issue`/`IssueUpdate` path
-    /// (`storage/sqlite.rs`), which already bumps `updated_at`
-    /// unconditionally whenever any field changes — so, unlike the
-    /// `former_ids` fix, no companion `updated_at` fix was needed here.
-    /// Deliberately not mirrored into `compute_content_hash` for the same
-    /// persisted-state reason as `former_ids` above.
     #[must_use]
     pub fn sync_equals(&self, other: &Self) -> bool {
         if self.id != other.id
@@ -697,38 +581,19 @@ impl Issue {
             || self.status != other.status
             || self.priority != other.priority
             || self.issue_type != other.issue_type
-            || self.assignee != other.assignee
             || self.owner != other.owner
-            || self.estimated_minutes != other.estimated_minutes
             || self.created_by != other.created_by
             || self.closed_at != other.closed_at
             || self.close_reason != other.close_reason
-            || self.closed_by_session != other.closed_by_session
-            || self.due_at != other.due_at
             || self.defer_until != other.defer_until
             || self.external_ref != other.external_ref
-            || self.source_system != other.source_system
             || self.source_repo != other.source_repo
-            || self.source_repo_path != other.source_repo_path
             || self.deleted_at != other.deleted_at
             || self.deleted_by != other.deleted_by
             || self.delete_reason != other.delete_reason
             || self.original_type != other.original_type
-            || self.compacted_at != other.compacted_at
-            || self.compacted_at_commit != other.compacted_at_commit
-            || self.original_size != other.original_size
-            || self.sender != other.sender
-            || self.ephemeral != other.ephemeral
-            || self.pinned != other.pinned
-            || self.is_template != other.is_template
             || self.former_ids != other.former_ids
-            || self.agent_context != other.agent_context
         {
-            return false;
-        }
-
-        // Handle compaction_level serialization quirk where None == 0
-        if self.compaction_level.unwrap_or(0) != other.compaction_level.unwrap_or(0) {
             return false;
         }
 
@@ -955,35 +820,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             created_by: None,
             updated_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_repo_path: None,
-            agent_context: None,
-            source_system: None,
             source_repo: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -1398,35 +1248,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             created_by: None,
             updated_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
-            source_repo_path: None,
-            agent_context: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -1587,19 +1422,18 @@ mod tests {
     fn test_issue_sync_equals_detects_semantic_changes() {
         let issue1 = create_test_issue();
         let mut issue2 = create_test_issue();
-        issue2.due_at = Some(Utc.timestamp_opt(1_800_000_000, 0).unwrap());
+        issue2.defer_until = Some(Utc.timestamp_opt(1_800_000_000, 0).unwrap());
 
         assert!(!issue1.sync_equals(&issue2));
     }
 
     #[test]
-    fn test_issue_sync_equals_detects_source_repo_path_changes() {
+    fn test_issue_sync_equals_detects_source_repo_changes() {
         let mut issue1 = create_test_issue();
         issue1.source_repo = Some("widget_engine".to_string());
-        issue1.source_repo_path = Some("/repos/widget_engine".to_string());
 
         let mut issue2 = issue1.clone();
-        issue2.source_repo_path = Some("/repos/alternate/widget_engine".to_string());
+        issue2.source_repo = Some("alternate_widget_engine".to_string());
 
         assert!(!issue1.sync_equals(&issue2));
         assert!(!issue2.sync_equals(&issue1));

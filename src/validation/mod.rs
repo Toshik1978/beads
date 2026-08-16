@@ -65,22 +65,6 @@ impl IssueValidator {
             ));
         }
 
-        // Estimated minutes: Optional, must be non-negative and reasonable.
-        if let Some(minutes) = issue.estimated_minutes {
-            if minutes < 0 {
-                errors.push(ValidationError::new(
-                    "estimated_minutes",
-                    "cannot be negative",
-                ));
-            } else if minutes > 525_960 {
-                // ~1 year in minutes
-                errors.push(ValidationError::new(
-                    "estimated_minutes",
-                    "exceeds maximum (525960 minutes / ~1 year)",
-                ));
-            }
-        }
-
         if issue.status == Status::Closed && issue.closed_at.is_none() {
             errors.push(ValidationError::new(
                 "closed_at",
@@ -147,12 +131,6 @@ fn validate_issue_text_fields(issue: &Issue, errors: &mut Vec<ValidationError>) 
     validate_custom_status(&issue.status, errors);
     reject_nul("issue_type", issue.issue_type.as_str(), errors);
     validate_custom_issue_type(&issue.issue_type, errors);
-    reject_bounded_chars_opt(
-        "assignee",
-        issue.assignee.as_deref(),
-        ACTOR_MAX_CHARS,
-        errors,
-    );
     reject_bounded_chars_opt("owner", issue.owner.as_deref(), ACTOR_MAX_CHARS, errors);
     reject_bounded_chars_opt(
         "created_by",
@@ -161,12 +139,6 @@ fn validate_issue_text_fields(issue: &Issue, errors: &mut Vec<ValidationError>) 
         errors,
     );
     validate_external_ref(issue.external_ref.as_deref(), errors);
-    reject_bounded_chars_opt(
-        "source_system",
-        issue.source_system.as_deref(),
-        ACTOR_MAX_CHARS,
-        errors,
-    );
     validate_issue_labels(issue, errors);
 }
 
@@ -357,35 +329,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             created_by: None,
             updated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: Vec::new(),
             dependencies: Vec::new(),
             comments: Vec::new(),
@@ -422,11 +379,9 @@ mod tests {
         issue.notes = Some("nul\0notes".to_string());
         issue.status = Status::Custom("nul\0status".to_string());
         issue.issue_type = IssueType::Custom("nul\0type".to_string());
-        issue.assignee = Some("nul\0assignee".to_string());
         issue.owner = Some("nul\0owner".to_string());
         issue.created_by = Some("nul\0creator".to_string());
         issue.external_ref = Some("nul\0external".to_string());
-        issue.source_system = Some("nul\0source".to_string());
 
         let errors = IssueValidator::validate(&issue).unwrap_err();
         let fields: Vec<_> = errors.iter().map(|err| err.field.as_str()).collect();
@@ -438,11 +393,9 @@ mod tests {
             "notes",
             "status",
             "issue_type",
-            "assignee",
             "owner",
             "created_by",
             "external_ref",
-            "source_system",
         ] {
             assert!(fields.contains(&field), "missing NUL rejection for {field}");
         }

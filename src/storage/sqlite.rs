@@ -289,9 +289,8 @@ fn append_label_membership_filters(
 /// except the noise" is the shape people reach for on whichever command they
 /// happen to be using.
 ///
-/// Not included, deliberately: a `no_assignee` field. `ListFilters::unassigned`
-/// and `ReadyFilters::unassigned` already are that filter, and a second spelling
-/// of an existing flag is a synonym to maintain, not a feature.
+/// Not included, deliberately: a `no_assignee` field. `assignee` and its whole
+/// query surface were removed from `Issue` (bds-b4f.2.6).
 #[derive(Debug, Clone, Default)]
 pub struct ExclusionFilters {
     /// Reject issues carrying **any** of these labels. Union semantics, which is
@@ -663,10 +662,8 @@ struct ImportIssueTimestampStrings {
     created_at: String,
     updated_at: String,
     closed_at: Option<String>,
-    due_at: Option<String>,
     defer_until: Option<String>,
     deleted_at: Option<String>,
-    compacted_at: Option<String>,
 }
 
 impl ImportIssueTimestampStrings {
@@ -675,10 +672,8 @@ impl ImportIssueTimestampStrings {
             created_at: issue.created_at.to_rfc3339(),
             updated_at: issue.updated_at.to_rfc3339(),
             closed_at: issue.closed_at.map(|dt| dt.to_rfc3339()),
-            due_at: issue.due_at.map(|dt| dt.to_rfc3339()),
             defer_until: issue.defer_until.map(|dt| dt.to_rfc3339()),
             deleted_at: issue.deleted_at.map(|dt| dt.to_rfc3339()),
-            compacted_at: issue.compacted_at.map(|dt| dt.to_rfc3339()),
         }
     }
 }
@@ -688,17 +683,15 @@ impl ReadyIssueProjection {
         match self {
             Self::Full => {
                 r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                         status, priority, issue_type, assignee, owner, estimated_minutes,
-                         created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                         due_at, defer_until, external_ref, source_system, source_repo,
+                         status, priority, issue_type, owner,
+                         created_at, created_by, updated_at, closed_at, close_reason,
+                         defer_until, external_ref, source_repo,
                          deleted_at, deleted_by, delete_reason, original_type,
-                         compaction_level, compacted_at, compacted_at_commit, original_size,
-                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
                          former_ids"
             }
             Self::Command => {
                 r"SELECT id, title, description, acceptance_criteria, notes, status, priority,
-                         issue_type, assignee, owner, estimated_minutes, created_at, created_by,
+                         issue_type, owner, created_at, created_by,
                          updated_at"
             }
             Self::Summary => {
@@ -721,18 +714,16 @@ impl SearchIssueProjection {
         match self {
             Self::Full => {
                 r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                         status, priority, issue_type, assignee, owner, estimated_minutes,
-                         created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                         due_at, defer_until, external_ref, source_system, source_repo,
+                         status, priority, issue_type, owner,
+                         created_at, created_by, updated_at, closed_at, close_reason,
+                         defer_until, external_ref, source_repo,
                          deleted_at, deleted_by, delete_reason, original_type,
-                         compaction_level, compacted_at, compacted_at_commit, original_size,
-                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
                          former_ids
                   FROM issues
                   WHERE 1=1"
             }
             Self::CommandText => {
-                r"SELECT id, title, description, status, priority, issue_type, assignee,
+                r"SELECT id, title, description, status, priority, issue_type,
                          created_at, updated_at
                   FROM issues
                   WHERE 1=1"
@@ -753,12 +744,10 @@ impl BlockedIssueProjection {
         match self {
             Self::Full => {
                 r"SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
-                     i.status, i.priority, i.issue_type, i.assignee, i.owner, i.estimated_minutes,
-                     i.created_at, i.created_by, i.updated_at, i.closed_at, i.close_reason, i.closed_by_session,
-                     i.due_at, i.defer_until, i.external_ref, i.source_system, i.source_repo,
-                     i.deleted_at, i.deleted_by, i.delete_reason, i.original_type, i.compaction_level,
-                     i.compacted_at, i.compacted_at_commit, i.original_size, i.sender, i.ephemeral,
-                     i.pinned, i.is_template, i.source_repo_path, i.agent_context,
+                     i.status, i.priority, i.issue_type, i.owner,
+                     i.created_at, i.created_by, i.updated_at, i.closed_at, i.close_reason,
+                     i.defer_until, i.external_ref, i.source_repo,
+                     i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
                      i.former_ids,
                      bc.blocked_by"
             }
@@ -773,12 +762,11 @@ impl BlockedIssueProjection {
         match self {
             Self::Full => {
                 r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                     status, priority, issue_type, assignee, owner, estimated_minutes,
-                     created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                     due_at, defer_until, external_ref, source_system, source_repo,
-                     deleted_at, deleted_by, delete_reason, original_type, compaction_level,
-                     compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                     pinned, is_template, source_repo_path, agent_context, former_ids"
+                     status, priority, issue_type, owner,
+                     created_at, created_by, updated_at, closed_at, close_reason,
+                     defer_until, external_ref, source_repo,
+                     deleted_at, deleted_by, delete_reason, original_type,
+                     former_ids"
             }
             Self::Command => {
                 r"SELECT id, title, description, status, priority, issue_type,
@@ -789,11 +777,12 @@ impl BlockedIssueProjection {
 
     const fn cached_blocked_by_index(self) -> usize {
         match self {
-            // Bumped from 38 → 39 after `former_ids` was appended to the
-            // Full SELECT at position 38 (schema v18). Source_repo_path is
-            // at 36, agent_context is at 37, former_ids is at 38, so
-            // bc.blocked_by lands at 39 in the joined projection.
-            Self::Full => 39,
+            // former_ids is at 23, so bc.blocked_by lands at 24 in the
+            // joined projection (source_system, source_repo_path and
+            // agent_context no longer occupy earlier positions,
+            // bds-b4f.2.4 and bds-b4f.2.5; assignee no longer does either,
+            // bds-b4f.2.6).
+            Self::Full => 24,
             Self::Command => 9,
         }
     }
@@ -2763,13 +2752,12 @@ impl SqliteStorage {
     /// the schema `DEFAULT` on whichever path got missed.
     const FULL_ISSUE_INSERT_SQL: &'static str = "INSERT INTO issues (
         id, content_hash, title, description, design, acceptance_criteria, notes,
-        status, priority, issue_type, assignee, owner, estimated_minutes,
+        status, priority, issue_type, owner,
         created_at, created_by, updated_at, closed_at, close_reason,
-        closed_by_session, due_at, defer_until, external_ref, source_system,
-        source_repo, source_repo_path, deleted_at, deleted_by, delete_reason, original_type,
-        compaction_level, compacted_at, compacted_at_commit, original_size,
-        sender, ephemeral, pinned, is_template, agent_context, former_ids
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        defer_until, external_ref,
+        source_repo, deleted_at, deleted_by, delete_reason, original_type,
+        former_ids
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     /// Parameter values for [`Self::FULL_ISSUE_INSERT_SQL`], in column order.
     fn bind_full_issue_insert_params(issue: &Issue) -> Vec<SqliteValue> {
@@ -2778,10 +2766,8 @@ impl SqliteStorage {
         let created_at_str = issue.created_at.to_rfc3339();
         let updated_at_str = issue.updated_at.to_rfc3339();
         let closed_at_str = issue.closed_at.map(|dt| dt.to_rfc3339());
-        let due_at_str = issue.due_at.map(|dt| dt.to_rfc3339());
         let defer_until_str = issue.defer_until.map(|dt| dt.to_rfc3339());
         let deleted_at_str = issue.deleted_at.map(|dt| dt.to_rfc3339());
-        let compacted_at_str = issue.compacted_at.map(|dt| dt.to_rfc3339());
         let content_hash = issue.compute_content_hash();
         let former_ids_json =
             serde_json::to_string(&issue.former_ids).unwrap_or_else(|_| "[]".to_string());
@@ -2797,14 +2783,7 @@ impl SqliteStorage {
             SqliteValue::from(status_str),
             SqliteValue::from(issue.priority.0),
             SqliteValue::from(issue_type_str),
-            issue
-                .assignee
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
             SqliteValue::from(issue.owner.as_deref().unwrap_or("")),
-            issue
-                .estimated_minutes
-                .map_or(SqliteValue::Null, SqliteValue::from),
             SqliteValue::from(created_at_str.as_str()),
             SqliteValue::from(issue.created_by.as_deref().unwrap_or("")),
             SqliteValue::from(updated_at_str.as_str()),
@@ -2812,10 +2791,6 @@ impl SqliteStorage {
                 .as_deref()
                 .map_or(SqliteValue::Null, SqliteValue::from),
             SqliteValue::from(issue.close_reason.as_deref().unwrap_or("")),
-            SqliteValue::from(issue.closed_by_session.as_deref().unwrap_or("")),
-            due_at_str
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
             defer_until_str
                 .as_deref()
                 .map_or(SqliteValue::Null, SqliteValue::from),
@@ -2823,35 +2798,13 @@ impl SqliteStorage {
                 .external_ref
                 .as_deref()
                 .map_or(SqliteValue::Null, SqliteValue::from),
-            SqliteValue::from(issue.source_system.as_deref().unwrap_or("")),
             SqliteValue::from(issue.source_repo.as_deref().unwrap_or(".")),
-            issue
-                .source_repo_path
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
             deleted_at_str
                 .as_deref()
                 .map_or(SqliteValue::Null, SqliteValue::from),
             SqliteValue::from(issue.deleted_by.as_deref().unwrap_or("")),
             SqliteValue::from(issue.delete_reason.as_deref().unwrap_or("")),
             SqliteValue::from(issue.original_type.as_deref().unwrap_or("")),
-            SqliteValue::from(i64::from(issue.compaction_level.unwrap_or(0))),
-            compacted_at_str
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
-            issue
-                .compacted_at_commit
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
-            SqliteValue::from(i64::from(issue.original_size.unwrap_or(0))),
-            SqliteValue::from(issue.sender.as_deref().unwrap_or("")),
-            SqliteValue::from(i64::from(i32::from(issue.ephemeral))),
-            SqliteValue::from(i64::from(i32::from(issue.pinned))),
-            SqliteValue::from(i64::from(i32::from(issue.is_template))),
-            issue
-                .agent_context
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
             SqliteValue::from(former_ids_json.as_str()),
         ]
     }
@@ -3338,48 +3291,17 @@ impl SqliteStorage {
             });
         }
 
-        // Atomic claim guard: check assignee INSIDE the CONCURRENT transaction
-        // to prevent TOCTOU races where two agents both see "unassigned".
-        if updates.expect_unassigned {
-            let current_assignee = match conn.query_row_with_params(
-                "SELECT assignee FROM issues WHERE id = ?",
-                &[SqliteValue::from(id)],
-            ) {
-                Ok(row) => row.get(0).and_then(SqliteValue::as_text).map(String::from),
-                Err(DbError::QueryReturnedNoRows) => None,
-                Err(error) => return Err(error.into()),
-            };
-            let trimmed = current_assignee
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            let claim_actor = updates.claim_actor.as_deref().unwrap_or("");
-
-            match trimmed {
-                None => { /* unassigned, proceed with claim */ }
-                Some(current) if !updates.claim_exclusive && current == claim_actor => {
-                    /* same actor re-claim, idempotent */
-                }
-                Some(current) => {
-                    return Err(BeadsError::validation(
-                        "claim",
-                        format!("issue {id} already assigned to {current}"),
-                    ));
-                }
-            }
-        }
-
-        // Compare-and-set guards (bds-o9a), the general form of the claim guard
-        // above. Checked here against the row *this* transaction loaded, and
-        // restated below as a predicate on the UPDATE's WHERE clause.
+        // Compare-and-set guard (bds-o9a). Checked here against the row *this*
+        // transaction loaded, and restated below as a predicate on the
+        // UPDATE's WHERE clause.
         //
-        // Both, deliberately, and for the same reason `expect_unassigned` does
-        // both. The check here is what produces an error naming the value
-        // actually found, which a bare "0 rows affected" cannot. The predicate
-        // is what keeps the guard atomic: it is evaluated by the same statement
-        // that writes, so no refactor that moves this check earlier -- out of
-        // the transaction, into the CLI's validation pass -- can quietly
-        // reintroduce the TOCTOU the guard exists to close.
+        // Both, deliberately. The check here is what produces an error naming
+        // the value actually found, which a bare "0 rows affected" cannot.
+        // The predicate is what keeps the guard atomic: it is evaluated by
+        // the same statement that writes, so no refactor that moves this
+        // check earlier -- out of the transaction, into the CLI's validation
+        // pass -- can quietly reintroduce the TOCTOU the guard exists to
+        // close.
         //
         // Returning early also means a failed guard writes nothing at all: the
         // transition-comment insert and every other side effect in this
@@ -3392,18 +3314,6 @@ impl SqliteStorage {
                     field: "status".to_string(),
                     expected: expected.to_string(),
                     actual: actual.to_string(),
-                });
-            }
-        }
-        if let Some(expected) = updates.expect_assignee.as_ref() {
-            let actual = normalized_assignee(issue.assignee.as_deref());
-            let expected = normalized_assignee(expected.as_deref());
-            if actual != expected {
-                return Err(BeadsError::PreconditionFailed {
-                    id: id.to_string(),
-                    field: "assignee".to_string(),
-                    expected: expected.unwrap_or_default(),
-                    actual: actual.unwrap_or_default(),
                 });
             }
         }
@@ -3520,10 +3430,8 @@ impl SqliteStorage {
                     // Reopening (or fixing state): Clear closed_at if it was set
                     issue.closed_at = None;
                     issue.close_reason = None;
-                    issue.closed_by_session = None;
                     add_update("closed_at", SqliteValue::Null);
                     add_update("close_reason", SqliteValue::from(""));
-                    add_update("closed_by_session", SqliteValue::from(""));
                 }
                 if issue.deleted_at.is_some() {
                     issue.deleted_at = None;
@@ -3557,28 +3465,10 @@ impl SqliteStorage {
             add_update("issue_type", SqliteValue::from(issue_type.as_str()));
         }
 
-        // Assignee
-        if let Some(ref assignee_opt) = updates.assignee {
-            issue.assignee.clone_from(assignee_opt);
-            add_update(
-                "assignee",
-                assignee_opt
-                    .as_deref()
-                    .map_or(SqliteValue::Null, SqliteValue::from),
-            );
-        }
-
         // Simple Option fields - use empty string instead of NULL for bd compatibility
         if let Some(ref val) = updates.owner {
             issue.owner.clone_from(val);
             add_update("owner", SqliteValue::from(val.as_deref().unwrap_or("")));
-        }
-        if let Some(ref val) = updates.estimated_minutes {
-            issue.estimated_minutes = *val;
-            add_update(
-                "estimated_minutes",
-                val.map_or(SqliteValue::Null, |v| SqliteValue::from(i64::from(v))),
-            );
         }
         if let Some(ref val) = updates.external_ref {
             // Explicit uniqueness check for the previous engine
@@ -3613,32 +3503,11 @@ impl SqliteStorage {
             issue.source_repo = Some(next.clone());
             add_update("source_repo", SqliteValue::from(next.as_str()));
         }
-        if let Some(ref val) = updates.source_repo_path {
-            issue.source_repo_path.clone_from(val);
-            add_update(
-                "source_repo_path",
-                val.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-            );
-        }
-        if let Some(ref val) = updates.agent_context {
-            issue.agent_context.clone_from(val);
-            add_update(
-                "agent_context",
-                val.as_deref().map_or(SqliteValue::Null, SqliteValue::from),
-            );
-        }
         // Use empty string instead of NULL for bd compatibility
         if let Some(ref val) = updates.close_reason {
             issue.close_reason.clone_from(val);
             add_update(
                 "close_reason",
-                SqliteValue::from(val.as_deref().unwrap_or("")),
-            );
-        }
-        if let Some(ref val) = updates.closed_by_session {
-            issue.closed_by_session.clone_from(val);
-            add_update(
-                "closed_by_session",
                 SqliteValue::from(val.as_deref().unwrap_or("")),
             );
         }
@@ -3668,13 +3537,6 @@ impl SqliteStorage {
         }
 
         // Date fields
-        if let Some(ref val) = updates.due_at {
-            issue.due_at = *val;
-            add_update(
-                "due_at",
-                val.map_or(SqliteValue::Null, |d| SqliteValue::from(d.to_rfc3339())),
-            );
-        }
         if let Some(ref val) = updates.defer_until {
             issue.defer_until = *val;
             add_update(
@@ -3716,36 +3578,16 @@ impl SqliteStorage {
         set_clauses.push("content_hash = ?".to_string());
         params.push(SqliteValue::from(new_hash));
 
-        // Build and execute SQL. Claim operations use an additional
-        // compare-and-set predicate so exactly one contender can win even
-        // if two writers both observed the row as unassigned earlier.
+        // Build and execute SQL. The compare-and-set guard restates
+        // `expect_status` as an additional predicate so it is evaluated by
+        // the same statement that writes -- see the comment above this
+        // function's earlier `expect_status` check for why both places
+        // matter.
         let mut where_clause = "id = ?".to_string();
         params.push(SqliteValue::from(id));
-        if updates.expect_unassigned {
-            where_clause.push_str(" AND (assignee IS NULL OR TRIM(assignee) = ''");
-            if !updates.claim_exclusive
-                && let Some(claim_actor) = updates
-                    .claim_actor
-                    .as_deref()
-                    .filter(|actor| !actor.is_empty())
-            {
-                where_clause.push_str(" OR assignee = ?");
-                params.push(SqliteValue::from(claim_actor));
-            }
-            where_clause.push(')');
-        }
         if let Some(expected) = updates.expect_status.as_deref() {
             where_clause.push_str(" AND status = ?");
             params.push(SqliteValue::from(expected));
-        }
-        if let Some(expected) = updates.expect_assignee.as_ref() {
-            match normalized_assignee(expected.as_deref()) {
-                Some(actor) => {
-                    where_clause.push_str(" AND assignee = ?");
-                    params.push(SqliteValue::from(actor.as_str()));
-                }
-                None => where_clause.push_str(" AND (assignee IS NULL OR TRIM(assignee) = '')"),
-            }
         }
 
         let sql = format!(
@@ -3754,57 +3596,19 @@ impl SqliteStorage {
         );
         let updated_rows = conn.execute_with_params(&sql, &params)?;
         if updated_rows == 0 {
-            if updates.expect_unassigned {
-                let current_assignee = match conn.query_row_with_params(
-                    "SELECT assignee FROM issues WHERE id = ?",
-                    &[SqliteValue::from(id)],
-                ) {
-                    Ok(row) => row
-                        .get(0)
-                        .and_then(SqliteValue::as_text)
-                        .map(String::from)
-                        .and_then(|assignee| {
-                            let trimmed = assignee.trim().to_string();
-                            (!trimmed.is_empty()).then_some(trimmed)
-                        })
-                        .unwrap_or_else(|| "<unknown>".to_string()),
-                    Err(DbError::QueryReturnedNoRows) => "<unknown>".to_string(),
-                    Err(error) => return Err(error.into()),
-                };
-                return Err(BeadsError::validation(
-                    "claim",
-                    format!("issue {id} already assigned to {current_assignee}"),
-                ));
-            }
-
             // A guarded update that matched no row cannot be reported as
             // IssueNotFound: the check above already proved the row exists and
             // held the expected value, so reaching here means the predicate --
             // the atomic half of the guard -- is what rejected it.
-            if let Some((field, expected)) = updates
-                .expect_status
-                .as_deref()
-                .map(|expected| ("status", expected.to_string()))
-                .or_else(|| {
-                    updates.expect_assignee.as_ref().map(|expected| {
-                        (
-                            "assignee",
-                            normalized_assignee(expected.as_deref()).unwrap_or_default(),
-                        )
-                    })
-                })
-            {
+            if let Some(expected) = updates.expect_status.as_deref() {
                 let actual = Self::get_issue_from_conn(conn, id)?.map_or_else(
                     || "<row vanished>".to_string(),
-                    |issue| match field {
-                        "status" => issue.status.as_str().to_string(),
-                        _ => normalized_assignee(issue.assignee.as_deref()).unwrap_or_default(),
-                    },
+                    |issue| issue.status.as_str().to_string(),
                 );
                 return Err(BeadsError::PreconditionFailed {
                     id: id.to_string(),
-                    field: field.to_string(),
-                    expected,
+                    field: "status".to_string(),
+                    expected: expected.to_string(),
                     actual,
                 });
             }
@@ -4086,12 +3890,10 @@ impl SqliteStorage {
         let sql = r"
             SELECT id, content_hash, title, description, design,
                    acceptance_criteria, notes, status, priority, issue_type,
-                   assignee, owner, estimated_minutes, created_at, created_by,
-                   updated_at, closed_at, close_reason, closed_by_session,
-                   due_at, defer_until, external_ref, source_system, source_repo,
+                   owner, created_at, created_by,
+                   updated_at, closed_at, close_reason,
+                   defer_until, external_ref, source_repo,
                    deleted_at, deleted_by, delete_reason, original_type,
-                   compaction_level, compacted_at, compacted_at_commit, original_size,
-                   sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
                    former_ids
             FROM issues
             WHERE id = ?
@@ -4127,12 +3929,10 @@ impl SqliteStorage {
             let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
             let sql = format!(
                 r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                         status, priority, issue_type, assignee, owner, estimated_minutes,
-                         created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                         due_at, defer_until, external_ref, source_system, source_repo,
+                         status, priority, issue_type, owner,
+                         created_at, created_by, updated_at, closed_at, close_reason,
+                         defer_until, external_ref, source_repo,
                          deleted_at, deleted_by, delete_reason, original_type,
-                         compaction_level, compacted_at, compacted_at_commit, original_size,
-                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
                          former_ids
                   FROM issues WHERE id IN ({})",
                 placeholders.join(",")
@@ -4264,12 +4064,10 @@ impl SqliteStorage {
         let sort_default_in_rust = should_sort_list_default_in_rust(filters);
         let mut sql = String::from(
             r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                     status, priority, issue_type, assignee, owner, estimated_minutes,
-                     created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                     due_at, defer_until, external_ref, source_system, source_repo,
+                     status, priority, issue_type, owner,
+                     created_at, created_by, updated_at, closed_at, close_reason,
+                     defer_until, external_ref, source_repo,
                      deleted_at, deleted_by, delete_reason, original_type,
-                     compaction_level, compacted_at, compacted_at_commit, original_size,
-                     sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
                      former_ids",
         );
 
@@ -4326,15 +4124,6 @@ impl SqliteStorage {
             for p in priorities {
                 params.push(SqliteValue::from(i64::from(p.0)));
             }
-        }
-
-        if let Some(ref assignee) = filters.assignee {
-            sql.push_str(" AND assignee = ?");
-            params.push(SqliteValue::from(assignee.as_str()));
-        }
-
-        if filters.unassigned {
-            sql.push_str(" AND (assignee IS NULL OR assignee = '')");
         }
 
         if !filters.include_closed {
@@ -4414,12 +4203,10 @@ impl SqliteStorage {
 
             let sql = format!(
                 r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                         status, priority, issue_type, assignee, owner, estimated_minutes,
-                         created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                         due_at, defer_until, external_ref, source_system, source_repo,
+                         status, priority, issue_type, owner,
+                         created_at, created_by, updated_at, closed_at, close_reason,
+                         defer_until, external_ref, source_repo,
                          deleted_at, deleted_by, delete_reason, original_type,
-                         compaction_level, compacted_at, compacted_at_commit, original_size,
-                         sender, ephemeral, pinned, is_template, source_repo_path, agent_context,
                          former_ids
                   FROM issues
                   WHERE {status_filter}
@@ -4498,8 +4285,6 @@ impl SqliteStorage {
                 .priorities
                 .as_ref()
                 .is_some_and(|priorities| !priorities.is_empty())
-            || filters.assignee.is_some()
-            || filters.unassigned
             || filters.include_closed
             || !filters.include_deferred
             || filters.include_templates
@@ -4631,8 +4416,6 @@ impl SqliteStorage {
                 .priorities
                 .as_ref()
                 .is_some_and(|priorities| !priorities.is_empty())
-            || filters.assignee.is_some()
-            || filters.unassigned
             || filters.title_contains.is_some()
             // This query applies `updated_before` itself — it *is* the staleness
             // threshold — and no other date bound. Asked as "any bound except
@@ -4663,7 +4446,7 @@ impl SqliteStorage {
         }
 
         let mut sql = String::from(
-            "SELECT id, title, status, priority, issue_type, assignee, created_at, updated_at
+            "SELECT id, title, status, priority, issue_type, created_at, updated_at
              FROM issues WHERE 1=1",
         );
         let mut params = Vec::new();
@@ -4729,7 +4512,7 @@ impl SqliteStorage {
     /// Returns an error if the database query fails.
     pub fn list_stats_issues(&self) -> Result<Vec<StatsIssueRow>> {
         let rows = self.conn.query(
-            r"SELECT id, status, priority, issue_type, assignee, created_at, closed_at,
+            r"SELECT id, status, priority, issue_type, created_at, closed_at,
                      defer_until, ephemeral, pinned, is_template
               FROM issues",
         )?;
@@ -4782,7 +4565,6 @@ impl SqliteStorage {
             filters.statuses.as_ref().is_none_or(Vec::is_empty)
                 && filters.types.as_ref().is_none_or(Vec::is_empty)
                 && filters.priorities.as_ref().is_none_or(Vec::is_empty)
-                && filters.assignee.is_none()
                 && filters.title_contains.is_none()
                 && !filters.has_date_range_filters()
                 && filters.exclude.is_empty();
@@ -4829,15 +4611,6 @@ impl SqliteStorage {
             for p in priorities {
                 params.push(SqliteValue::from(i64::from(p.0)));
             }
-        }
-
-        if let Some(ref assignee) = filters.assignee {
-            sql.push_str(" AND assignee = ?");
-            params.push(SqliteValue::from(assignee.as_str()));
-        }
-
-        if filters.unassigned {
-            sql.push_str(" AND (assignee IS NULL OR assignee = '')");
         }
 
         if !filters.include_closed {
@@ -5124,15 +4897,6 @@ impl SqliteStorage {
             }
         }
 
-        if let Some(ref assignee) = filters.assignee {
-            sql.push_str(" AND assignee = ?");
-            params.push(SqliteValue::from(assignee.as_str()));
-        }
-
-        if filters.unassigned {
-            sql.push_str(" AND (assignee IS NULL OR assignee = '')");
-        }
-
         if !filters.include_closed {
             if filters.include_deferred {
                 sql.push_str(" AND status NOT IN ('closed', 'tombstone')");
@@ -5252,14 +5016,18 @@ impl SqliteStorage {
         Ok(issues)
     }
 
-    /// Get ready issues (unblocked, not deferred, not pinned, not ephemeral).
+    /// Get ready issues (unblocked, not deferred, not a wisp).
     ///
     /// Ready definition:
     /// 1. Status is `open` by default, or `deferred` when `include_deferred` is set
     /// 2. NOT in `blocked_issues_cache`
     /// 3. `defer_until` is NULL or <= now (unless `include_deferred`)
-    /// 4. `pinned = 0` (not pinned)
-    /// 5. `ephemeral = 0` AND ID does not contain `-wisp-`
+    /// 4. ID does not contain `-wisp-`
+    ///
+    /// `pinned`, `ephemeral` and `is_template` (bds-b4f.2.2) no longer
+    /// constrain readiness: the fields were removed from `Issue` because
+    /// they were never populated through any live write path, and the DB
+    /// columns they used to read stay `0` for every row from here on.
     ///
     /// # Errors
     ///
@@ -5425,7 +5193,6 @@ impl SqliteStorage {
         let label_filters_can_use_uncorrelated_in =
             filters.types.as_ref().is_none_or(Vec::is_empty)
                 && filters.priorities.as_ref().is_none_or(Vec::is_empty)
-                && filters.assignee.is_none()
                 && filters.parent.is_none();
         if label_filters_can_use_uncorrelated_in {
             sql.push_str(" FROM issues WHERE 1=1");
@@ -5488,17 +5255,9 @@ impl SqliteStorage {
             sql.push_str(" AND (defer_until IS NULL OR datetime(defer_until) <= datetime('now'))");
         }
 
-        // Ready condition 4: not pinned. Legacy rows may still store NULL,
-        // which the rest of the storage layer treats as false.
-        sql.push_str(" AND (pinned = 0 OR pinned IS NULL)");
-
-        // Ready condition 5: not ephemeral and not wisp. Legacy rows may
-        // still store NULL, which should behave the same as false.
-        sql.push_str(" AND (ephemeral = 0 OR ephemeral IS NULL)");
+        // Ready condition 4: not a wisp. `pinned`/`ephemeral`/`is_template`
+        // (bds-b4f.2.2) no longer gate readiness — see the doc comment above.
         sql.push_str(" AND id NOT LIKE '%-wisp-%'");
-
-        // Exclude templates
-        sql.push_str(" AND is_template = 0");
 
         // The negative filters (bds-3rt), from the same struct `list` and
         // `search` use, so --exclude-label means one thing across all three.
@@ -5524,17 +5283,6 @@ impl SqliteStorage {
             for p in priorities {
                 params.push(SqliteValue::from(i64::from(p.0)));
             }
-        }
-
-        // Filter by assignee
-        if let Some(ref assignee) = filters.assignee {
-            sql.push_str(" AND assignee = ?");
-            params.push(SqliteValue::from(assignee.as_str()));
-        }
-
-        // Filter for unassigned
-        if filters.unassigned {
-            sql.push_str(" AND (assignee IS NULL OR assignee = '')");
         }
 
         // Filter by parent (--parent flag).
@@ -9991,12 +9739,10 @@ impl SqliteStorage {
     /// Returns an error if the database query fails.
     pub fn get_all_issues_for_export(&self) -> Result<Vec<Issue>> {
         let sql = r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                           status, priority, issue_type, assignee, owner, estimated_minutes,
-                           created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                           due_at, defer_until, external_ref, source_system, source_repo,
-                           deleted_at, deleted_by, delete_reason, original_type, compaction_level,
-                           compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                           pinned, is_template, source_repo_path, agent_context,
+                           status, priority, issue_type, owner,
+                           created_at, created_by, updated_at, closed_at, close_reason,
+                           defer_until, external_ref, source_repo,
+                           deleted_at, deleted_by, delete_reason, original_type,
                            former_ids
                     FROM issues
                     WHERE (ephemeral = 0 OR ephemeral IS NULL)
@@ -10514,9 +10260,6 @@ impl SqliteStorage {
                 .and_then(SqliteValue::as_integer)
                 .map(|v| v as i32)
         };
-        let get_bool = |idx: usize| -> bool {
-            row.get(idx).and_then(SqliteValue::as_integer).unwrap_or(0) != 0
-        };
         let get_opt_datetime = |idx: usize| -> Result<Option<chrono::DateTime<chrono::Utc>>> {
             parse_opt_datetime_value(row.get(idx))
         };
@@ -10532,44 +10275,33 @@ impl SqliteStorage {
             status: parse_status(row.get(7).and_then(SqliteValue::as_text)),
             priority: Priority(get_opt_i32(8).unwrap_or_else(|| Priority::default().0)),
             issue_type: parse_issue_type(row.get(9).and_then(SqliteValue::as_text)),
-            assignee: get_non_empty_str(10),
-            owner: get_non_empty_str(11),
-            estimated_minutes: get_opt_i32(12),
-            created_at: parse_datetime_value(row.get(13))?,
-            created_by: get_non_empty_str(14),
-            updated_at: parse_datetime_value(row.get(15))?,
-            closed_at: get_opt_datetime(16)?,
-            close_reason: get_non_empty_str(17),
-            closed_by_session: get_non_empty_str(18),
-            due_at: get_opt_datetime(19)?,
-            defer_until: get_opt_datetime(20)?,
-            external_ref: get_opt_str(21),
-            source_system: get_non_empty_str(22),
-            source_repo: get_non_empty_str(23),
-            deleted_at: get_opt_datetime(24)?,
-            deleted_by: get_non_empty_str(25),
-            delete_reason: get_non_empty_str(26),
-            original_type: get_non_empty_str(27),
-            compaction_level: get_opt_i32(28),
-            compacted_at: get_opt_datetime(29)?,
-            compacted_at_commit: get_opt_str(30),
-            original_size: get_opt_i32(31),
-            sender: get_non_empty_str(32),
-            ephemeral: get_bool(33),
-            pinned: get_bool(34),
-            is_template: get_bool(35),
-            // Position 36 lands after `is_template` in the Full SELECT
-            // and before `bc.blocked_by` in the BlockedIssue::Full
-            // variant; the cached_blocked_by_index was bumped to 39
-            // in lock-step so the projection-specific blocked-by
-            // accessor still finds the right column.
-            source_repo_path: get_non_empty_str(36),
-            agent_context: get_non_empty_str(37),
+            owner: get_non_empty_str(10),
+            created_at: parse_datetime_value(row.get(11))?,
+            created_by: get_non_empty_str(12),
+            updated_at: parse_datetime_value(row.get(13))?,
+            closed_at: get_opt_datetime(14)?,
+            close_reason: get_non_empty_str(15),
+            defer_until: get_opt_datetime(16)?,
+            external_ref: get_opt_str(17),
+            source_repo: get_non_empty_str(18),
+            deleted_at: get_opt_datetime(19)?,
+            deleted_by: get_non_empty_str(20),
+            delete_reason: get_non_empty_str(21),
+            original_type: get_non_empty_str(22),
             // `former_ids` (schema v18) is a JSON array in a TEXT column, same
             // convention as `blocked_issues_cache.blocked_by`. A malformed or
             // legacy value degrades to "no former IDs" rather than making the
-            // whole row unreadable.
-            former_ids: serde_json::from_str(&get_str(38)).unwrap_or_default(),
+            // whole row unreadable. Position 23 lands after `original_type`
+            // in the Full SELECT and before `bc.blocked_by` in the
+            // BlockedIssue::Full variant; the cached_blocked_by_index was
+            // bumped in lock-step so the projection-specific blocked-by
+            // accessor still finds the right column. `assignee` (bds-b4f.2.6),
+            // `source_system` and `source_repo_path` (bds-b4f.2.4),
+            // `agent_context` (bds-b4f.2.5), `estimated_minutes`,
+            // `closed_by_session` and `due_at` (bds-b4f.2.3), and before them
+            // `sender`, `ephemeral`, `pinned` and `is_template` (bds-b4f.2.2),
+            // no longer occupy earlier positions.
+            former_ids: serde_json::from_str(&get_str(23)).unwrap_or_default(),
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -10607,35 +10339,20 @@ impl SqliteStorage {
             status: parse_status(row.get(5).and_then(SqliteValue::as_text)),
             priority: Priority(get_opt_i32(6).unwrap_or_else(|| Priority::default().0)),
             issue_type: parse_issue_type(row.get(7).and_then(SqliteValue::as_text)),
-            assignee: get_non_empty_str(8),
-            owner: get_non_empty_str(9),
-            estimated_minutes: get_opt_i32(10),
-            created_at: parse_datetime_value(row.get(11))?,
-            created_by: get_non_empty_str(12),
-            updated_at: parse_datetime_value(row.get(13))?,
+            owner: get_non_empty_str(8),
+            created_at: parse_datetime_value(row.get(9))?,
+            created_by: get_non_empty_str(10),
+            updated_at: parse_datetime_value(row.get(11))?,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -10673,35 +10390,20 @@ impl SqliteStorage {
             status: parse_status(row.get(3).and_then(SqliteValue::as_text)),
             priority: Priority(get_opt_i32(4).unwrap_or_else(|| Priority::default().0)),
             issue_type: parse_issue_type(row.get(5).and_then(SqliteValue::as_text)),
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: parse_datetime_value(row.get(6))?,
             created_by: get_non_empty_str(7),
             updated_at: parse_datetime_value(row.get(8))?,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -10714,12 +10416,6 @@ impl SqliteStorage {
                 .and_then(SqliteValue::as_text)
                 .unwrap_or("")
                 .to_string()
-        };
-        let get_non_empty_str = |idx: usize| -> Option<String> {
-            row.get(idx)
-                .and_then(SqliteValue::as_text)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
         };
         #[allow(clippy::cast_possible_truncation)]
         let get_opt_i32 = |idx: usize| -> Option<i32> {
@@ -10739,35 +10435,20 @@ impl SqliteStorage {
             status: parse_status(row.get(2).and_then(SqliteValue::as_text)),
             priority: Priority(get_opt_i32(3).unwrap_or_else(|| Priority::default().0)),
             issue_type: parse_issue_type(row.get(4).and_then(SqliteValue::as_text)),
-            assignee: get_non_empty_str(5),
             owner: None,
-            estimated_minutes: None,
-            created_at: parse_datetime_value(row.get(6))?,
+            created_at: parse_datetime_value(row.get(5))?,
             created_by: None,
-            updated_at: parse_datetime_value(row.get(7))?,
+            updated_at: parse_datetime_value(row.get(6))?,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -10805,35 +10486,20 @@ impl SqliteStorage {
             status: parse_status(row.get(3).and_then(SqliteValue::as_text)),
             priority: Priority(get_opt_i32(4).unwrap_or_else(|| Priority::default().0)),
             issue_type: parse_issue_type(row.get(5).and_then(SqliteValue::as_text)),
-            assignee: get_non_empty_str(6),
             owner: None,
-            estimated_minutes: None,
-            created_at: parse_datetime_value(row.get(7))?,
+            created_at: parse_datetime_value(row.get(6))?,
             created_by: None,
-            updated_at: parse_datetime_value(row.get(8))?,
+            updated_at: parse_datetime_value(row.get(7))?,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -10865,35 +10531,20 @@ impl SqliteStorage {
             status: parse_status(row.get(2).and_then(SqliteValue::as_text)),
             priority: Priority(get_opt_i32(3).unwrap_or_else(|| Priority::default().0)),
             issue_type: parse_issue_type(row.get(4).and_then(SqliteValue::as_text)),
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: parse_datetime_value(row.get(5))?,
             created_by: None,
             updated_at: parse_datetime_value(row.get(6))?,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -10906,12 +10557,6 @@ impl SqliteStorage {
                 .and_then(SqliteValue::as_text)
                 .unwrap_or("")
                 .to_string()
-        };
-        let get_non_empty_str = |idx: usize| -> Option<String> {
-            row.get(idx)
-                .and_then(SqliteValue::as_text)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
         };
         #[allow(clippy::cast_possible_truncation)]
         let get_opt_i32 = |idx: usize| -> Option<i32> {
@@ -10931,13 +10576,12 @@ impl SqliteStorage {
             status: parse_status(row.get(1).and_then(SqliteValue::as_text)),
             priority: Priority(get_opt_i32(2).unwrap_or_else(|| Priority::default().0)),
             issue_type: parse_issue_type(row.get(3).and_then(SqliteValue::as_text)),
-            assignee: get_non_empty_str(4),
-            created_at: parse_datetime_value(row.get(5))?,
-            closed_at: get_opt_datetime(6)?,
-            defer_until: get_opt_datetime(7)?,
-            ephemeral: get_bool(8),
-            pinned: get_bool(9),
-            is_template: get_bool(10),
+            created_at: parse_datetime_value(row.get(4))?,
+            closed_at: get_opt_datetime(5)?,
+            defer_until: get_opt_datetime(6)?,
+            ephemeral: get_bool(7),
+            pinned: get_bool(8),
+            is_template: get_bool(9),
         })
     }
 
@@ -10960,7 +10604,6 @@ impl SqliteStorage {
             status: parse_status(row.get(1).and_then(SqliteValue::as_text)),
             priority: Priority::default(),
             issue_type: parse_issue_type(row.get(2).and_then(SqliteValue::as_text)),
-            assignee: None,
             created_at: parse_datetime_value(row.get(3))?,
             closed_at: get_opt_datetime(4)?,
             defer_until: get_opt_datetime(5)?,
@@ -11136,8 +10779,6 @@ pub struct ListFilters {
     pub statuses: Option<Vec<Status>>,
     pub types: Option<Vec<IssueType>>,
     pub priorities: Option<Vec<Priority>>,
-    pub assignee: Option<String>,
-    pub unassigned: bool,
     pub include_closed: bool,
     pub include_deferred: bool,
     pub include_templates: bool,
@@ -11166,10 +10807,6 @@ pub struct ListFilters {
     pub closed_after: Option<DateTime<Utc>>,
     /// Filter by `closed_at` <= timestamp
     pub closed_before: Option<DateTime<Utc>>,
-    /// Filter by `due_at` >= timestamp. NULL (no due date) is excluded.
-    pub due_after: Option<DateTime<Utc>>,
-    /// Filter by `due_at` <= timestamp
-    pub due_before: Option<DateTime<Utc>>,
     /// Filter by `defer_until` >= timestamp. NULL (never deferred) is excluded.
     pub defer_after: Option<DateTime<Utc>>,
     /// Filter by `defer_until` <= timestamp
@@ -11197,8 +10834,6 @@ impl ListFilters {
             || self.created_before.is_some()
             || self.closed_after.is_some()
             || self.closed_before.is_some()
-            || self.due_after.is_some()
-            || self.due_before.is_some()
             || self.defer_after.is_some()
             || self.defer_before.is_some()
     }
@@ -11214,9 +10849,9 @@ impl ListFilters {
 ///
 /// Rows whose column is NULL never match. That is SQL's three-valued logic
 /// rather than an explicit `IS NOT NULL`, and it is the behaviour we want:
-/// `--closed-after` asking about an open issue, or `--due-before` about an issue
-/// with no due date, has no true answer, and returning such rows would make
-/// "closed in the last week" include everything still open.
+/// `--closed-after` asking about an open issue, or `--defer-before` about an
+/// issue that was never deferred, has no true answer, and returning such rows
+/// would make "closed in the last week" include everything still open.
 fn date_range_bounds(
     filters: &ListFilters,
 ) -> impl Iterator<Item = (&'static str, &'static str, DateTime<Utc>)> + use<'_> {
@@ -11227,8 +10862,6 @@ fn date_range_bounds(
         ("updated_at", "<=", filters.updated_before),
         ("closed_at", ">=", filters.closed_after),
         ("closed_at", "<=", filters.closed_before),
-        ("due_at", ">=", filters.due_after),
-        ("due_at", "<=", filters.due_before),
         ("defer_until", ">=", filters.defer_after),
         ("defer_until", "<=", filters.defer_before),
     ]
@@ -11282,7 +10915,6 @@ pub struct StatsIssueRow {
     pub status: Status,
     pub priority: Priority,
     pub issue_type: IssueType,
-    pub assignee: Option<String>,
     pub created_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
     pub defer_until: Option<DateTime<Utc>>,
@@ -11302,28 +10934,15 @@ pub struct IssueUpdate {
     pub status: Option<Status>,
     pub priority: Option<Priority>,
     pub issue_type: Option<IssueType>,
-    pub assignee: Option<Option<String>>,
     pub owner: Option<Option<String>>,
-    pub estimated_minutes: Option<Option<i32>>,
-    pub due_at: Option<Option<DateTime<Utc>>>,
     pub defer_until: Option<Option<DateTime<Utc>>>,
     pub external_ref: Option<Option<String>>,
     /// Override the source-repo display name (typically the repo basename).
     /// `Some(Some(s))` sets it to `s`; `Some(None)` resets it to the
     /// schema default "." because the column is `NOT NULL`.
     pub source_repo: Option<Option<String>>,
-    /// Override the canonical filesystem path of the repo containing `.beads`.
-    /// See #289. Use `update --source-repo-path` for ad-hoc repair after a
-    /// repo is moved/copied to a new machine.
-    pub source_repo_path: Option<Option<String>>,
-    /// Set inherited governing-instructions JSON (beads#297).
-    /// `Some(Some(s))` writes the JSON string `s`; `Some(None)` clears
-    /// the field back to `NULL`. `None` means "do not touch this field".
-    /// Validation happens at the CLI boundary; storage is opaque TEXT.
-    pub agent_context: Option<Option<String>>,
     pub closed_at: Option<Option<DateTime<Utc>>>,
     pub close_reason: Option<Option<String>>,
-    pub closed_by_session: Option<Option<String>>,
     pub deleted_at: Option<Option<DateTime<Utc>>>,
     pub deleted_by: Option<Option<String>>,
     pub delete_reason: Option<Option<String>>,
@@ -11337,13 +10956,6 @@ pub struct IssueUpdate {
     /// If true, do not rebuild the blocked cache after update.
     /// Caller is responsible for rebuilding cache if needed.
     pub skip_cache_rebuild: bool,
-    /// If true, verify the issue is unassigned (or assigned to `claim_actor`)
-    /// inside the IMMEDIATE transaction to prevent TOCTOU races.
-    pub expect_unassigned: bool,
-    /// If true, reject re-claims even by the same actor.
-    pub claim_exclusive: bool,
-    /// The actor performing the claim (used for idempotent same-actor check).
-    pub claim_actor: Option<String>,
     /// Append to `notes` rather than replacing them (bds-yo8).
     /// `br update --append-notes`.
     ///
@@ -11360,16 +10972,10 @@ pub struct IssueUpdate {
     /// Compare-and-set guard: apply only if the stored status still equals this
     /// value (bds-o9a). `br update --if-status`.
     ///
-    /// This is `expect_unassigned` generalised. Like it, the guard is evaluated
-    /// inside the write transaction *and* restated as a predicate on the
-    /// `UPDATE`'s `WHERE` clause; see `update_issue_in_tx` for why both.
+    /// The guard is evaluated inside the write transaction *and* restated as
+    /// a predicate on the `UPDATE`'s `WHERE` clause; see `update_issue_in_tx`
+    /// for why both.
     pub expect_status: Option<String>,
-    /// Compare-and-set guard on the assignee. `br update --if-assignee`.
-    ///
-    /// `Some(None)` guards on "unassigned", which is how the CLI spells
-    /// `--if-assignee ""` — deliberately the same convention as `--assignee ""`
-    /// meaning "clear it". `Some(Some(a))` guards on an exact match.
-    pub expect_assignee: Option<Option<String>>,
 }
 
 impl IssueUpdate {
@@ -11383,33 +10989,24 @@ impl IssueUpdate {
             && self.status.is_none()
             && self.priority.is_none()
             && self.issue_type.is_none()
-            && self.assignee.is_none()
             && self.owner.is_none()
-            && self.estimated_minutes.is_none()
-            && self.due_at.is_none()
             && self.defer_until.is_none()
             && self.external_ref.is_none()
             && self.source_repo.is_none()
-            && self.source_repo_path.is_none()
-            && self.agent_context.is_none()
             && self.closed_at.is_none()
             && self.close_reason.is_none()
-            && self.closed_by_session.is_none()
             && self.deleted_at.is_none()
             && self.deleted_by.is_none()
             && self.delete_reason.is_none()
             && self.transition_comment.is_none()
             && self.workflow_policy_bypass_reason.is_none()
             && self.append_notes.is_none()
-            && !self.expect_unassigned
     }
 }
 
 /// Filter options for ready issues.
 #[derive(Debug, Clone, Default)]
 pub struct ReadyFilters {
-    pub assignee: Option<String>,
-    pub unassigned: bool,
     pub labels_and: Vec<String>,
     pub labels_or: Vec<String>,
     pub types: Option<Vec<IssueType>>,
@@ -11492,8 +11089,6 @@ fn default_visible_limited_page_limit(filters: &ListFilters) -> Option<usize> {
     let is_default_visible = filters.statuses.as_ref().is_none_or(Vec::is_empty)
         && filters.types.as_ref().is_none_or(Vec::is_empty)
         && filters.priorities.as_ref().is_none_or(Vec::is_empty)
-        && filters.assignee.is_none()
-        && !filters.unassigned
         && !filters.include_closed
         && !filters.include_templates
         && filters.title_contains.is_none()
@@ -11517,8 +11112,6 @@ fn default_visible_single_label_count_filter(filters: &ListFilters) -> Option<&s
     let is_default_visible = filters.statuses.as_ref().is_none_or(Vec::is_empty)
         && filters.types.as_ref().is_none_or(Vec::is_empty)
         && filters.priorities.as_ref().is_none_or(Vec::is_empty)
-        && filters.assignee.is_none()
-        && !filters.unassigned
         && !filters.include_closed
         && !filters.include_templates
         && filters.title_contains.is_none()
@@ -11564,21 +11157,6 @@ fn parse_status(s: Option<&str>) -> Status {
 
 fn parse_issue_type(s: Option<&str>) -> IssueType {
     s.and_then(|s| s.parse().ok()).unwrap_or_default()
-}
-
-/// Collapse the two spellings of "nobody" into one.
-///
-/// `assignee` is stored as `NULL` by some paths and as the empty string by
-/// others — `bd` compatibility, see the `add_update` comment about empty
-/// strings in `update_issue_in_tx` — and whitespace survives a shell quote.
-/// The compare-and-set guard on `--if-assignee` has to treat all three as the
-/// same value, or `--if-assignee ""` would hold for one unassigned row and not
-/// for its neighbour.
-fn normalized_assignee(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
 }
 
 fn dependency_metadata_from_row(
@@ -12529,12 +12107,10 @@ impl SqliteStorage {
     pub fn find_by_external_ref(&self, external_ref: &str) -> Result<Option<Issue>> {
         match self.conn.query_row_with_params(
             r"SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
-                     status, priority, issue_type, assignee, owner, estimated_minutes,
-                     created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                     due_at, defer_until, external_ref, source_system, source_repo,
-                     deleted_at, deleted_by, delete_reason, original_type, compaction_level,
-                     compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                     pinned, is_template, source_repo_path, agent_context,
+                     status, priority, issue_type, owner,
+                     created_at, created_by, updated_at, closed_at, close_reason,
+                     defer_until, external_ref, source_repo,
+                     deleted_at, deleted_by, delete_reason, original_type,
                      former_ids
                FROM issues WHERE external_ref = ?",
             &[SqliteValue::from(external_ref)],
@@ -12565,14 +12141,7 @@ impl SqliteStorage {
             SqliteValue::from(status_str),
             SqliteValue::from(i64::from(issue.priority.0)),
             SqliteValue::from(issue_type_str),
-            issue
-                .assignee
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
             SqliteValue::from(issue.owner.as_deref().unwrap_or("")),
-            issue
-                .estimated_minutes
-                .map_or(SqliteValue::Null, |v| SqliteValue::from(i64::from(v))),
             SqliteValue::from(timestamps.created_at.as_str()),
             SqliteValue::from(issue.created_by.as_deref().unwrap_or("")),
             SqliteValue::from(timestamps.updated_at.as_str()),
@@ -12581,11 +12150,6 @@ impl SqliteStorage {
                 .as_deref()
                 .map_or(SqliteValue::Null, SqliteValue::from),
             SqliteValue::from(issue.close_reason.as_deref().unwrap_or("")),
-            SqliteValue::from(issue.closed_by_session.as_deref().unwrap_or("")),
-            timestamps
-                .due_at
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
             timestamps
                 .defer_until
                 .as_deref()
@@ -12594,12 +12158,7 @@ impl SqliteStorage {
                 .external_ref
                 .as_deref()
                 .map_or(SqliteValue::Null, SqliteValue::from),
-            SqliteValue::from(issue.source_system.as_deref().unwrap_or("")),
             SqliteValue::from(issue.source_repo.as_deref().unwrap_or(".")),
-            issue
-                .source_repo_path
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
             timestamps
                 .deleted_at
                 .as_deref()
@@ -12607,24 +12166,6 @@ impl SqliteStorage {
             SqliteValue::from(issue.deleted_by.as_deref().unwrap_or("")),
             SqliteValue::from(issue.delete_reason.as_deref().unwrap_or("")),
             SqliteValue::from(issue.original_type.as_deref().unwrap_or("")),
-            SqliteValue::from(i64::from(issue.compaction_level.unwrap_or(0))),
-            timestamps
-                .compacted_at
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
-            issue
-                .compacted_at_commit
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
-            SqliteValue::from(i64::from(issue.original_size.unwrap_or(0))),
-            SqliteValue::from(issue.sender.as_deref().unwrap_or("")),
-            SqliteValue::from(i64::from(i32::from(issue.ephemeral))),
-            SqliteValue::from(i64::from(i32::from(issue.pinned))),
-            SqliteValue::from(i64::from(i32::from(issue.is_template))),
-            issue
-                .agent_context
-                .as_deref()
-                .map_or(SqliteValue::Null, SqliteValue::from),
             SqliteValue::from(
                 serde_json::to_string(&issue.former_ids).unwrap_or_else(|_| "[]".to_string()),
             ),
@@ -12636,21 +12177,20 @@ impl SqliteStorage {
         issue: &Issue,
         timestamps: &ImportIssueTimestampStrings,
     ) -> Result<usize> {
-        let mut insert_params = Vec::with_capacity(39);
+        let mut insert_params = Vec::with_capacity(24);
         insert_params.push(SqliteValue::from(issue.id.as_str()));
         insert_params.extend(Self::import_issue_field_values(issue, timestamps));
 
         let rows = self.conn.execute_with_params(
             r"INSERT INTO issues (
                 id, content_hash, title, description, design, acceptance_criteria, notes,
-                status, priority, issue_type, assignee, owner, estimated_minutes,
-                created_at, created_by, updated_at, closed_at, close_reason, closed_by_session,
-                due_at, defer_until, external_ref, source_system, source_repo, source_repo_path,
-                deleted_at, deleted_by, delete_reason, original_type, compaction_level,
-                compacted_at, compacted_at_commit, original_size, sender, ephemeral,
-                pinned, is_template, agent_context, former_ids
+                status, priority, issue_type, owner,
+                created_at, created_by, updated_at, closed_at, close_reason,
+                defer_until, external_ref, source_repo,
+                deleted_at, deleted_by, delete_reason, original_type,
+                former_ids
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )",
             &insert_params,
         )?;
@@ -12669,13 +12209,12 @@ impl SqliteStorage {
             r"UPDATE issues SET
                 content_hash = ?, title = ?, description = ?, design = ?,
                 acceptance_criteria = ?, notes = ?, status = ?, priority = ?,
-                issue_type = ?, assignee = ?, owner = ?, estimated_minutes = ?,
+                issue_type = ?, owner = ?,
                 created_at = ?, created_by = ?, updated_at = ?, closed_at = ?,
-                close_reason = ?, closed_by_session = ?, due_at = ?, defer_until = ?,
-                external_ref = ?, source_system = ?, source_repo = ?, source_repo_path = ?,
-                deleted_at = ?, deleted_by = ?, delete_reason = ?, original_type = ?, compaction_level = ?,
-                compacted_at = ?, compacted_at_commit = ?, original_size = ?, sender = ?,
-                ephemeral = ?, pinned = ?, is_template = ?, agent_context = ?, former_ids = ?
+                close_reason = ?, defer_until = ?,
+                external_ref = ?, source_repo = ?,
+                deleted_at = ?, deleted_by = ?, delete_reason = ?, original_type = ?,
+                former_ids = ?
               WHERE id = ?",
             &params,
         )?;
@@ -13355,7 +12894,6 @@ mod tests {
         title: &str,
         status: Status,
         priority: i32,
-        assignee: Option<&str>,
         created_at: DateTime<Utc>,
         defer_until: Option<DateTime<Utc>>,
     ) -> Issue {
@@ -13373,32 +12911,17 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             notes: None,
-            assignee: assignee.map(str::to_string),
             owner: None,
-            estimated_minutes: None,
             created_by: None,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -13455,7 +12978,6 @@ mod tests {
             "review candidate",
             Status::InProgress,
             2,
-            None,
             Utc::now(),
             None,
         );
@@ -13513,7 +13035,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         storage.set_workflow_policy(required_review_fields_workflow());
         for id in ["bd-batch-a", "bd-batch-b"] {
-            let issue = make_issue(id, id, Status::InProgress, 2, None, Utc::now(), None);
+            let issue = make_issue(id, id, Status::InProgress, 2, Utc::now(), None);
             storage.create_issue(&issue, "tester").unwrap();
         }
 
@@ -13558,7 +13080,6 @@ mod tests {
             "emergency transition",
             Status::InProgress,
             2,
-            None,
             Utc::now(),
             None,
         );
@@ -13583,15 +13104,7 @@ mod tests {
         let now = Utc::now();
         storage
             .create_issue(
-                &make_issue(
-                    "bd-cap-create-1",
-                    "first",
-                    Status::InProgress,
-                    1,
-                    None,
-                    now,
-                    None,
-                ),
+                &make_issue("bd-cap-create-1", "first", Status::InProgress, 1, now, None),
                 "tester",
             )
             .unwrap();
@@ -13603,7 +13116,6 @@ mod tests {
                     "second",
                     Status::InProgress,
                     1,
-                    None,
                     now,
                     None,
                 ),
@@ -13625,21 +13137,13 @@ mod tests {
         let now = Utc::now();
         storage
             .create_issue(
-                &make_issue(
-                    "bd-cap-active",
-                    "active",
-                    Status::InProgress,
-                    1,
-                    None,
-                    now,
-                    None,
-                ),
+                &make_issue("bd-cap-active", "active", Status::InProgress, 1, now, None),
                 "tester",
             )
             .unwrap();
         storage
             .create_issue(
-                &make_issue("bd-cap-open", "open", Status::Open, 1, None, now, None),
+                &make_issue("bd-cap-open", "open", Status::Open, 1, now, None),
                 "tester",
             )
             .unwrap();
@@ -13666,7 +13170,7 @@ mod tests {
         for id in ["bd-cap-over-1", "bd-cap-over-2"] {
             storage
                 .create_issue(
-                    &make_issue(id, id, Status::InProgress, 1, None, now, None),
+                    &make_issue(id, id, Status::InProgress, 1, now, None),
                     "tester",
                 )
                 .unwrap();
@@ -13695,7 +13199,7 @@ mod tests {
             ("bd-cap-group-3", Status::Open),
         ] {
             storage
-                .create_issue(&make_issue(id, id, status, 1, None, now, None), "tester")
+                .create_issue(&make_issue(id, id, status, 1, now, None), "tester")
                 .unwrap();
         }
         let mut policy = crate::close_policy::CapacityPolicy::default();
@@ -13734,7 +13238,7 @@ mod tests {
             ("bd-cap-rework", Status::Custom("rework".to_string())),
         ] {
             storage
-                .create_issue(&make_issue(id, id, status, 1, None, now, None), "tester")
+                .create_issue(&make_issue(id, id, status, 1, now, None), "tester")
                 .unwrap();
         }
         let mut policy = crate::close_policy::CapacityPolicy::default();
@@ -13783,10 +13287,7 @@ mod tests {
             let mut setup = SqliteStorage::open(&db_path).unwrap();
             for id in ["bd-cap-race-1", "bd-cap-race-2"] {
                 setup
-                    .create_issue(
-                        &make_issue(id, id, Status::Open, 1, None, now, None),
-                        "tester",
-                    )
+                    .create_issue(&make_issue(id, id, Status::Open, 1, now, None), "tester")
                     .unwrap();
             }
         }
@@ -13840,7 +13341,7 @@ mod tests {
             ("bd-cap-batch-open-2", Status::Open),
         ] {
             storage
-                .create_issue(&make_issue(id, id, status, 1, None, now, None), "tester")
+                .create_issue(&make_issue(id, id, status, 1, now, None), "tester")
                 .unwrap();
         }
         storage.set_workflow_policy(capacity_only(hard_status_capacity("in_progress", 2)));
@@ -13882,7 +13383,6 @@ mod tests {
                     "active",
                     Status::InProgress,
                     1,
-                    None,
                     now,
                     None,
                 ),
@@ -13891,7 +13391,7 @@ mod tests {
             .unwrap();
         storage
             .create_issue(
-                &make_issue("bd-cap-swap-open", "open", Status::Open, 1, None, now, None),
+                &make_issue("bd-cap-swap-open", "open", Status::Open, 1, now, None),
                 "tester",
             )
             .unwrap();
@@ -13941,10 +13441,7 @@ mod tests {
         let now = Utc::now();
         for id in ["bd-cap-soft-1", "bd-cap-soft-2"] {
             storage
-                .create_issue(
-                    &make_issue(id, id, Status::Open, 1, None, now, None),
-                    "tester",
-                )
+                .create_issue(&make_issue(id, id, Status::Open, 1, now, None), "tester")
                 .unwrap();
         }
         let mut policy = crate::close_policy::CapacityPolicy::default();
@@ -13999,10 +13496,7 @@ mod tests {
         let now = Utc::now();
         for id in ["bd-batch-valid", "bd-batch-invalid"] {
             storage
-                .create_issue(
-                    &make_issue(id, id, Status::Open, 1, None, now, None),
-                    "tester",
-                )
+                .create_issue(&make_issue(id, id, Status::Open, 1, now, None), "tester")
                 .unwrap();
         }
 
@@ -14067,7 +13561,6 @@ mod tests {
             "Ready summary issue",
             Status::Open,
             1,
-            Some("alice"),
             created_at,
             None,
         );
@@ -14076,7 +13569,6 @@ mod tests {
         ready.acceptance_criteria = Some("AC should stay cold".repeat(128));
         ready.notes = Some("Notes should stay cold".repeat(128));
         ready.owner = Some("product".to_string());
-        ready.estimated_minutes = Some(45);
         ready.created_by = Some("agent".to_string());
         ready.updated_at = created_at + chrono::Duration::minutes(5);
 
@@ -14087,7 +13579,6 @@ mod tests {
                 "Other ready summary issue",
                 Status::Open,
                 2,
-                None,
                 created_at + chrono::Duration::minutes(1),
                 None,
             ),
@@ -14096,7 +13587,6 @@ mod tests {
                 "Blocker",
                 Status::Open,
                 0,
-                None,
                 created_at + chrono::Duration::minutes(2),
                 None,
             ),
@@ -14105,7 +13595,6 @@ mod tests {
                 "Blocked",
                 Status::Open,
                 1,
-                None,
                 created_at + chrono::Duration::minutes(3),
                 None,
             ),
@@ -14238,15 +13727,7 @@ mod tests {
 
         // Perform a mutation so SQLite actually materializes the WAL sidecar,
         // exercising the sidecar-cleanup path and not just the base .db file.
-        let issue = make_issue(
-            "bd-1",
-            "tmp leak repro",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let issue = make_issue("bd-1", "tmp leak repro", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&issue, "tester").unwrap();
 
         assert!(
@@ -14315,33 +13796,18 @@ mod tests {
             design: None,
             acceptance_criteria: None,
             notes: None,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_by: None,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
             defer_until: None,
-            due_at: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -14435,7 +13901,6 @@ mod tests {
             "Custom status",
             Status::Open,
             2,
-            None,
             Utc::now(),
             None,
         );
@@ -14464,7 +13929,6 @@ mod tests {
             "Bad timestamp",
             Status::Open,
             2,
-            None,
             Utc::now(),
             None,
         );
@@ -14485,7 +13949,7 @@ mod tests {
     #[test]
     fn test_transaction_rollback_on_error() {
         let mut storage = SqliteStorage::open_memory().unwrap();
-        let issue = make_issue("bd-tx1", "Tx Test", Status::Open, 2, None, Utc::now(), None);
+        let issue = make_issue("bd-tx1", "Tx Test", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&issue, "tester").unwrap();
 
         // Attempt a mutation that fails
@@ -14505,7 +13969,6 @@ mod tests {
             "Tx Side Effect Test",
             Status::Open,
             2,
-            None,
             Utc::now(),
             None,
         );
@@ -14530,7 +13993,6 @@ mod tests {
             "Follow Up",
             Status::Open,
             2,
-            None,
             Utc::now(),
             None,
         );
@@ -14552,7 +14014,6 @@ mod tests {
             "FK Tolerance Test",
             Status::Open,
             2,
-            None,
             Utc::now(),
             None,
         );
@@ -14578,8 +14039,8 @@ mod tests {
 
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 3, 0, 0, 0).unwrap();
-        let parent = make_issue("bd-p1", "Parent", Status::Open, 2, None, t1, None);
-        let child = make_issue("bd-c1", "Child", Status::Open, 2, None, t1, None);
+        let parent = make_issue("bd-p1", "Parent", Status::Open, 2, t1, None);
+        let child = make_issue("bd-c1", "Child", Status::Open, 2, t1, None);
         storage.create_issue(&parent, "tester").unwrap();
         storage.create_issue(&child, "tester").unwrap();
 
@@ -14621,7 +14082,6 @@ mod tests {
             "External blocked",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -14665,7 +14125,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
 
         let err = storage
@@ -14684,7 +14144,7 @@ mod tests {
     fn test_has_external_dependencies_detects_external_parent_child_children() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 3, 0, 0, 0).unwrap();
-        let mut parent = make_issue("bd-p1", "Parent", Status::Open, 2, None, t1, None);
+        let mut parent = make_issue("bd-p1", "Parent", Status::Open, 2, t1, None);
         parent.issue_type = IssueType::Epic;
         storage.create_issue(&parent, "tester").unwrap();
 
@@ -14699,8 +14159,8 @@ mod tests {
     fn test_missing_issue_references_allows_external_dependency_endpoints() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 3, 0, 0, 0).unwrap();
-        let local = make_issue("bd-local", "Local issue", Status::Open, 2, None, t1, None);
-        let mut epic = make_issue("bd-epic", "Epic issue", Status::Open, 2, None, t1, None);
+        let local = make_issue("bd-local", "Local issue", Status::Open, 2, t1, None);
+        let mut epic = make_issue("bd-epic", "Epic issue", Status::Open, 2, t1, None);
         epic.issue_type = IssueType::Epic;
 
         storage.create_issue(&local, "tester").unwrap();
@@ -14732,15 +14192,7 @@ mod tests {
     fn test_external_parent_child_task_parent_is_not_blocked_candidate() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 4, 0, 0, 0).unwrap();
-        let parent = make_issue(
-            "bd-task-parent",
-            "Task Parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let parent = make_issue("bd-task-parent", "Task Parent", Status::Open, 2, t1, None);
         storage.create_issue(&parent, "tester").unwrap();
 
         insert_external_parent_child_dependency(
@@ -14759,33 +14211,10 @@ mod tests {
     fn test_blocking_only_external_resolution_skips_non_epic_external_children() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 5, 0, 0, 0).unwrap();
-        let direct = make_issue(
-            "bd-direct",
-            "Direct blocker",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let task_parent = make_issue(
-            "bd-task-parent",
-            "Task Parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let mut epic_parent = make_issue(
-            "bd-epic-parent",
-            "Epic Parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let direct = make_issue("bd-direct", "Direct blocker", Status::Open, 2, t1, None);
+        let task_parent = make_issue("bd-task-parent", "Task Parent", Status::Open, 2, t1, None);
+        let mut epic_parent =
+            make_issue("bd-epic-parent", "Epic Parent", Status::Open, 2, t1, None);
         epic_parent.issue_type = IssueType::Epic;
 
         for issue in [direct, task_parent, epic_parent] {
@@ -14828,24 +14257,9 @@ mod tests {
     fn test_external_parent_child_child_only_blocks_epic_parent() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 6, 0, 0, 0).unwrap();
-        let task_parent = make_issue(
-            "bd-task-parent",
-            "Task Parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let mut epic_parent = make_issue(
-            "bd-epic-parent",
-            "Epic Parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let task_parent = make_issue("bd-task-parent", "Task Parent", Status::Open, 2, t1, None);
+        let mut epic_parent =
+            make_issue("bd-epic-parent", "Epic Parent", Status::Open, 2, t1, None);
         epic_parent.issue_type = IssueType::Epic;
         storage.create_issue(&task_parent, "tester").unwrap();
         storage.create_issue(&epic_parent, "tester").unwrap();
@@ -14888,8 +14302,8 @@ mod tests {
     fn test_blocked_command_candidate_probe_detects_local_blocked_cache() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 4, 0, 0, 0).unwrap();
-        let blocker = make_issue("bd-blocker", "Blocker", Status::Open, 2, None, t1, None);
-        let blocked = make_issue("bd-blocked", "Blocked", Status::Open, 2, None, t1, None);
+        let blocker = make_issue("bd-blocker", "Blocker", Status::Open, 2, t1, None);
+        let blocked = make_issue("bd-blocked", "Blocked", Status::Open, 2, t1, None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
         storage
@@ -14903,7 +14317,7 @@ mod tests {
     fn test_blocked_command_candidate_probe_detects_external_blockers() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 5, 0, 0, 0).unwrap();
-        let issue = make_issue("bd-p1", "Parent", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-p1", "Parent", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
         storage
             .add_dependency("bd-p1", "external:extproj:capability", "blocks", "tester")
@@ -14926,7 +14340,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-close-285", "Close me", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-close-285", "Close me", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         // Sanity: dirty-tracker is empty after create. (`create_issue`
@@ -14982,7 +14396,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 5, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-u1", "Update me", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-u1", "Update me", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         let updates = IssueUpdate {
@@ -14990,7 +14404,6 @@ mod tests {
             description: Some(Some("New description".to_string())),
             status: Some(Status::InProgress),
             priority: Some(Priority::HIGH),
-            assignee: Some(Some("alice".to_string())),
             ..IssueUpdate::default()
         };
 
@@ -14998,60 +14411,33 @@ mod tests {
         assert_eq!(updated.title, "Updated title");
         assert_eq!(updated.status, Status::InProgress);
         assert_eq!(updated.priority, Priority::HIGH);
-        assert_eq!(updated.assignee.as_deref(), Some("alice"));
         assert_eq!(updated.description.as_deref(), Some("New description"));
     }
 
     #[test]
-    fn test_update_issue_writes_source_repo_path() {
-        // Regression for #289: `br update --source-repo-path PATH` must
-        // round-trip through SQLite. Without writing to the column, the
-        // installed checkpoint would silently lose the value on every
-        // create-then-update cycle.
+    fn test_update_issue_writes_source_repo() {
+        // Regression for #289: `br update --source-repo NAME` must round-trip
+        // through SQLite. Without writing to the column, the installed
+        // checkpoint would silently lose the value on every create-then-update
+        // cycle. (Originally paired with `source_repo_path`, removed in
+        // bds-b4f.2.4; `source_repo` is the field that survives and is
+        // populated in real workspaces, so its round-trip coverage stays.)
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 5, 1, 0, 0, 0).unwrap();
-        let issue = make_issue(
-            "bd-srp",
-            "source_repo_path RT",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue = make_issue("bd-srp", "source_repo RT", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         let updates = IssueUpdate {
             source_repo: Some(Some("widget_engine".to_string())),
-            source_repo_path: Some(Some("/repos/widget_engine".to_string())),
             ..IssueUpdate::default()
         };
         let updated = storage.update_issue("bd-srp", &updates, "tester").unwrap();
         assert_eq!(updated.source_repo.as_deref(), Some("widget_engine"));
-        assert_eq!(
-            updated.source_repo_path.as_deref(),
-            Some("/repos/widget_engine")
-        );
 
         // Read back through a fresh fetch to prove it persisted (not just
         // returned from the in-memory `Issue` the update builder mutates).
         let reread = storage.get_issue("bd-srp").unwrap().unwrap();
         assert_eq!(reread.source_repo.as_deref(), Some("widget_engine"));
-        assert_eq!(
-            reread.source_repo_path.as_deref(),
-            Some("/repos/widget_engine")
-        );
-
-        // Clear path: passing an empty string through `optional_string_field`
-        // sets the inner Option to None, which should write SQL NULL.
-        let clear = IssueUpdate {
-            source_repo_path: Some(None),
-            ..IssueUpdate::default()
-        };
-        let cleared = storage.update_issue("bd-srp", &clear, "tester").unwrap();
-        assert!(cleared.source_repo_path.is_none());
-        let reread = storage.get_issue("bd-srp").unwrap().unwrap();
-        assert!(reread.source_repo_path.is_none());
     }
 
     #[test]
@@ -15059,15 +14445,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 5, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue(
-            "bd-u-priority",
-            "No-op priority",
-            Status::Open,
-            1,
-            None,
-            t1,
-            None,
-        );
+        let issue = make_issue("bd-u-priority", "No-op priority", Status::Open, 1, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
         storage.clear_all_dirty_issues().unwrap();
 
@@ -15093,15 +14471,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 5, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue(
-            "bd-u-tomb",
-            "Do not resurrect",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue = make_issue("bd-u-tomb", "Do not resurrect", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
         let tombstone = storage
             .delete_issue("bd-u-tomb", "tester", "delete for update test", None)
@@ -15156,15 +14526,7 @@ mod tests {
         let db_path = temp_dir.path().join("beads.db");
 
         let mut setup = SqliteStorage::open(&db_path).unwrap();
-        let issue = make_issue(
-            "bd-race1",
-            "Original title",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let issue = make_issue("bd-race1", "Original title", Status::Open, 2, Utc::now(), None);
         setup.create_issue(&issue, "tester").unwrap();
         drop(setup);
 
@@ -15225,7 +14587,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-d1", "Delete me", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-d1", "Delete me", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         let deleted = storage
@@ -15240,15 +14602,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue(
-            "bd-rmeta",
-            "Reopen metadata",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue = make_issue("bd-rmeta", "Reopen metadata", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         let close_update = IssueUpdate {
@@ -15268,7 +14622,6 @@ mod tests {
             status: Some(Status::Open),
             closed_at: Some(None),
             close_reason: Some(None),
-            closed_by_session: Some(None),
             ..IssueUpdate::default()
         };
         storage
@@ -15283,15 +14636,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue(
-            "bd-dmeta",
-            "Delete metadata",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue = make_issue("bd-dmeta", "Delete metadata", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         let close_update = IssueUpdate {
@@ -15319,7 +14664,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-d2", "Delete me too", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-d2", "Delete me too", Status::Open, 2, t1, None);
         let original_hash = issue.content_hash.clone();
         storage.create_issue(&issue, "tester").unwrap();
 
@@ -15341,7 +14686,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
         let deleted_at = Utc.with_ymd_and_hms(2025, 6, 2, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-d3", "Already deleted", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-d3", "Already deleted", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
         let first = storage
             .delete_issue("bd-d3", "first", "first delete", Some(deleted_at))
@@ -15365,7 +14710,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-p1", "Purge me", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-p1", "Purge me", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         storage.purge_issue("bd-p1").unwrap();
@@ -15387,8 +14732,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 4, 1, 0, 0, 0).unwrap();
 
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, None, t1, None);
-        let blocked = make_issue("bd-b2", "Blocked", Status::Open, 2, None, t1, None);
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, t1, None);
+        let blocked = make_issue("bd-b2", "Blocked", Status::Open, 2, t1, None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
 
@@ -15411,7 +14756,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for id in &ids {
-            let issue = make_issue(id, id, Status::Open, 1, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 1, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
             storage.add_label(id, "scheduler").unwrap();
         }
@@ -15439,7 +14784,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 4, 1, 0, 0, 0).unwrap();
 
         for id in ["bd-a", "bd-b", "bd-c"] {
-            let issue = make_issue(id, id, Status::Open, 1, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 1, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage.add_label("bd-a", "backend").unwrap();
@@ -15489,23 +14834,14 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 4, 1, 0, 0, 0).unwrap();
 
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, None, t1, None);
-        let mut deferred = make_issue(
-            "bd-b2",
-            "Deferred blocked",
-            Status::Deferred,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, t1, None);
+        let mut deferred = make_issue("bd-b2", "Deferred blocked", Status::Deferred, 2, t1, None);
         deferred.defer_until = Some(t1 + chrono::Duration::days(1));
         let custom = make_issue(
             "bd-b3",
             "Custom blocked",
             Status::Custom("review".to_string()),
             2,
-            None,
             t1,
             None,
         );
@@ -15535,7 +14871,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-l1", "Label me", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-l1", "Label me", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         let added = storage.add_label("bd-l1", "backend").unwrap();
@@ -15557,15 +14893,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue(
-            "bd-l-invalid",
-            "Invalid label",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue = make_issue("bd-l-invalid", "Invalid label", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         let err = storage
@@ -15585,7 +14913,6 @@ mod tests {
             "Invalid label removal",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -15607,7 +14934,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-l-cap", "Label cap", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-l-cap", "Label cap", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         for index in 0..ISSUE_LABEL_MAX_COUNT {
@@ -15635,7 +14962,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
         for id in ["bd-bulk-a", "bd-bulk-b", "bd-bulk-c"] {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage.add_label("bd-bulk-b", "bulk-added").unwrap();
@@ -15683,7 +15010,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for id in &ids {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage.clear_all_dirty_issues().unwrap();
@@ -15705,7 +15032,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
         for id in ["bd-bulk-cap-ok", "bd-bulk-cap-full"] {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         for index in 0..ISSUE_LABEL_MAX_COUNT {
@@ -15735,7 +15062,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
         for id in ["bd-bulk-active", "bd-bulk-tomb"] {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage
@@ -15761,7 +15088,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
         for id in ["bd-bulk-remove-a", "bd-bulk-remove-b", "bd-bulk-remove-c"] {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage
@@ -15817,7 +15144,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for id in &ids {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         let added = storage
@@ -15843,7 +15170,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
         for id in ["bd-bulk-remove-active", "bd-bulk-remove-tomb"] {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage
@@ -15877,7 +15204,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-l2", "Dedup labels", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-l2", "Dedup labels", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         storage
@@ -15900,15 +15227,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue(
-            "bd-l-set-invalid",
-            "Set labels",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue = make_issue("bd-l-set-invalid", "Set labels", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
         storage
             .set_labels("bd-l-set-invalid", &["stable".to_string()])
@@ -15946,7 +15265,6 @@ mod tests {
             "Import labels",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -15999,7 +15317,6 @@ mod tests {
             "Import dependencies",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16008,7 +15325,6 @@ mod tests {
             "Stable parent",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16128,7 +15444,6 @@ mod tests {
             "Deleted label target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16165,7 +15480,6 @@ mod tests {
             "Active label count target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16174,7 +15488,6 @@ mod tests {
             "Deleted label count target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16199,7 +15512,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-l3", "Rename label", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-l3", "Rename label", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
         storage.add_label("bd-l3", "backend").unwrap();
 
@@ -16222,7 +15535,6 @@ mod tests {
             "Rename invalid label",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16263,7 +15575,6 @@ mod tests {
             "Active label target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16272,7 +15583,6 @@ mod tests {
             "Deleted label target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16302,8 +15612,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
 
@@ -16331,9 +15641,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-bulk-a", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-bulk-b", "B", Status::Open, 2, None, t1, None);
-        let issue_c = make_issue("bd-bulk-c", "C", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-bulk-a", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-bulk-b", "B", Status::Open, 2, t1, None);
+        let issue_c = make_issue("bd-bulk-c", "C", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
         storage.create_issue(&issue_c, "tester").unwrap();
@@ -16377,9 +15687,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-bulk-cycle-a", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-bulk-cycle-b", "B", Status::Open, 2, None, t1, None);
-        let issue_c = make_issue("bd-bulk-cycle-c", "C", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-bulk-cycle-a", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-bulk-cycle-b", "B", Status::Open, 2, t1, None);
+        let issue_c = make_issue("bd-bulk-cycle-c", "C", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
         storage.create_issue(&issue_c, "tester").unwrap();
@@ -16428,8 +15738,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-existing-a", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-existing-b", "B", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-existing-a", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-existing-b", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
 
@@ -16459,8 +15769,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-bulk-existing-a", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-bulk-existing-b", "B", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-bulk-existing-a", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-bulk-existing-b", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
         storage
@@ -16509,24 +15819,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let parent = make_issue(
-            "bd-pc-cycle-parent",
-            "Parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let child = make_issue(
-            "bd-pc-cycle-child",
-            "Child",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let parent = make_issue("bd-pc-cycle-parent", "Parent", Status::Open, 2, t1, None);
+        let child = make_issue("bd-pc-cycle-child", "Child", Status::Open, 2, t1, None);
         storage.create_issue(&parent, "tester").unwrap();
         storage.create_issue(&child, "tester").unwrap();
 
@@ -16581,7 +15875,6 @@ mod tests {
             "Existing parent",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16590,7 +15883,6 @@ mod tests {
             "Existing child",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16640,33 +15932,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let child = make_issue(
-            "bd-single-parent-child",
-            "Child",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let parent_a = make_issue(
-            "bd-single-parent-a",
-            "Parent A",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let parent_b = make_issue(
-            "bd-single-parent-b",
-            "Parent B",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let child = make_issue("bd-single-parent-child", "Child", Status::Open, 2, t1, None);
+        let parent_a = make_issue("bd-single-parent-a", "Parent A", Status::Open, 2, t1, None);
+        let parent_b = make_issue("bd-single-parent-b", "Parent B", Status::Open, 2, t1, None);
 
         storage.create_issue(&child, "tester").unwrap();
         storage.create_issue(&parent_a, "tester").unwrap();
@@ -16725,25 +15993,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let child = make_issue("bd-dep-child", "Child", Status::Open, 2, None, t1, None);
-        let old_parent = make_issue(
-            "bd-dep-old-parent",
-            "Old parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let new_parent = make_issue(
-            "bd-dep-new-parent",
-            "New parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let child = make_issue("bd-dep-child", "Child", Status::Open, 2, t1, None);
+        let old_parent = make_issue("bd-dep-old-parent", "Old parent", Status::Open, 2, t1, None);
+        let new_parent = make_issue("bd-dep-new-parent", "New parent", Status::Open, 2, t1, None);
         storage.create_issue(&child, "tester").unwrap();
         storage.create_issue(&old_parent, "tester").unwrap();
         storage.create_issue(&new_parent, "tester").unwrap();
@@ -16806,24 +16058,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 3, 0, 0, 0).unwrap();
 
-        let child = make_issue(
-            "bd-parent-noop-child",
-            "Child",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let parent = make_issue(
-            "bd-parent-noop-parent",
-            "Parent",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let child = make_issue("bd-parent-noop-child", "Child", Status::Open, 2, t1, None);
+        let parent = make_issue("bd-parent-noop-parent", "Parent", Status::Open, 2, t1, None);
         storage.create_issue(&child, "tester").unwrap();
         storage.create_issue(&parent, "tester").unwrap();
         storage
@@ -16873,7 +16109,6 @@ mod tests {
             "Child",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16882,7 +16117,6 @@ mod tests {
             "Parent",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16891,7 +16125,6 @@ mod tests {
             "Extra parent",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -16965,34 +16198,10 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 6, 0, 0, 0).unwrap();
 
-        let child = make_issue(
-            "bd-remove-parent-child",
-            "Child",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let mut parent_a = make_issue(
-            "bd-remove-parent-a",
-            "Parent A",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let child = make_issue("bd-remove-parent-child", "Child", Status::Open, 2, t1, None);
+        let mut parent_a = make_issue("bd-remove-parent-a", "Parent A", Status::Open, 2, t1, None);
         parent_a.issue_type = IssueType::Epic;
-        let mut parent_b = make_issue(
-            "bd-remove-parent-b",
-            "Parent B",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let mut parent_b = make_issue("bd-remove-parent-b", "Parent B", Status::Open, 2, t1, None);
         parent_b.issue_type = IssueType::Epic;
 
         storage.create_issue(&child, "tester").unwrap();
@@ -17046,7 +16255,6 @@ mod tests {
             "Already root",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -17076,7 +16284,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
 
         let err = storage
@@ -17091,8 +16299,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
 
@@ -17123,8 +16331,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
 
@@ -17159,8 +16367,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
         storage
@@ -17197,8 +16405,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
 
@@ -17214,8 +16422,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("my-proj-abc123", "Alpha", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("other-proj-xyz789", "Beta", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("my-proj-abc123", "Alpha", Status::Open, 2, t1, None);
+        let issue_b = make_issue("other-proj-xyz789", "Beta", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
 
@@ -17235,7 +16443,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage
             .add_dependency("bd-a1", "external:proj:capability", "blocks", "tester")
@@ -17255,9 +16463,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
-        let critical = make_issue("bd-critical", "Critical", Status::Open, 0, None, t1, None);
-        let low = make_issue("bd-low", "Low", Status::Open, 3, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
+        let critical = make_issue("bd-critical", "Critical", Status::Open, 0, t1, None);
+        let low = make_issue("bd-low", "Low", Status::Open, 3, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&critical, "tester").unwrap();
         storage.create_issue(&low, "tester").unwrap();
@@ -17287,7 +16495,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a1", "A", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
 
         let created_at = Utc::now().to_rfc3339();
@@ -17313,7 +16521,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 2, 0, 0, 0).unwrap();
 
-        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, None, t1, None);
+        let issue_b = make_issue("bd-b1", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_b, "tester").unwrap();
 
         let created_at = Utc::now().to_rfc3339();
@@ -17341,9 +16549,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 3, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-cy1", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-cy2", "B", Status::Open, 2, None, t1, None);
-        let issue_c = make_issue("bd-cy3", "C", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-cy1", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-cy2", "B", Status::Open, 2, t1, None);
+        let issue_c = make_issue("bd-cy3", "C", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
         storage.create_issue(&issue_c, "tester").unwrap();
@@ -17369,8 +16577,8 @@ mod tests {
             .single()
             .ok_or_else(|| BeadsError::internal("invalid test timestamp"))?;
 
-        let issue_a = make_issue("bd-rel-cy1", "A", Status::Open, 2, None, t1, None);
-        let issue_b = make_issue("bd-rel-cy2", "B", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-rel-cy1", "A", Status::Open, 2, t1, None);
+        let issue_b = make_issue("bd-rel-cy2", "B", Status::Open, 2, t1, None);
         storage.create_issue(&issue_a, "tester")?;
         storage.create_issue(&issue_b, "tester")?;
 
@@ -17409,35 +16617,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: t1,
             created_by: None,
             updated_at: t1,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
             defer_until: None,
-            due_at: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -17491,35 +16684,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: t1,
             created_by: None,
             updated_at: t1,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
             defer_until: None,
-            due_at: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -17567,35 +16745,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: t1,
             created_by: None,
             updated_at: t1,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
             defer_until: None,
-            due_at: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -17645,35 +16808,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: t1,
             created_by: None,
             updated_at: t1,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
             defer_until: None,
-            due_at: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -17702,7 +16850,6 @@ mod tests {
             "Comment validation target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -17750,7 +16897,6 @@ mod tests {
             "Create comment validation target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -17790,7 +16936,6 @@ mod tests {
             "Deleted comment target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -17824,21 +16969,12 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 4, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue(
-            "bd-c-import-a",
-            "Import target",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue_a = make_issue("bd-c-import-a", "Import target", Status::Open, 2, t1, None);
         let issue_b = make_issue(
             "bd-c-import-b",
             "Existing comment owner",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -17880,7 +17016,6 @@ mod tests {
             "Duplicate import comments",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -17948,21 +17083,12 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 4, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue(
-            "bd-c-realloc-a",
-            "Import target",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue_a = make_issue("bd-c-realloc-a", "Import target", Status::Open, 2, t1, None);
         let issue_b = make_issue(
             "bd-c-realloc-b",
             "Existing comment owner",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -18052,7 +17178,6 @@ mod tests {
             "Invalid import comments",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -18087,9 +17212,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 4, 0, 0, 0).unwrap();
 
-        let parent = make_issue("bd-parent", "Parent", Status::Open, 2, None, t1, None);
-        let other = make_issue("bd-other", "Other", Status::Open, 2, None, t1, None);
-        let mut imported = make_issue("bd-new", "New import", Status::Open, 2, None, t1, None);
+        let parent = make_issue("bd-parent", "Parent", Status::Open, 2, t1, None);
+        let other = make_issue("bd-other", "Other", Status::Open, 2, t1, None);
+        let mut imported = make_issue("bd-new", "New import", Status::Open, 2, t1, None);
         storage.create_issue(&parent, "tester").unwrap();
         storage.create_issue(&other, "tester").unwrap();
         storage.insert_new_issue_for_import(&imported).unwrap();
@@ -18183,7 +17308,6 @@ mod tests {
             "Closed provider",
             Status::Closed,
             2,
-            None,
             t1,
             None,
         );
@@ -18193,7 +17317,6 @@ mod tests {
             "Deleted provider",
             Status::Tombstone,
             2,
-            None,
             t1,
             None,
         );
@@ -18261,35 +17384,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: t1,
             created_by: None,
             updated_at: t1,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
             defer_until: None,
-            due_at: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -18318,26 +17426,10 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
 
         // Create issues first (required for FK constraints on events table)
-        let issue1 = make_issue(
-            "bd-c1",
-            "Cached issue",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let issue1 = make_issue("bd-c1", "Cached issue", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&issue1, "tester").unwrap();
 
-        let issue2 = make_issue(
-            "bd-b1",
-            "Blocker issue",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let issue2 = make_issue("bd-b1", "Blocker issue", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&issue2, "tester").unwrap();
 
         // Manually insert some cache data
@@ -18413,24 +17505,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("beads.db");
         let mut storage = SqliteStorage::open(&db_path).unwrap();
-        let blocker = make_issue(
-            "bd-blocker",
-            "Blocker",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
-        let blocked = make_issue(
-            "bd-blocked",
-            "Blocked",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let blocker = make_issue("bd-blocker", "Blocker", Status::Open, 2, Utc::now(), None);
+        let blocked = make_issue("bd-blocked", "Blocked", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
         storage
@@ -18480,20 +17556,11 @@ mod tests {
             "Parent blocker",
             Status::Open,
             2,
-            None,
             Utc::now(),
             None,
         );
-        let parent = make_issue(
-            "bd-parent",
-            "Parent",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
-        let child = make_issue("bd-child", "Child", Status::Open, 2, None, Utc::now(), None);
+        let parent = make_issue("bd-parent", "Parent", Status::Open, 2, Utc::now(), None);
+        let child = make_issue("bd-child", "Child", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&parent, "tester").unwrap();
         storage.create_issue(&child, "tester").unwrap();
@@ -18570,28 +17637,19 @@ mod tests {
         // not carry that blocker (see `parent_child_transitive_blocking`
         // in `tests/storage_blocked_cache.rs`), so the test would be
         // testing semantics that no longer apply to plain tasks.
-        let mut parent = make_issue("bd-parent", "Parent", Status::Open, 2, None, now, None);
+        let mut parent = make_issue("bd-parent", "Parent", Status::Open, 2, now, None);
         parent.issue_type = IssueType::Epic;
         for issue in [
             parent,
-            make_issue("bd-parent.1", "Child 1", Status::Open, 2, None, now, None),
-            make_issue("bd-parent.2", "Child 2", Status::Open, 2, None, now, None),
-            make_issue("bd-blocker", "Blocker", Status::Open, 2, None, now, None),
-            make_issue(
-                "bd-unrelated",
-                "Unrelated",
-                Status::Open,
-                2,
-                None,
-                now,
-                None,
-            ),
+            make_issue("bd-parent.1", "Child 1", Status::Open, 2, now, None),
+            make_issue("bd-parent.2", "Child 2", Status::Open, 2, now, None),
+            make_issue("bd-blocker", "Blocker", Status::Open, 2, now, None),
+            make_issue("bd-unrelated", "Unrelated", Status::Open, 2, now, None),
             make_issue(
                 "bd-unrelated-blocker",
                 "Unrelated blocker",
                 Status::Open,
                 2,
-                None,
                 now,
                 None,
             ),
@@ -18656,28 +17714,26 @@ mod tests {
         let mut storage = SqliteStorage::open(&db_path).unwrap();
         let now = Utc::now();
 
-        let mut epic = make_issue("bd-epic", "Epic", Status::Open, 2, None, now, None);
+        let mut epic = make_issue("bd-epic", "Epic", Status::Open, 2, now, None);
         epic.issue_type = IssueType::Epic;
         let mut blocked_epic = make_issue(
             "bd-epic-blocked",
             "Blocked epic",
             Status::Open,
             2,
-            None,
             now,
             None,
         );
         blocked_epic.issue_type = IssueType::Epic;
         for issue in [
             epic,
-            make_issue("bd-epic.1", "Child", Status::Open, 2, None, now, None),
+            make_issue("bd-epic.1", "Child", Status::Open, 2, now, None),
             blocked_epic,
             make_issue(
                 "bd-epic-blocked.1",
                 "Child of blocked epic",
                 Status::Open,
                 2,
-                None,
                 now,
                 None,
             ),
@@ -18686,7 +17742,6 @@ mod tests {
                 "Real blocker",
                 Status::Open,
                 2,
-                None,
                 now,
                 None,
             ),
@@ -18748,35 +17803,25 @@ mod tests {
         let mut storage = SqliteStorage::open(&db_path).unwrap();
         let now = Utc::now();
 
-        let mut parent = make_issue("bd-parent", "Parent epic", Status::Open, 2, None, now, None);
+        let mut parent = make_issue("bd-parent", "Parent epic", Status::Open, 2, now, None);
         parent.issue_type = IssueType::Epic;
         for issue in [
             parent,
-            make_issue("bd-child", "Child task", Status::Open, 2, None, now, None),
+            make_issue("bd-child", "Child task", Status::Open, 2, now, None),
             make_issue(
                 "bd-child-direct",
                 "Child with its own blocker",
                 Status::Open,
                 2,
-                None,
                 now,
                 None,
             ),
-            make_issue(
-                "bd-blocker",
-                "External blocker",
-                Status::Open,
-                2,
-                None,
-                now,
-                None,
-            ),
+            make_issue("bd-blocker", "External blocker", Status::Open, 2, now, None),
             make_issue(
                 "bd-direct-blocker",
                 "Direct blocker of bd-child-direct",
                 Status::Open,
                 2,
-                None,
                 now,
                 None,
             ),
@@ -18841,8 +17886,8 @@ mod tests {
         let mut storage = SqliteStorage::open(&db_path).unwrap();
         let now = Utc::now();
 
-        let blocker = make_issue("bd-reset-b1", "Blocker", Status::Open, 2, None, now, None);
-        let blocked = make_issue("bd-reset-c1", "Blocked", Status::Open, 2, None, now, None);
+        let blocker = make_issue("bd-reset-b1", "Blocker", Status::Open, 2, now, None);
+        let blocked = make_issue("bd-reset-c1", "Blocked", Status::Open, 2, now, None);
 
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
@@ -18873,16 +17918,8 @@ mod tests {
     #[test]
     fn test_get_blocked_ids_and_is_blocked_fall_back_when_cache_table_missing() {
         let mut storage = SqliteStorage::open_memory().unwrap();
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 2, None, Utc::now(), None);
-        let blocked = make_issue(
-            "bd-c1",
-            "Blocked issue",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 2, Utc::now(), None);
+        let blocked = make_issue("bd-c1", "Blocked issue", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
         storage
@@ -18902,25 +17939,9 @@ mod tests {
     #[test]
     fn test_get_ready_issues_fall_back_when_cache_table_missing() {
         let mut storage = SqliteStorage::open_memory().unwrap();
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, None, Utc::now(), None);
-        let blocked = make_issue(
-            "bd-c1",
-            "Blocked issue",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
-        let ready = make_issue(
-            "bd-r1",
-            "Ready issue",
-            Status::Open,
-            3,
-            None,
-            Utc::now(),
-            None,
-        );
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, Utc::now(), None);
+        let blocked = make_issue("bd-c1", "Blocked issue", Status::Open, 2, Utc::now(), None);
+        let ready = make_issue("bd-r1", "Ready issue", Status::Open, 3, Utc::now(), None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
         storage.create_issue(&ready, "tester").unwrap();
@@ -18954,7 +17975,6 @@ mod tests {
             "Detailed ready issue",
             Status::Open,
             1,
-            Some("alice"),
             created_at,
             None,
         );
@@ -18963,20 +17983,16 @@ mod tests {
         ready.acceptance_criteria = Some("AC".to_string());
         ready.notes = Some("Notes".to_string());
         ready.owner = Some("product".to_string());
-        ready.estimated_minutes = Some(45);
         ready.created_by = Some("agent".to_string());
         ready.updated_at = created_at + chrono::Duration::minutes(5);
         ready.external_ref = Some("jira-123".to_string());
-        ready.source_system = Some("jira".to_string());
         ready.source_repo = Some("proj".to_string());
-        ready.sender = Some("cli".to_string());
 
         let blocker = make_issue(
             "bd-blocker-detailed",
             "Blocker",
             Status::Open,
             0,
-            None,
             created_at + chrono::Duration::minutes(1),
             None,
         );
@@ -18985,7 +18001,6 @@ mod tests {
             "Blocked",
             Status::Open,
             2,
-            None,
             created_at + chrono::Duration::minutes(2),
             None,
         );
@@ -19041,9 +18056,7 @@ mod tests {
         assert!(projected_issue.design.is_none());
         assert!(projected_issue.acceptance_criteria.is_none());
         assert!(projected_issue.notes.is_none());
-        assert!(projected_issue.assignee.is_none());
         assert!(projected_issue.owner.is_none());
-        assert!(projected_issue.estimated_minutes.is_none());
         assert!(projected_issue.created_by.is_none());
 
         let projected = projected_raw
@@ -19064,7 +18077,6 @@ mod tests {
             "First visible ready issue",
             Status::Open,
             1,
-            Some("alice"),
             created_at,
             None,
         );
@@ -19072,7 +18084,6 @@ mod tests {
         first.acceptance_criteria = Some("Visible acceptance criteria".to_string());
         first.notes = Some("Visible notes".to_string());
         first.owner = Some("product".to_string());
-        first.estimated_minutes = Some(30);
         first.created_by = Some("agent".to_string());
         first.updated_at = created_at + chrono::Duration::minutes(5);
 
@@ -19081,7 +18092,6 @@ mod tests {
             "Second ready issue",
             Status::Open,
             1,
-            None,
             created_at + chrono::Duration::minutes(1),
             None,
         );
@@ -19108,9 +18118,7 @@ mod tests {
             Some("Visible acceptance criteria")
         );
         assert_eq!(command[0].notes.as_deref(), Some("Visible notes"));
-        assert_eq!(command[0].assignee.as_deref(), Some("alice"));
         assert_eq!(command[0].owner.as_deref(), Some("product"));
-        assert_eq!(command[0].estimated_minutes, Some(30));
         assert_eq!(command[0].created_by.as_deref(), Some("agent"));
 
         let summary = storage
@@ -19121,7 +18129,6 @@ mod tests {
         assert!(summary[0].description.is_none());
         assert!(summary[0].acceptance_criteria.is_none());
         assert!(summary[0].notes.is_none());
-        assert!(summary[0].assignee.is_none());
     }
 
     #[test]
@@ -19134,7 +18141,6 @@ mod tests {
             "Window blocker",
             Status::Open,
             0,
-            None,
             created_at,
             None,
         );
@@ -19143,7 +18149,6 @@ mod tests {
             "Blocked first ready candidate",
             Status::Open,
             0,
-            None,
             created_at + chrono::Duration::seconds(1),
             None,
         );
@@ -19152,7 +18157,6 @@ mod tests {
             "Unblocked second ready candidate",
             Status::Open,
             0,
-            None,
             created_at + chrono::Duration::seconds(2),
             None,
         );
@@ -19191,7 +18195,6 @@ mod tests {
             "High priority ready issue",
             Status::Open,
             1,
-            None,
             created_at,
             None,
         );
@@ -19200,7 +18203,6 @@ mod tests {
             "Medium priority fallback issue",
             Status::Open,
             2,
-            None,
             created_at + chrono::Duration::minutes(1),
             None,
         );
@@ -19233,7 +18235,6 @@ mod tests {
             "Blocker",
             Status::Open,
             0,
-            None,
             created_at,
             None,
         );
@@ -19242,7 +18243,6 @@ mod tests {
             "Blocked detailed issue",
             Status::Open,
             2,
-            None,
             created_at + chrono::Duration::minutes(1),
             None,
         );
@@ -19254,7 +18254,6 @@ mod tests {
         blocked.created_by = Some("agent".to_string());
         blocked.updated_at = created_at + chrono::Duration::minutes(5);
         blocked.source_repo = Some("repo".to_string());
-        blocked.sender = Some("cli".to_string());
 
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
@@ -19283,7 +18282,6 @@ mod tests {
         assert!(projected_issue.acceptance_criteria.is_none());
         assert!(projected_issue.notes.is_none());
         assert!(projected_issue.source_repo.is_none());
-        assert!(projected_issue.sender.is_none());
 
         let projected: Vec<_> = projected_raw
             .into_iter()
@@ -19300,13 +18298,12 @@ mod tests {
     fn test_get_blocked_issues_for_command_output_falls_back_when_cache_table_missing() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let created_at = Utc.with_ymd_and_hms(2026, 4, 1, 10, 0, 0).unwrap();
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, None, created_at, None);
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, created_at, None);
         let mut blocked = make_issue(
             "bd-c1",
             "Blocked issue",
             Status::Open,
             2,
-            None,
             created_at + chrono::Duration::minutes(1),
             None,
         );
@@ -19317,7 +18314,6 @@ mod tests {
             "Ready issue",
             Status::Open,
             3,
-            None,
             created_at + chrono::Duration::minutes(2),
             None,
         );
@@ -19370,7 +18366,6 @@ mod tests {
             "Detailed stale issue",
             Status::Open,
             1,
-            Some("alice"),
             old_at,
             None,
         );
@@ -19381,17 +18376,8 @@ mod tests {
         stale_issue.owner = Some("owner".to_string());
         stale_issue.created_by = Some("creator".to_string());
         stale_issue.source_repo = Some("repo".to_string());
-        stale_issue.sender = Some("cli".to_string());
 
-        let fresh_issue = make_issue(
-            "bd-fresh",
-            "Fresh issue",
-            Status::Open,
-            2,
-            Some("bob"),
-            fresh_at,
-            None,
-        );
+        let fresh_issue = make_issue("bd-fresh", "Fresh issue", Status::Open, 2, fresh_at, None);
 
         storage.create_issue(&stale_issue, "tester").unwrap();
         storage.create_issue(&fresh_issue, "tester").unwrap();
@@ -19422,7 +18408,6 @@ mod tests {
         assert!(projected_issue.acceptance_criteria.is_none());
         assert!(projected_issue.notes.is_none());
         assert!(projected_issue.source_repo.is_none());
-        assert!(projected_issue.sender.is_none());
 
         let projected: Vec<_> = projected_raw.into_iter().map(StaleIssue::from).collect();
 
@@ -19440,16 +18425,15 @@ mod tests {
         let day_3 = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
 
         for issue in [
-            make_issue("bd-p1-old", "P1 old", Status::Open, 1, None, day_1, None),
-            make_issue("bd-p0-old", "P0 old", Status::Open, 0, None, day_1, None),
-            make_issue("bd-p0-a", "P0 tie A", Status::Open, 0, None, day_2, None),
-            make_issue("bd-p0-b", "P0 tie B", Status::Open, 0, None, day_2, None),
+            make_issue("bd-p1-old", "P1 old", Status::Open, 1, day_1, None),
+            make_issue("bd-p0-old", "P0 old", Status::Open, 0, day_1, None),
+            make_issue("bd-p0-a", "P0 tie A", Status::Open, 0, day_2, None),
+            make_issue("bd-p0-b", "P0 tie B", Status::Open, 0, day_2, None),
             make_issue(
                 "bd-deferred-new",
                 "Deferred new",
                 Status::Deferred,
                 0,
-                None,
                 day_3,
                 None,
             ),
@@ -19457,21 +18441,22 @@ mod tests {
             storage.create_issue(&issue, "tester").unwrap();
         }
 
-        let mut closed = make_issue("bd-closed", "Closed", Status::Closed, 0, None, day_3, None);
+        let mut closed = make_issue("bd-closed", "Closed", Status::Closed, 0, day_3, None);
         closed.closed_at = Some(day_3);
         storage.create_issue(&closed, "tester").unwrap();
 
-        let mut template = make_issue(
-            "bd-template",
-            "Template",
-            Status::Open,
-            0,
-            None,
-            day_3,
-            None,
-        );
-        template.is_template = true;
+        let template = make_issue("bd-template", "Template", Status::Open, 0, day_3, None);
         storage.create_issue(&template, "tester").unwrap();
+        // `is_template` no longer exists on `Issue` (bds-b4f.2.2); the column
+        // stays until the v19 migration, so flag this row directly to keep
+        // exercising the fast-path/baseline parity this test targets.
+        storage
+            .conn
+            .execute_with_params(
+                "UPDATE issues SET is_template = 1 WHERE id = ?",
+                &[SqliteValue::from("bd-template")],
+            )
+            .unwrap();
 
         let fast = storage
             .list_issues(&ListFilters {
@@ -19518,28 +18503,19 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let now = Utc.with_ymd_and_hms(2026, 4, 13, 12, 0, 0).unwrap();
 
-        let mut open_issue = make_issue(
-            "bd-list-open",
-            "Open text row",
-            Status::Open,
-            1,
-            None,
-            now,
-            None,
-        );
+        let mut open_issue =
+            make_issue("bd-list-open", "Open text row", Status::Open, 1, now, None);
         open_issue.description = Some("Should not be loaded".to_string());
         open_issue.design = Some("unused design".repeat(512));
         open_issue.acceptance_criteria = Some("unused ac".repeat(512));
         open_issue.notes = Some("unused notes".repeat(512));
         open_issue.owner = Some("owner".to_string());
-        open_issue.sender = Some("cli".to_string());
 
         let deferred_issue = make_issue(
             "bd-list-deferred",
             "Deferred text row",
             Status::Deferred,
             2,
-            None,
             now - chrono::Duration::minutes(1),
             None,
         );
@@ -19548,7 +18524,6 @@ mod tests {
             "Closed non-row",
             Status::Closed,
             3,
-            None,
             now - chrono::Duration::minutes(2),
             None,
         );
@@ -19590,7 +18565,6 @@ mod tests {
         assert!(projected_issue.acceptance_criteria.is_none());
         assert!(projected_issue.notes.is_none());
         assert!(projected_issue.owner.is_none());
-        assert!(projected_issue.sender.is_none());
 
         let projected = projected_raw
             .into_iter()
@@ -19716,26 +18690,16 @@ mod tests {
             "High old",
             Status::Open,
             1,
-            None,
             now - chrono::Duration::minutes(2),
             None,
         );
         oldest_high.description = Some("Should not be loaded".repeat(256));
-        let newest_high = make_issue(
-            "bd-list-high-new",
-            "High new",
-            Status::Open,
-            1,
-            None,
-            now,
-            None,
-        );
+        let newest_high = make_issue("bd-list-high-new", "High new", Status::Open, 1, now, None);
         let normal = make_issue(
             "bd-list-normal",
             "Normal",
             Status::Open,
             2,
-            None,
             now - chrono::Duration::minutes(1),
             None,
         );
@@ -19793,25 +18757,9 @@ mod tests {
     #[test]
     fn test_get_ready_issues_for_command_output_falls_back_when_cache_table_missing() {
         let mut storage = SqliteStorage::open_memory().unwrap();
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, None, Utc::now(), None);
-        let blocked = make_issue(
-            "bd-c1",
-            "Blocked issue",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
-        let ready = make_issue(
-            "bd-r1",
-            "Ready issue",
-            Status::Open,
-            3,
-            None,
-            Utc::now(),
-            None,
-        );
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, Utc::now(), None);
+        let blocked = make_issue("bd-c1", "Blocked issue", Status::Open, 2, Utc::now(), None);
+        let ready = make_issue("bd-r1", "Ready issue", Status::Open, 3, Utc::now(), None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
         storage.create_issue(&ready, "tester").unwrap();
@@ -19846,16 +18794,8 @@ mod tests {
     #[test]
     fn test_get_blockers_fall_back_on_malformed_cache_json() {
         let mut storage = SqliteStorage::open_memory().unwrap();
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 2, None, Utc::now(), None);
-        let issue = make_issue(
-            "bd-c1",
-            "Blocked issue",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 2, Utc::now(), None);
+        let issue = make_issue("bd-c1", "Blocked issue", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&issue, "tester").unwrap();
         storage
@@ -19879,16 +18819,8 @@ mod tests {
     #[test]
     fn test_get_blocked_issues_fall_back_on_malformed_cache_json() {
         let mut storage = SqliteStorage::open_memory().unwrap();
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, None, Utc::now(), None);
-        let blocked = make_issue(
-            "bd-c1",
-            "Blocked issue",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 1, Utc::now(), None);
+        let blocked = make_issue("bd-c1", "Blocked issue", Status::Open, 2, Utc::now(), None);
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
         storage
@@ -19921,11 +18853,11 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 3, 3, 0, 0, 0).unwrap();
 
-        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 2, None, t1, None);
-        let blocked = make_issue("bd-c1", "Blocked", Status::Open, 2, None, t1, None);
-        let parent = make_issue("bd-p1", "Parent", Status::Open, 2, None, t1, None);
-        let child = make_issue("bd-p1.1", "Child", Status::Open, 2, None, t1, None);
-        let related = make_issue("bd-r1", "Related", Status::Open, 2, None, t1, None);
+        let blocker = make_issue("bd-b1", "Blocker", Status::Open, 2, t1, None);
+        let blocked = make_issue("bd-c1", "Blocked", Status::Open, 2, t1, None);
+        let parent = make_issue("bd-p1", "Parent", Status::Open, 2, t1, None);
+        let child = make_issue("bd-p1.1", "Child", Status::Open, 2, t1, None);
+        let related = make_issue("bd-r1", "Related", Status::Open, 2, t1, None);
 
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&blocked, "tester").unwrap();
@@ -19966,15 +18898,7 @@ mod tests {
     #[test]
     fn test_update_issue_recomputes_hash() {
         let mut storage = SqliteStorage::open_memory().unwrap();
-        let mut issue = make_issue(
-            "bd-h1",
-            "Old Title",
-            Status::Open,
-            2,
-            None,
-            Utc::now(),
-            None,
-        );
+        let mut issue = make_issue("bd-h1", "Old Title", Status::Open, 2, Utc::now(), None);
         issue.content_hash = Some(issue.compute_content_hash());
         storage.create_issue(&issue, "tester").unwrap();
 
@@ -20512,7 +19436,6 @@ mod tests {
             "Original title",
             Status::Open,
             2,
-            None,
             stamp,
             None,
         );
@@ -20543,7 +19466,6 @@ mod tests {
             "Original title",
             Status::Open,
             2,
-            None,
             stamp,
             None,
         );
@@ -20743,11 +19665,11 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
 
-        let issue = make_issue("bd-dup-1", "First issue", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-dup-1", "First issue", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         // Try to create another issue with the same ID
-        let dup = make_issue("bd-dup-1", "Duplicate", Status::Open, 2, None, t1, None);
+        let dup = make_issue("bd-dup-1", "Duplicate", Status::Open, 2, t1, None);
         let result = storage.create_issue(&dup, "tester");
 
         assert!(result.is_err(), "Creating duplicate ID should fail");
@@ -20757,7 +19679,7 @@ mod tests {
     fn test_set_export_hashes_deduplicates_duplicate_issue_ids_last_value_wins() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
-        let issue = make_issue("bd-hash-1", "Hash target", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-hash-1", "Hash target", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         let inserted = storage
@@ -20781,7 +19703,7 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
         for issue_id in ["bd-hash-1", "bd-hash-2"] {
-            let issue = make_issue(issue_id, "Hash target", Status::Open, 2, None, t1, None);
+            let issue = make_issue(issue_id, "Hash target", Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         storage
@@ -20825,7 +19747,7 @@ mod tests {
     fn test_set_changed_export_hashes_skips_unchanged_rows() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
-        let issue = make_issue("bd-hash-1", "Hash target", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-hash-1", "Hash target", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
         storage
             .set_export_hashes(&[("bd-hash-1".to_string(), "hash-stable".to_string())])
@@ -20867,7 +19789,6 @@ mod tests {
                     &format!("Hash target {idx}"),
                     Status::Open,
                     2,
-                    None,
                     created_at,
                     None,
                 );
@@ -20915,7 +19836,6 @@ mod tests {
                     &format!("Hash target {issue_id}"),
                     Status::Open,
                     2,
-                    None,
                     created_at,
                     None,
                 );
@@ -20982,7 +19902,6 @@ mod tests {
                 &format!("Blocked target {blocked_id}"),
                 Status::Open,
                 2,
-                None,
                 created_at,
                 None,
             );
@@ -20991,7 +19910,6 @@ mod tests {
                 &format!("Blocking source {blocker_id}"),
                 Status::Open,
                 2,
-                None,
                 created_at,
                 None,
             );
@@ -21103,33 +20021,9 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 8, 1, 0, 0, 0).unwrap();
 
         // Create issues with different titles
-        let issue1 = make_issue(
-            "bd-s1",
-            "Fix authentication bug",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let issue2 = make_issue(
-            "bd-s2",
-            "Add user registration",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let issue3 = make_issue(
-            "bd-s3",
-            "Update documentation",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue1 = make_issue("bd-s1", "Fix authentication bug", Status::Open, 2, t1, None);
+        let issue2 = make_issue("bd-s2", "Add user registration", Status::Open, 2, t1, None);
+        let issue3 = make_issue("bd-s3", "Update documentation", Status::Open, 2, t1, None);
 
         storage.create_issue(&issue1, "tester").unwrap();
         storage.create_issue(&issue2, "tester").unwrap();
@@ -21157,9 +20051,9 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 8, 1, 0, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2025, 8, 2, 0, 0, 0).unwrap();
 
-        let issue_a = make_issue("bd-a", "A", Status::Open, 1, None, t1, None);
-        let issue_b = make_issue("bd-b", "B", Status::Open, 1, None, t2, None);
-        let issue_c = make_issue("bd-c", "C", Status::Open, 2, None, t1, None);
+        let issue_a = make_issue("bd-a", "A", Status::Open, 1, t1, None);
+        let issue_b = make_issue("bd-b", "B", Status::Open, 1, t2, None);
+        let issue_c = make_issue("bd-c", "C", Status::Open, 2, t1, None);
 
         storage.create_issue(&issue_a, "tester").unwrap();
         storage.create_issue(&issue_b, "tester").unwrap();
@@ -21182,30 +20076,13 @@ mod tests {
         let created_at = Utc.with_ymd_and_hms(2025, 8, 4, 0, 0, 0).unwrap();
 
         for issue in [
-            make_issue(
-                "bd-list-b",
-                "Tie B",
-                Status::Open,
-                1,
-                None,
-                created_at,
-                None,
-            ),
-            make_issue(
-                "bd-list-a",
-                "Tie A",
-                Status::Open,
-                1,
-                None,
-                created_at,
-                None,
-            ),
+            make_issue("bd-list-b", "Tie B", Status::Open, 1, created_at, None),
+            make_issue("bd-list-a", "Tie A", Status::Open, 1, created_at, None),
             make_issue(
                 "bd-list-c",
                 "Later",
                 Status::Open,
                 2,
-                None,
                 created_at - chrono::Duration::days(1),
                 None,
             ),
@@ -21230,33 +20107,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 9, 1, 0, 0, 0).unwrap();
 
-        let issue1 = make_issue(
-            "bd-s1",
-            "Fix authentication bug",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let issue2 = make_issue(
-            "bd-s2",
-            "Add user registration",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
-        let issue3 = make_issue(
-            "bd-s3",
-            "Update documentation",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue1 = make_issue("bd-s1", "Fix authentication bug", Status::Open, 2, t1, None);
+        let issue2 = make_issue("bd-s2", "Add user registration", Status::Open, 2, t1, None);
+        let issue3 = make_issue("bd-s3", "Update documentation", Status::Open, 2, t1, None);
 
         storage.create_issue(&issue1, "tester").unwrap();
         storage.create_issue(&issue2, "tester").unwrap();
@@ -21283,7 +20136,6 @@ mod tests {
             "Literal %_ marker",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -21292,7 +20144,6 @@ mod tests {
             "Description target",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -21324,7 +20175,6 @@ mod tests {
             "needle export swarm",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -21334,7 +20184,6 @@ mod tests {
             "needle export only",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -21344,7 +20193,6 @@ mod tests {
             "needle swarm only",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -21354,7 +20202,6 @@ mod tests {
             "needle unrelated",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -21414,7 +20261,6 @@ mod tests {
             "needle global alpha",
             Status::Open,
             1,
-            None,
             t1,
             None,
         );
@@ -21424,7 +20270,6 @@ mod tests {
             "needle global beta",
             Status::Open,
             2,
-            None,
             t1 + chrono::Duration::minutes(1),
             None,
         );
@@ -21434,7 +20279,6 @@ mod tests {
             "needle deferred",
             Status::Deferred,
             0,
-            None,
             t1 + chrono::Duration::minutes(2),
             None,
         );
@@ -21522,7 +20366,6 @@ mod tests {
             "Command projection alpha",
             Status::Open,
             1,
-            Some("agent-a"),
             t1,
             None,
         );
@@ -21532,14 +20375,12 @@ mod tests {
         description_match.acceptance_criteria = Some("unused ac".repeat(512));
         description_match.notes = Some("unused notes".repeat(512));
         description_match.owner = Some("owner".to_string());
-        description_match.sender = Some("cli".to_string());
 
         let title_match = make_issue(
             "bd-search-proj-b",
             "Projection needle title",
             Status::Open,
             2,
-            Some("agent-b"),
             t1 + chrono::Duration::minutes(1),
             None,
         );
@@ -21568,7 +20409,6 @@ mod tests {
                     issue.status.clone(),
                     issue.priority,
                     issue.issue_type.clone(),
-                    issue.assignee.as_deref(),
                     issue.created_at,
                     issue.updated_at,
                 )
@@ -21584,7 +20424,6 @@ mod tests {
                     issue.status.clone(),
                     issue.priority,
                     issue.issue_type.clone(),
-                    issue.assignee.as_deref(),
                     issue.created_at,
                     issue.updated_at,
                 )
@@ -21611,7 +20450,6 @@ mod tests {
         assert!(projected_description_match.acceptance_criteria.is_none());
         assert!(projected_description_match.notes.is_none());
         assert!(projected_description_match.owner.is_none());
-        assert!(projected_description_match.sender.is_none());
     }
 
     #[test]
@@ -21624,7 +20462,6 @@ mod tests {
             "authentication flow update",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -21633,7 +20470,6 @@ mod tests {
             "authentication flow deferred follow-up",
             Status::Deferred,
             2,
-            None,
             t1,
             None,
         );
@@ -21662,7 +20498,6 @@ mod tests {
             "authentication alpha",
             Status::Open,
             2,
-            None,
             t3,
             None,
         );
@@ -21671,7 +20506,6 @@ mod tests {
             "authentication beta",
             Status::Open,
             2,
-            None,
             t1,
             None,
         );
@@ -21715,7 +20549,6 @@ mod tests {
                 &format!("authentication page {idx}"),
                 Status::Open,
                 i32::try_from(idx + 1).unwrap(),
-                None,
                 t1 + chrono::Duration::minutes(i64::try_from(idx).unwrap()),
                 None,
             );
@@ -21765,7 +20598,6 @@ mod tests {
                 "authentication tie b",
                 Status::Open,
                 1,
-                None,
                 created_at,
                 None,
             ),
@@ -21774,7 +20606,6 @@ mod tests {
                 "authentication tie a",
                 Status::Open,
                 1,
-                None,
                 created_at,
                 None,
             ),
@@ -21783,7 +20614,6 @@ mod tests {
                 "authentication later",
                 Status::Open,
                 2,
-                None,
                 created_at - chrono::Duration::days(1),
                 None,
             ),
@@ -21806,6 +20636,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_search_issues_default_visible_limited_page_matches_generic_order() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let base = Utc.with_ymd_and_hms(2025, 9, 4, 0, 0, 0).unwrap();
@@ -21815,21 +20646,18 @@ mod tests {
             "needle closed",
             Status::Closed,
             0,
-            None,
             base + chrono::Duration::minutes(10),
             None,
         );
         closed.closed_at = Some(base + chrono::Duration::minutes(11));
-        let mut template = make_issue(
+        let template = make_issue(
             "bd-search-template",
             "needle template",
             Status::Open,
             0,
-            None,
             base + chrono::Duration::minutes(9),
             None,
         );
-        template.is_template = true;
 
         for issue in [
             make_issue(
@@ -21837,7 +20665,6 @@ mod tests {
                 "needle p1",
                 Status::Open,
                 1,
-                None,
                 base + chrono::Duration::minutes(4),
                 None,
             ),
@@ -21846,7 +20673,6 @@ mod tests {
                 "needle p0 old",
                 Status::Open,
                 0,
-                None,
                 base + chrono::Duration::minutes(1),
                 None,
             ),
@@ -21855,7 +20681,6 @@ mod tests {
                 "needle deferred",
                 Status::Deferred,
                 0,
-                None,
                 base + chrono::Duration::minutes(3),
                 None,
             ),
@@ -21864,7 +20689,6 @@ mod tests {
                 "needle p0 new",
                 Status::Open,
                 0,
-                None,
                 base + chrono::Duration::minutes(2),
                 None,
             ),
@@ -21873,7 +20697,6 @@ mod tests {
                 "other",
                 Status::Open,
                 0,
-                None,
                 base + chrono::Duration::minutes(5),
                 None,
             ),
@@ -21882,6 +20705,16 @@ mod tests {
         ] {
             storage.create_issue(&issue, "tester").unwrap();
         }
+        // `is_template` no longer exists on `Issue` (bds-b4f.2.2); the column
+        // stays until the v19 migration, so flag this row directly to keep
+        // exercising the fast-path/generic parity this test targets.
+        storage
+            .conn
+            .execute_with_params(
+                "UPDATE issues SET is_template = 1 WHERE id = ?",
+                &[SqliteValue::from("bd-search-template")],
+            )
+            .unwrap();
 
         let fast_filters = ListFilters {
             include_deferred: true,
@@ -21917,53 +20750,38 @@ mod tests {
     fn count_search_fixture() -> SqliteStorage {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let base = Utc.with_ymd_and_hms(2025, 9, 4, 0, 0, 0).unwrap();
-        let issue = |id: &str, title: &str, status, priority, assignee| {
-            make_issue(id, title, status, priority, assignee, base, None)
+        let issue = |id: &str, title: &str, status, priority| {
+            make_issue(id, title, status, priority, base, None)
         };
 
-        let mut closed = issue("bd-count-closed", "needle closed", Status::Closed, 0, None);
+        let mut closed = issue("bd-count-closed", "needle closed", Status::Closed, 0);
         closed.closed_at = Some(base);
-        let mut template = issue(
-            "bd-count-template",
-            "needle template",
-            Status::Open,
-            0,
-            None,
-        );
-        template.is_template = true;
-        let mut feature = issue(
-            "bd-count-feature",
-            "needle feature",
-            Status::Open,
-            1,
-            Some("alice"),
-        );
+        let template = issue("bd-count-template", "needle template", Status::Open, 0);
+        let mut feature = issue("bd-count-feature", "needle feature", Status::Open, 1);
         feature.issue_type = IssueType::Feature;
         feature.description = Some("needle in the description".to_string());
 
         for issue in [
-            issue("bd-count-open-1", "needle one", Status::Open, 2, None),
-            issue(
-                "bd-count-open-2",
-                "needle two",
-                Status::Open,
-                2,
-                Some("alice"),
-            ),
-            issue(
-                "bd-count-deferred",
-                "needle deferred",
-                Status::Deferred,
-                0,
-                None,
-            ),
-            issue("bd-count-other", "unrelated", Status::Open, 2, None),
+            issue("bd-count-open-1", "needle one", Status::Open, 2),
+            issue("bd-count-open-2", "needle two", Status::Open, 2),
+            issue("bd-count-deferred", "needle deferred", Status::Deferred, 0),
+            issue("bd-count-other", "unrelated", Status::Open, 2),
             closed,
             template,
             feature,
         ] {
             storage.create_issue(&issue, "tester").unwrap();
         }
+        // `is_template` no longer exists on `Issue` (bds-b4f.2.2); the column
+        // stays until the v19 migration, so flag this row directly to keep
+        // exercising the `include_templates` filter shape below.
+        storage
+            .conn
+            .execute_with_params(
+                "UPDATE issues SET is_template = 1 WHERE id = ?",
+                &[SqliteValue::from("bd-count-template")],
+            )
+            .unwrap();
         storage.add_label("bd-count-open-1", "core").unwrap();
         storage.add_label("bd-count-feature", "core").unwrap();
         storage
@@ -21976,13 +20794,11 @@ mod tests {
     fn test_count_search_issues_matches_unlimited_search_length() {
         let storage = count_search_fixture();
 
-        let shapes: [(&str, fn(&mut ListFilters)); 11] = [
+        let shapes: [(&str, fn(&mut ListFilters)); 9] = [
             ("default", |_| {}),
             ("deferred", |f| f.include_deferred = true),
             ("closed", |f| f.include_closed = true),
             ("templates", |f| f.include_templates = true),
-            ("assignee", |f| f.assignee = Some("alice".to_string())),
-            ("unassigned", |f| f.unassigned = true),
             ("type", |f| f.types = Some(vec![IssueType::Feature])),
             ("priority", |f| f.priorities = Some(vec![Priority(2)])),
             ("status", |f| f.statuses = Some(vec![Status::Open])),
@@ -22039,7 +20855,6 @@ mod tests {
             "authentication old",
             Status::Open,
             2,
-            None,
             old,
             None,
         );
@@ -22048,7 +20863,6 @@ mod tests {
             "authentication older",
             Status::Open,
             2,
-            None,
             older,
             None,
         );
@@ -22057,7 +20871,6 @@ mod tests {
             "authentication new",
             Status::Open,
             2,
-            None,
             now,
             None,
         );
@@ -22096,17 +20909,9 @@ mod tests {
         let old = now - chrono::Duration::days(10);
         let older = now - chrono::Duration::days(20);
 
-        let issue1 = make_issue("bd-old", "Old issue", Status::Open, 2, None, old, None);
-        let issue2 = make_issue(
-            "bd-older",
-            "Older issue",
-            Status::Open,
-            2,
-            None,
-            older,
-            None,
-        );
-        let issue3 = make_issue("bd-new", "New issue", Status::Open, 2, None, now, None);
+        let issue1 = make_issue("bd-old", "Old issue", Status::Open, 2, old, None);
+        let issue2 = make_issue("bd-older", "Older issue", Status::Open, 2, older, None);
+        let issue3 = make_issue("bd-new", "New issue", Status::Open, 2, now, None);
 
         storage.create_issue(&issue1, "tester").unwrap();
         storage.create_issue(&issue2, "tester").unwrap();
@@ -22144,16 +20949,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc::now();
 
-        let issue1 = make_issue("bd-l1", "Issue with label", Status::Open, 2, None, t1, None);
-        let issue2 = make_issue(
-            "bd-l2",
-            "Issue without label",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue1 = make_issue("bd-l1", "Issue with label", Status::Open, 2, t1, None);
+        let issue2 = make_issue("bd-l2", "Issue without label", Status::Open, 2, t1, None);
         storage.create_issue(&issue1, "tester").unwrap();
         storage.create_issue(&issue2, "tester").unwrap();
 
@@ -22176,16 +20973,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc::now();
 
-        let issue1 = make_issue("bd-l3", "Core only", Status::Open, 2, None, t1, None);
-        let issue2 = make_issue(
-            "bd-l4",
-            "Core and frontend",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let issue1 = make_issue("bd-l3", "Core only", Status::Open, 2, t1, None);
+        let issue2 = make_issue("bd-l4", "Core and frontend", Status::Open, 2, t1, None);
         storage.create_issue(&issue1, "tester").unwrap();
         storage.create_issue(&issue2, "tester").unwrap();
 
@@ -22227,9 +21016,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc::now();
 
-        let task_issue = make_issue("bd-l5", "Core task", Status::Open, 1, None, t1, None);
-        let mut feature_issue =
-            make_issue("bd-l6", "Core feature", Status::Open, 1, None, t1, None);
+        let task_issue = make_issue("bd-l5", "Core task", Status::Open, 1, t1, None);
+        let mut feature_issue = make_issue("bd-l6", "Core feature", Status::Open, 1, t1, None);
         feature_issue.issue_type = IssueType::Feature;
 
         storage.create_issue(&task_issue, "tester").unwrap();
@@ -22256,7 +21044,7 @@ mod tests {
         let t1 = Utc::now();
 
         for id in ["bd-lj1", "bd-lj2", "bd-lj3", "bd-lj4"] {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
 
@@ -22310,14 +21098,14 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc::now();
 
-        let issue = make_issue("bd-x1", "Blocked", Status::Open, 2, None, t1, None);
+        let issue = make_issue("bd-x1", "Blocked", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         // Add a dependency on an ID containing a quote, as could exist in a
         // legacy/corrupt database. `create_issue` now rejects invalid IDs, so
         // seed the low-level row directly through the import upsert path.
         let tricky_id = "bd-q\"ote";
-        let tricky_issue = make_issue(tricky_id, "Tricky", Status::Open, 2, None, t1, None);
+        let tricky_issue = make_issue(tricky_id, "Tricky", Status::Open, 2, t1, None);
         storage.upsert_issue_for_import(&tricky_issue).unwrap();
         storage
             .add_dependency("bd-x1", tricky_id, "blocks", "tester")
@@ -22342,9 +21130,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc::now();
 
-        let i1 = make_issue("bd-1", "A", Status::Open, 2, None, t1, None);
-        let i2 = make_issue("bd-2", "B", Status::Open, 2, None, t1, None);
-        let i3 = make_issue("bd-3", "C", Status::Open, 2, None, t1, None);
+        let i1 = make_issue("bd-1", "A", Status::Open, 2, t1, None);
+        let i2 = make_issue("bd-2", "B", Status::Open, 2, t1, None);
+        let i3 = make_issue("bd-3", "C", Status::Open, 2, t1, None);
 
         storage.create_issue(&i1, "tester").unwrap();
         storage.create_issue(&i2, "tester").unwrap();
@@ -22397,7 +21185,7 @@ mod tests {
 
         storage
             .create_issue(
-                &make_issue("bd-open", "Open", Status::Open, 2, None, t1, None),
+                &make_issue("bd-open", "Open", Status::Open, 2, t1, None),
                 "tester",
             )
             .unwrap();
@@ -22408,7 +21196,6 @@ mod tests {
                     "Rework",
                     Status::Custom("rework".to_string()),
                     2,
-                    None,
                     t1,
                     None,
                 ),
@@ -22433,7 +21220,7 @@ mod tests {
 
         storage
             .create_issue(
-                &make_issue("bd-open", "Open", Status::Open, 2, None, t1, None),
+                &make_issue("bd-open", "Open", Status::Open, 2, t1, None),
                 "tester",
             )
             .unwrap();
@@ -22444,7 +21231,6 @@ mod tests {
                     "Rework",
                     Status::Custom("rework".to_string()),
                     2,
-                    None,
                     t1,
                     None,
                 ),
@@ -22453,15 +21239,7 @@ mod tests {
             .unwrap();
         storage
             .create_issue(
-                &make_issue(
-                    "bd-inprog",
-                    "InProgress",
-                    Status::InProgress,
-                    2,
-                    None,
-                    t1,
-                    None,
-                ),
+                &make_issue("bd-inprog", "InProgress", Status::InProgress, 2, t1, None),
                 "tester",
             )
             .unwrap();
@@ -22496,7 +21274,6 @@ mod tests {
                     "ReworkDeferred",
                     Status::Custom("rework".to_string()),
                     2,
-                    None,
                     t1,
                     Some(future),
                 ),
@@ -22505,7 +21282,7 @@ mod tests {
             .unwrap();
         storage
             .create_issue(
-                &make_issue("bd-open", "Open", Status::Open, 2, None, t1, None),
+                &make_issue("bd-open", "Open", Status::Open, 2, t1, None),
                 "tester",
             )
             .unwrap();
@@ -22547,21 +21324,13 @@ mod tests {
 
         storage
             .create_issue(
-                &make_issue(
-                    "bd-deferred",
-                    "Deferred",
-                    Status::Deferred,
-                    2,
-                    None,
-                    t1,
-                    None,
-                ),
+                &make_issue("bd-deferred", "Deferred", Status::Deferred, 2, t1, None),
                 "tester",
             )
             .unwrap();
         storage
             .create_issue(
-                &make_issue("bd-open", "Open", Status::Open, 2, None, t1, None),
+                &make_issue("bd-open", "Open", Status::Open, 2, t1, None),
                 "tester",
             )
             .unwrap();
@@ -22594,20 +21363,20 @@ mod tests {
         // `tests/storage_blocked_cache.rs`), so typing these as Task would
         // make every parent-child node trivially ready, defeating the
         // point of the recursive-ready test.
-        let mut parent = make_issue("bd-epic", "Parent Epic", Status::Open, 1, None, t1, None);
+        let mut parent = make_issue("bd-epic", "Parent Epic", Status::Open, 1, t1, None);
         parent.issue_type = IssueType::Epic;
         storage.create_issue(&parent, "tester").unwrap();
 
         // Create direct children of the epic.  `bd-epic.1` is itself an
         // epic so it can be rolled-up-blocked by its grandchild below.
-        let mut child1 = make_issue("bd-epic.1", "Child 1", Status::Open, 2, None, t1, None);
+        let mut child1 = make_issue("bd-epic.1", "Child 1", Status::Open, 2, t1, None);
         child1.issue_type = IssueType::Epic;
-        let child2 = make_issue("bd-epic.2", "Child 2", Status::Open, 2, None, t1, None);
+        let child2 = make_issue("bd-epic.2", "Child 2", Status::Open, 2, t1, None);
         storage.create_issue(&child1, "tester").unwrap();
         storage.create_issue(&child2, "tester").unwrap();
 
         // Create unrelated issue (not a child of the epic)
-        let unrelated = make_issue("bd-other", "Unrelated", Status::Open, 2, None, t1, None);
+        let unrelated = make_issue("bd-other", "Unrelated", Status::Open, 2, t1, None);
         storage.create_issue(&unrelated, "tester").unwrap();
 
         // Add parent-child dependencies (no grandchild yet)
@@ -22637,7 +21406,7 @@ mod tests {
         assert!(ids.contains(&"bd-epic.2"), "Should contain child2");
 
         // Now create grandchild and its dependency for recursive test
-        let grandchild = make_issue("bd-epic.1.1", "Grandchild", Status::Open, 2, None, t1, None);
+        let grandchild = make_issue("bd-epic.1.1", "Grandchild", Status::Open, 2, t1, None);
         storage.create_issue(&grandchild, "tester").unwrap();
         storage
             .add_dependency("bd-epic.1.1", "bd-epic.1", "parent-child", "tester")
@@ -22691,14 +21460,14 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc::now();
 
-        let mut parent = make_issue("bd-epic", "Parent Epic", Status::Open, 1, None, t1, None);
+        let mut parent = make_issue("bd-epic", "Parent Epic", Status::Open, 1, t1, None);
         parent.issue_type = IssueType::Epic;
         storage.create_issue(&parent, "tester").unwrap();
 
         // Two labelled direct children + one unlabelled direct child.
-        let child1 = make_issue("bd-epic.1", "Child 1", Status::Open, 2, None, t1, None);
-        let child2 = make_issue("bd-epic.2", "Child 2", Status::Open, 2, None, t1, None);
-        let child3 = make_issue("bd-epic.3", "Child 3", Status::Open, 2, None, t1, None);
+        let child1 = make_issue("bd-epic.1", "Child 1", Status::Open, 2, t1, None);
+        let child2 = make_issue("bd-epic.2", "Child 2", Status::Open, 2, t1, None);
+        let child3 = make_issue("bd-epic.3", "Child 3", Status::Open, 2, t1, None);
         storage.create_issue(&child1, "tester").unwrap();
         storage.create_issue(&child2, "tester").unwrap();
         storage.create_issue(&child3, "tester").unwrap();
@@ -22711,7 +21480,7 @@ mod tests {
         storage.add_label("bd-epic.2", "mini-safe").unwrap();
 
         // A labelled descendant under bd-epic.1 (for the recursive case).
-        let grandchild = make_issue("bd-epic.1.1", "Grandchild", Status::Open, 2, None, t1, None);
+        let grandchild = make_issue("bd-epic.1.1", "Grandchild", Status::Open, 2, t1, None);
         storage.create_issue(&grandchild, "tester").unwrap();
         storage
             .add_dependency("bd-epic.1.1", "bd-epic.1", "parent-child", "tester")
@@ -22778,7 +21547,7 @@ mod tests {
         let t1 = Utc::now();
 
         for id in ["cyc-a", "cyc-b", "cyc-c"] {
-            let issue = make_issue(id, id, Status::Open, 2, None, t1, None);
+            let issue = make_issue(id, id, Status::Open, 2, t1, None);
             storage.create_issue(&issue, "tester").unwrap();
         }
         // a -> b -> c -> a (cycle through parent-child edges).
@@ -22967,15 +21736,7 @@ mod tests {
     fn test_get_ready_issues_skips_stale_cache_work_when_no_candidate_status() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let now = Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap();
-        let mut closed = make_issue(
-            "bd-closed",
-            "Closed issue",
-            Status::Closed,
-            2,
-            None,
-            now,
-            None,
-        );
+        let mut closed = make_issue("bd-closed", "Closed issue", Status::Closed, 2, now, None);
         closed.closed_at = Some(now);
         storage.create_issue(&closed, "tester").unwrap();
         storage.mark_blocked_cache_stale().unwrap();
@@ -22997,13 +21758,12 @@ mod tests {
         let base = Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap();
 
         for issue in [
-            make_issue("bd-low-old", "Low old", Status::Open, 4, None, base, None),
+            make_issue("bd-low-old", "Low old", Status::Open, 4, base, None),
             make_issue(
                 "bd-high-old",
                 "High old",
                 Status::Open,
                 1,
-                None,
                 base + chrono::Duration::seconds(1),
                 None,
             ),
@@ -23012,7 +21772,6 @@ mod tests {
                 "Critical new",
                 Status::Open,
                 0,
-                None,
                 base + chrono::Duration::seconds(2),
                 None,
             ),
@@ -23021,7 +21780,6 @@ mod tests {
                 "Low new",
                 Status::Open,
                 2,
-                None,
                 base + chrono::Duration::seconds(3),
                 None,
             ),
@@ -23083,7 +21841,6 @@ mod tests {
                 "Tie inserted first",
                 Status::Open,
                 1,
-                None,
                 created_at,
                 None,
             ),
@@ -23092,7 +21849,6 @@ mod tests {
                 "Tie inserted second",
                 Status::Open,
                 1,
-                None,
                 created_at,
                 None,
             ),
@@ -23101,7 +21857,6 @@ mod tests {
                 "Low priority",
                 Status::Open,
                 3,
-                None,
                 created_at + chrono::Duration::seconds(1),
                 None,
             ),
@@ -23131,7 +21886,7 @@ mod tests {
         let t1 = Utc::now();
 
         // Create an open issue (should appear in ready)
-        let open_issue = make_issue("bd-open", "Open Issue", Status::Open, 2, None, t1, None);
+        let open_issue = make_issue("bd-open", "Open Issue", Status::Open, 2, t1, None);
         storage.create_issue(&open_issue, "tester").unwrap();
 
         // Create an in_progress issue (should NOT appear in ready)
@@ -23140,7 +21895,6 @@ mod tests {
             "In Progress Issue",
             Status::InProgress,
             1,
-            None,
             t1,
             None,
         );
@@ -23161,7 +21915,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
 
         // Create parent issue
-        let parent = make_issue("bd-parent", "Parent Epic", Status::Open, 2, None, t1, None);
+        let parent = make_issue("bd-parent", "Parent Epic", Status::Open, 2, t1, None);
         storage.create_issue(&parent, "tester").unwrap();
 
         // No children yet - should return 1
@@ -23169,7 +21923,7 @@ mod tests {
         assert_eq!(next, 1, "First child should be .1");
 
         // Create first child
-        let child1 = make_issue("bd-parent.1", "Child 1", Status::Open, 2, None, t1, None);
+        let child1 = make_issue("bd-parent.1", "Child 1", Status::Open, 2, t1, None);
         storage.create_issue(&child1, "tester").unwrap();
 
         // Should now return 2
@@ -23177,7 +21931,7 @@ mod tests {
         assert_eq!(next, 2, "After .1 exists, next should be .2");
 
         // Create child with .3 (skip .2)
-        let child3 = make_issue("bd-parent.3", "Child 3", Status::Open, 2, None, t1, None);
+        let child3 = make_issue("bd-parent.3", "Child 3", Status::Open, 2, t1, None);
         storage.create_issue(&child3, "tester").unwrap();
 
         // Should return 4 (max is 3, so next is 4)
@@ -23185,15 +21939,7 @@ mod tests {
         assert_eq!(next, 4, "After .3 exists (skipping .2), next should be .4");
 
         // Create grandchild - should not affect parent's next child number
-        let grandchild = make_issue(
-            "bd-parent.1.1",
-            "Grandchild",
-            Status::Open,
-            2,
-            None,
-            t1,
-            None,
-        );
+        let grandchild = make_issue("bd-parent.1.1", "Grandchild", Status::Open, 2, t1, None);
         storage.create_issue(&grandchild, "tester").unwrap();
 
         // Parent's next child should still be 4
@@ -23496,7 +22242,7 @@ mod tests {
         // Set config and create some issues
         storage.set_config("issue_prefix", "test").unwrap();
         storage.set_metadata("last_import", "2025-01-01").unwrap();
-        let issue = make_issue("test-1", "Issue 1", Status::Open, 2, None, t1, None);
+        let issue = make_issue("test-1", "Issue 1", Status::Open, 2, t1, None);
         storage.create_issue(&issue, "tester").unwrap();
 
         // Verify issue exists
@@ -23519,7 +22265,7 @@ mod tests {
         assert!(storage.get_issue("test-1").unwrap().is_none());
 
         // Should be able to insert new issues (schema intact)
-        let issue2 = make_issue("test-2", "Issue 2", Status::Open, 2, None, t1, None);
+        let issue2 = make_issue("test-2", "Issue 2", Status::Open, 2, t1, None);
         storage.create_issue(&issue2, "tester").unwrap();
         assert!(storage.get_issue("test-2").unwrap().is_some());
     }
@@ -23744,7 +22490,7 @@ mod tests {
 
         storage
             .create_issue(
-                &make_issue("bd-ready", "Ready issue", Status::Open, 1, None, now, None),
+                &make_issue("bd-ready", "Ready issue", Status::Open, 1, now, None),
                 "tester",
             )
             .unwrap();
@@ -23806,15 +22552,7 @@ mod tests {
         {
             let mut storage = SqliteStorage::open(&db_path).unwrap();
             let now = Utc::now();
-            let issue = make_issue(
-                "bd-drop-1",
-                "drop-checkpoint",
-                Status::Open,
-                2,
-                None,
-                now,
-                None,
-            );
+            let issue = make_issue("bd-drop-1", "drop-checkpoint", Status::Open, 2, now, None);
             storage.create_issue(&issue, "tester").unwrap();
             assert!(
                 storage.mutation_count > 0,
@@ -23850,43 +22588,11 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t = Utc::now();
 
-        let epic = make_issue("proj-epic", "Epic", Status::Open, 0, Some("epic"), t, None);
-        let task1 = make_issue(
-            "proj-task1",
-            "Task 1",
-            Status::Open,
-            1,
-            Some("task"),
-            t,
-            None,
-        );
-        let task2 = make_issue(
-            "proj-task2",
-            "Task 2",
-            Status::Open,
-            1,
-            Some("task"),
-            t,
-            None,
-        );
-        let task3 = make_issue(
-            "proj-task3",
-            "Task 3",
-            Status::Open,
-            2,
-            Some("task"),
-            t,
-            None,
-        );
-        let blocker = make_issue(
-            "proj-blocker",
-            "Blocker",
-            Status::Open,
-            1,
-            Some("bug"),
-            t,
-            None,
-        );
+        let epic = make_issue("proj-epic", "Epic", Status::Open, 0, t, None);
+        let task1 = make_issue("proj-task1", "Task 1", Status::Open, 1, t, None);
+        let task2 = make_issue("proj-task2", "Task 2", Status::Open, 1, t, None);
+        let task3 = make_issue("proj-task3", "Task 3", Status::Open, 2, t, None);
+        let blocker = make_issue("proj-blocker", "Blocker", Status::Open, 1, t, None);
 
         storage.create_issue(&epic, "tester").unwrap();
         storage.create_issue(&task1, "tester").unwrap();
@@ -23971,16 +22677,8 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t = Utc::now();
 
-        let blocker = make_issue(
-            "m06q-blocker",
-            "Blocker",
-            Status::Open,
-            1,
-            Some("bug"),
-            t,
-            None,
-        );
-        let task = make_issue("m06q-task", "Task", Status::Open, 1, Some("task"), t, None);
+        let blocker = make_issue("m06q-blocker", "Blocker", Status::Open, 1, t, None);
+        let task = make_issue("m06q-task", "Task", Status::Open, 1, t, None);
 
         storage.create_issue(&blocker, "tester").unwrap();
         storage.create_issue(&task, "tester").unwrap();
@@ -24032,33 +22730,9 @@ mod tests {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t = Utc::now();
 
-        let b1 = make_issue(
-            "m06q-b1",
-            "Blocker 1",
-            Status::Open,
-            1,
-            Some("bug"),
-            t,
-            None,
-        );
-        let b2 = make_issue(
-            "m06q-b2",
-            "Blocker 2",
-            Status::Open,
-            1,
-            Some("bug"),
-            t,
-            None,
-        );
-        let task = make_issue(
-            "m06q-dual",
-            "Dual blocked",
-            Status::Open,
-            1,
-            Some("task"),
-            t,
-            None,
-        );
+        let b1 = make_issue("m06q-b1", "Blocker 1", Status::Open, 1, t, None);
+        let b2 = make_issue("m06q-b2", "Blocker 2", Status::Open, 1, t, None);
+        let task = make_issue("m06q-dual", "Dual blocked", Status::Open, 1, t, None);
 
         storage.create_issue(&b1, "tester").unwrap();
         storage.create_issue(&b2, "tester").unwrap();
@@ -24116,18 +22790,10 @@ mod tests {
     fn dot_notation_children_detects_open_direct_children() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let parent = make_issue("bd-epic", "Epic", Status::Open, 1, None, now, None);
-        let child1 = make_issue("bd-epic.1", "Child 1", Status::Open, 1, None, now, None);
-        let child2 = make_issue(
-            "bd-epic.2",
-            "Child 2",
-            Status::InProgress,
-            1,
-            None,
-            now,
-            None,
-        );
-        let mut child3 = make_issue("bd-epic.3", "Child 3", Status::Closed, 1, None, now, None);
+        let parent = make_issue("bd-epic", "Epic", Status::Open, 1, now, None);
+        let child1 = make_issue("bd-epic.1", "Child 1", Status::Open, 1, now, None);
+        let child2 = make_issue("bd-epic.2", "Child 2", Status::InProgress, 1, now, None);
+        let mut child3 = make_issue("bd-epic.3", "Child 3", Status::Closed, 1, now, None);
         // closed rows require closed_at set (DB CHECK constraint).
         child3.closed_at = Some(now);
         storage.create_issue(&parent, "t").unwrap();
@@ -24148,17 +22814,9 @@ mod tests {
     fn dot_notation_children_excludes_grandchildren() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let parent = make_issue("bd-root", "Root", Status::Open, 1, None, now, None);
-        let child = make_issue("bd-root.1", "Child", Status::Open, 1, None, now, None);
-        let grandchild = make_issue(
-            "bd-root.1.1",
-            "Grandchild",
-            Status::Open,
-            1,
-            None,
-            now,
-            None,
-        );
+        let parent = make_issue("bd-root", "Root", Status::Open, 1, now, None);
+        let child = make_issue("bd-root.1", "Child", Status::Open, 1, now, None);
+        let grandchild = make_issue("bd-root.1.1", "Grandchild", Status::Open, 1, now, None);
         storage.create_issue(&parent, "t").unwrap();
         storage.create_issue(&child, "t").unwrap();
         storage.create_issue(&grandchild, "t").unwrap();
@@ -24175,8 +22833,8 @@ mod tests {
     fn dot_notation_children_returns_empty_when_none() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let parent = make_issue("bd-solo", "Solo", Status::Open, 1, None, now, None);
-        let unrelated = make_issue("bd-other", "Other", Status::Open, 1, None, now, None);
+        let parent = make_issue("bd-solo", "Solo", Status::Open, 1, now, None);
+        let unrelated = make_issue("bd-other", "Other", Status::Open, 1, now, None);
         storage.create_issue(&parent, "t").unwrap();
         storage.create_issue(&unrelated, "t").unwrap();
 
@@ -24199,12 +22857,11 @@ mod tests {
             "Parent with underscore",
             Status::Open,
             1,
-            None,
             now,
             None,
         );
-        let child = make_issue("a_b-1.1", "Real child", Status::Open, 1, None, now, None);
-        let decoy = make_issue("axb-1.1", "Decoy", Status::Open, 1, None, now, None);
+        let child = make_issue("a_b-1.1", "Real child", Status::Open, 1, now, None);
+        let decoy = make_issue("axb-1.1", "Decoy", Status::Open, 1, now, None);
         storage.create_issue(&parent, "t").unwrap();
         storage.create_issue(&child, "t").unwrap();
         storage.create_issue(&decoy, "t").unwrap();

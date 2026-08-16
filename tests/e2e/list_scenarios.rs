@@ -4,7 +4,7 @@
 //! - Status filtering (open, closed, in_progress, deferred, all)
 //! - Type filtering (bug, feature, task, epic)
 //! - Priority filtering (P0-P4)
-//! - Assignee and label filtering
+//! - Label filtering
 //! - Sort options (created_at, updated_at, priority)
 //! - Limit and offset pagination
 //! - Output formats (text, JSON, CSV)
@@ -32,7 +32,7 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
 
     let mut ids = Vec::new();
 
-    // Issue 1: P0 bug assigned to alice with "critical" label
+    // Issue 1: P0 bug with "critical" label
     let issue1 = run_br(
         &workspace,
         ["create", "Critical login bug", "-p", "0", "-t", "bug"],
@@ -42,19 +42,12 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
     let id1 = parse_created_id(&issue1.stdout);
     run_br(
         &workspace,
-        [
-            "update",
-            &id1,
-            "--assignee",
-            "alice",
-            "--add-label",
-            "critical",
-        ],
+        ["update", &id1, "--add-label", "critical"],
         "update_bug_p0",
     );
     ids.push(id1);
 
-    // Issue 2: P1 feature assigned to bob with "backend" label
+    // Issue 2: P1 feature with "backend" label
     let issue2 = run_br(
         &workspace,
         ["create", "Add user dashboard", "-p", "1", "-t", "feature"],
@@ -64,19 +57,12 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
     let id2 = parse_created_id(&issue2.stdout);
     run_br(
         &workspace,
-        [
-            "update",
-            &id2,
-            "--assignee",
-            "bob",
-            "--add-label",
-            "backend",
-        ],
+        ["update", &id2, "--add-label", "backend"],
         "update_feature_p1",
     );
     ids.push(id2);
 
-    // Issue 3: P2 task assigned to alice with "frontend" label
+    // Issue 3: P2 task with "frontend" label
     let issue3 = run_br(
         &workspace,
         ["create", "Update documentation", "-p", "2", "-t", "task"],
@@ -86,19 +72,12 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
     let id3 = parse_created_id(&issue3.stdout);
     run_br(
         &workspace,
-        [
-            "update",
-            &id3,
-            "--assignee",
-            "alice",
-            "--add-label",
-            "frontend",
-        ],
+        ["update", &id3, "--add-label", "frontend"],
         "update_task_p2",
     );
     ids.push(id3);
 
-    // Issue 4: P1 bug unassigned with "backend" and "api" labels
+    // Issue 4: P1 bug with "backend" and "api" labels
     let issue4 = run_br(
         &workspace,
         ["create", "API rate limiting bug", "-p", "1", "-t", "bug"],
@@ -157,14 +136,7 @@ fn setup_diverse_workspace() -> (BrWorkspace, Vec<String>) {
     let id7 = parse_created_id(&issue7.stdout);
     run_br(
         &workspace,
-        [
-            "update",
-            &id7,
-            "--status",
-            "in_progress",
-            "--assignee",
-            "charlie",
-        ],
+        ["update", &id7, "--status", "in_progress"],
         "update_task_in_progress",
     );
     ids.push(id7);
@@ -438,53 +410,6 @@ fn list_filter_by_multiple_priorities() {
 }
 
 // =============================================================================
-// ASSIGNEE FILTER TESTS
-// =============================================================================
-
-#[test]
-fn list_filter_by_assignee() {
-    let (workspace, _ids) = setup_diverse_workspace();
-
-    let list = run_br(
-        &workspace,
-        ["list", "--assignee", "alice", "--json"],
-        "list_alice",
-    );
-    assert!(list.status.success(), "list failed: {}", list.stderr);
-
-    let json = parse_list_issues(&list.stdout);
-
-    assert_eq!(json.len(), 2, "Expected 2 issues assigned to alice");
-    for issue in &json {
-        assert_eq!(issue["assignee"], "alice");
-    }
-}
-
-#[test]
-fn list_filter_by_unassigned() {
-    let (workspace, _ids) = setup_diverse_workspace();
-
-    // The --unassigned flag filters for issues without an assignee
-    let list = run_br(
-        &workspace,
-        ["list", "--unassigned", "--json"],
-        "list_unassigned",
-    );
-    assert!(list.status.success(), "list failed: {}", list.stderr);
-
-    let json = parse_list_issues(&list.stdout);
-
-    // All returned issues should have no assignee
-    for issue in &json {
-        assert!(
-            issue["assignee"].is_null() || issue["assignee"] == "",
-            "Expected unassigned, got {:?}",
-            issue["assignee"]
-        );
-    }
-}
-
-// =============================================================================
 // LABEL FILTER TESTS
 // =============================================================================
 
@@ -552,39 +477,6 @@ fn list_combined_filters_type_and_priority() {
     assert_eq!(json.len(), 1, "Expected 1 P1 bug");
     assert_eq!(json[0]["issue_type"], "bug");
     assert_eq!(json[0]["priority"], 1);
-}
-
-#[test]
-fn list_combined_filters_assignee_and_label() {
-    let (workspace, _ids) = setup_diverse_workspace();
-
-    let list = run_br(
-        &workspace,
-        [
-            "list",
-            "--assignee",
-            "alice",
-            "--label",
-            "critical",
-            "--json",
-        ],
-        "list_alice_critical",
-    );
-    assert!(list.status.success(), "list failed: {}", list.stderr);
-
-    let json = parse_list_issues(&list.stdout);
-
-    assert_eq!(
-        json.len(),
-        1,
-        "Expected 1 issue assigned to alice with critical label"
-    );
-    assert!(
-        json[0]["title"]
-            .as_str()
-            .unwrap()
-            .contains("Critical login bug")
-    );
 }
 
 // =============================================================================
@@ -826,7 +718,7 @@ fn list_csv_with_custom_fields() {
             "--format",
             "csv",
             "--fields",
-            "id,title,priority,assignee",
+            "id,title,priority,owner",
         ],
         "list_csv_fields",
     );
@@ -834,7 +726,7 @@ fn list_csv_with_custom_fields() {
 
     let header = list.stdout.lines().next().unwrap_or("");
     assert_eq!(
-        header, "id,title,priority,assignee",
+        header, "id,title,priority,owner",
         "CSV header doesn't match requested fields"
     );
 }
@@ -885,26 +777,6 @@ fn list_filter_nonexistent_label() {
     let json = parse_list_issues(&list.stdout);
 
     assert_eq!(json.len(), 0, "Expected no issues with nonexistent label");
-}
-
-#[test]
-fn list_filter_nonexistent_assignee() {
-    let (workspace, _ids) = setup_diverse_workspace();
-
-    let list = run_br(
-        &workspace,
-        ["list", "--assignee", "nobody-exists-here", "--json"],
-        "list_no_assignee",
-    );
-    assert!(list.status.success(), "list failed: {}", list.stderr);
-
-    let json = parse_list_issues(&list.stdout);
-
-    assert_eq!(
-        json.len(),
-        0,
-        "Expected no issues with nonexistent assignee"
-    );
 }
 
 #[test]

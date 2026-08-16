@@ -381,11 +381,11 @@ fn e2e_last_touched_id_after_reparent_is_the_new_id() {
     let new_id = json[0]["id"].as_str().expect("id in payload").to_string();
 
     // A later bare-ID command (no explicit ID) must target the renamed
-    // issue, not the tombstone left at the vacated ID. `--claim` is a
-    // convenient no-conflict mutation to prove the resolved target.
+    // issue, not the tombstone left at the vacated ID. `--status in_progress`
+    // is a convenient no-conflict mutation to prove the resolved target.
     let claim = run_br(
         &workspace,
-        ["update", "--claim", "--json"],
+        ["update", "--status", "in_progress", "--json"],
         "claim_last_touched",
     );
     assert!(claim.status.success(), "claim failed: {}", claim.stderr);

@@ -76,7 +76,6 @@ struct UpdateDiff {
     status: Option<(Status, Status)>,
     priority: Option<(Priority, Priority)>,
     issue_type: Option<(IssueType, IssueType)>,
-    assignee: Option<(Option<String>, Option<String>)>,
     owner: Option<(Option<String>, Option<String>)>,
 }
 
@@ -97,12 +96,6 @@ impl UpdateDiff {
             && before.issue_type != *new_type
         {
             diff.issue_type = Some((before.issue_type.clone(), new_type.clone()));
-        }
-        if let Some(ref new_assignee_opt) = update.assignee {
-            let before_assignee = before.assignee.clone();
-            if before_assignee != *new_assignee_opt {
-                diff.assignee = Some((before_assignee, new_assignee_opt.clone()));
-            }
         }
         if let Some(ref new_owner_opt) = update.owner {
             let before_owner = before.owner.clone();
@@ -244,6 +237,14 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
             let use_machine_output = update_uses_machine_output(ctx);
             let use_human_output = update_uses_human_output(ctx);
 
+            // Each route commits independently here, and there is no
+            // cross-route rollback: `execute_prepared_route` writes and
+            // commits its own route's transaction before the loop moves to
+            // the next one, so a later route failing (e.g. an `--if-status`
+            // guard rejecting it) does not undo an earlier route's already-
+            // committed write. `prepare_single_route` above validates what it
+            // can before any commit, but a commit-time guard is checked only
+            // inside this loop, per route.
             for (issue_inputs, prepared_route) in prepared_routes {
                 let route_output = execute_prepared_route(prepared_route, ctx)?;
 
@@ -333,58 +334,9 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
         for warning in &capacity_warnings {
             ctx.warning(&warning.to_string());
         }
-        // beads#297: emit inherited governing context for any
-        // bead that just transitioned into in_progress (via --claim or
-        // --status in_progress). Done after the update summary so the
-        // child's status change is visible first, then the inherited
-        // context the agent should be operating under.
-        emit_inherited_context_for_in_progress_transitions(&beads_dir, cli, &render_items);
     }
 
     Ok(())
-}
-
-fn emit_inherited_context_for_in_progress_transitions(
-    beads_dir: &Path,
-    cli: &config::CliOverrides,
-    render_items: &[UpdateRenderItem],
-) {
-    if !crate::inheritance::is_enabled(beads_dir) {
-        return;
-    }
-    let claimed_ids: Vec<&str> = render_items
-        .iter()
-        .filter_map(|item| match item {
-            UpdateRenderItem::Summary { id, diff, .. }
-                if diff
-                    .status
-                    .as_ref()
-                    .is_some_and(|(_, new)| matches!(new, Status::InProgress)) =>
-            {
-                Some(id.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    if claimed_ids.is_empty() {
-        return;
-    }
-    // Open a transient read-only storage to walk ancestry. Failure
-    // here is non-fatal — the update has already succeeded and the
-    // child's status change is already printed.
-    let Ok(storage_ctx) = config::open_storage_with_cli(beads_dir, cli) else {
-        return;
-    };
-    let storage = &storage_ctx.storage;
-    for id in claimed_ids {
-        let blocks = match crate::inheritance::collect_inherited_blocks(storage, id) {
-            Ok(blocks) if !blocks.is_empty() => blocks,
-            _ => continue,
-        };
-        let rendered = crate::inheritance::render_text(&blocks);
-        println!();
-        print!("{rendered}");
-    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -404,8 +356,7 @@ fn prepare_single_route(
     let resolver = build_resolver(&config_layer, &storage_ctx.storage);
     let resolved_ids = resolve_target_ids(args, beads_dir, &resolver, &storage_ctx.storage)?;
 
-    let claim_exclusive = config::claim_exclusive_from_layer(&config_layer);
-    let update = build_update(args, &actor, claim_exclusive)?;
+    let update = build_update(args)?;
 
     // Strict status-workflow enforcement (issue #311) + transition rules
     // (issue #312, layer 1). When the project's `.beads/policy.yaml` configures
@@ -441,10 +392,10 @@ fn prepare_single_route(
     // `update_issue_in_tx`), and label writes go through their own
     // transactions — so a guard attached to a label-only change would read as
     // enforced and would not be. Refuse rather than pretend.
-    if update.is_empty() && (update.expect_status.is_some() || update.expect_assignee.is_some()) {
+    if update.is_empty() && update.expect_status.is_some() {
         return Err(BeadsError::validation(
             "if_status",
-            "--if-status / --if-assignee guard a field update; this command changes no fields. \
+            "--if-status guards a field update; this command changes no fields. \
              Label and parent changes are written in their own transactions and cannot be \
              guarded atomically, so combining them with a guard is refused rather than \
              silently unguarded.",
@@ -882,31 +833,6 @@ fn validate_route_runtime_guards(
     resolved_ids: &[String],
     update: &IssueUpdate,
 ) -> Result<()> {
-    if update.expect_unassigned {
-        let claim_actor = update.claim_actor.as_deref().unwrap_or("");
-        for id in resolved_ids {
-            let issue = storage
-                .get_issue(id)?
-                .ok_or_else(|| BeadsError::IssueNotFound { id: id.clone() })?;
-            let trimmed = issue
-                .assignee
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-
-            match trimmed {
-                None => {}
-                Some(current) if !update.claim_exclusive && current == claim_actor => {}
-                Some(current) => {
-                    return Err(BeadsError::validation(
-                        "claim",
-                        format!("issue {id} already assigned to {current}"),
-                    ));
-                }
-            }
-        }
-    }
-
     validate_multi_issue_external_ref_update(
         update
             .external_ref
@@ -933,11 +859,10 @@ fn validate_transition_to_in_progress(
     ids: &[String],
     args: &UpdateArgs,
 ) -> Result<()> {
-    let transitioning_to_in_progress = args.claim
-        || args
-            .status
-            .as_ref()
-            .is_some_and(|status| status.eq_ignore_ascii_case("in_progress"));
+    let transitioning_to_in_progress = args
+        .status
+        .as_ref()
+        .is_some_and(|status| status.eq_ignore_ascii_case("in_progress"));
 
     if !transitioning_to_in_progress || args.force {
         return Ok(());
@@ -985,17 +910,6 @@ fn print_update_summary(id: &str, title: &str, diff: &UpdateDiff, renamed_to: Op
             format_type_label(old_type),
             format_type_label(new_type)
         );
-    }
-    if let Some((old_assignee, new_assignee)) = &diff.assignee {
-        let before_assignee = old_assignee.as_deref().map_or_else(
-            || "(none)".to_string(),
-            |value| sanitize_terminal_inline(value).into_owned(),
-        );
-        let after_assignee = new_assignee.as_deref().map_or_else(
-            || "(none)".to_string(),
-            |value| sanitize_terminal_inline(value).into_owned(),
-        );
-        println!("  assignee: {before_assignee} → {after_assignee}");
     }
     if let Some((old_owner, new_owner)) = &diff.owner {
         let before_owner = old_owner.as_deref().map_or_else(
@@ -1264,37 +1178,20 @@ fn resolve_update_description(args: &UpdateArgs) -> Result<UpdateArgs> {
     Ok(resolved)
 }
 
-fn build_update(args: &UpdateArgs, actor: &str, claim_exclusive: bool) -> Result<IssueUpdate> {
-    let status = if args.claim {
-        Some(Status::InProgress)
-    } else {
-        args.status.as_ref().map(|s| s.parse()).transpose()?
-    };
+fn build_update(args: &UpdateArgs) -> Result<IssueUpdate> {
+    let status = args.status.as_ref().map(|s| s.parse()).transpose()?;
 
     let priority = args.priority.as_ref().map(|p| p.parse()).transpose()?;
 
     let issue_type = args.type_.as_ref().map(|t| t.parse()).transpose()?;
 
-    let assignee = if args.claim {
-        Some(Some(actor.to_string()))
-    } else {
-        optional_string_field(args.assignee.as_deref())
-    };
-
     let owner = optional_string_field(args.owner.as_deref());
-    let due_at = optional_date_field(args.due.as_deref())?;
     let defer_until = optional_date_field(args.defer.as_deref())?;
 
-    if args.session.is_some() && !matches!(status, Some(Status::Closed)) {
-        return Err(BeadsError::validation(
-            "session",
-            "--session can only be used when closing with --status closed",
-        ));
-    }
-    let (closed_at, close_reason, closed_by_session) = match &status {
-        Some(Status::Closed) => (Some(Some(Utc::now())), None, args.session.clone().map(Some)),
-        Some(_) => (Some(None), Some(None), Some(None)),
-        None => (None, None, None),
+    let (closed_at, close_reason) = match &status {
+        Some(Status::Closed) => (Some(Some(Utc::now())), None),
+        Some(_) => (Some(None), Some(None)),
+        None => (None, None),
     };
 
     // Build update struct
@@ -1308,31 +1205,18 @@ fn build_update(args: &UpdateArgs, actor: &str, claim_exclusive: bool) -> Result
         status,
         priority,
         issue_type,
-        assignee,
         owner,
-        estimated_minutes: args.estimate.map(Some),
-        due_at,
         defer_until,
         external_ref: optional_string_field(args.external_ref.as_deref()),
         source_repo: optional_string_field(args.source_repo.as_deref()),
-        source_repo_path: optional_string_field(args.source_repo_path.as_deref()),
-        agent_context: agent_context_update_from_arg(args.agent_context.as_deref())?,
         closed_at,
         close_reason,
-        closed_by_session,
         deleted_at: None,
         deleted_by: None,
         delete_reason: None,
         transition_comment: args.transition_comment.clone(),
         workflow_policy_bypass_reason: None,
         skip_cache_rebuild: false,
-        expect_unassigned: args.claim,
-        claim_exclusive: args.claim && claim_exclusive,
-        claim_actor: if args.claim {
-            Some(actor.to_string())
-        } else {
-            None
-        },
         // Parsed through `Status` rather than passed through as text so
         // `--if-status IN_PROGRESS` and `--if-status in_progress` guard the same
         // thing, and so a custom status from policy.yaml still round-trips
@@ -1343,10 +1227,6 @@ fn build_update(args: &UpdateArgs, actor: &str, claim_exclusive: bool) -> Result
             .map(str::parse::<Status>)
             .transpose()?
             .map(|status| status.as_str().to_string()),
-        expect_assignee: args
-            .if_assignee
-            .as_deref()
-            .map(|value| optional_string_field(Some(value)).flatten()),
     })
 }
 
@@ -1359,91 +1239,6 @@ fn optional_string_field(value: Option<&str>) -> Option<Option<String>> {
             Some(v.to_string())
         }
     })
-}
-
-/// Parse the `--agent-context` argument into an `IssueUpdate::agent_context`
-/// payload. Accepts:
-///
-/// - `None` → don't touch the field (`Option<Option<String>>::None`).
-/// - `Some("")` → clear the field back to NULL (`Some(None)`).
-/// - `Some("@path")` → read the file at `path`; parse as YAML when the
-///   extension is `.yaml`/`.yml`, otherwise as JSON. Normalize to JSON
-///   so storage is opaque TEXT but always canonical-JSON-shaped.
-/// - `Some("{...}")` → parse as JSON inline.
-///
-/// Validation happens here because the storage column is opaque TEXT —
-/// without this guard we'd happily round-trip syntactically invalid
-/// JSON through SQLite and then have the emission path discover the
-/// problem at agent claim time. (beads#297)
-#[allow(clippy::option_option)]
-fn agent_context_update_from_arg(value: Option<&str>) -> Result<Option<Option<String>>> {
-    let Some(raw) = value else {
-        return Ok(None);
-    };
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Ok(Some(None));
-    }
-
-    let (source_label, body): (String, String) = if let Some(path_str) = raw.strip_prefix('@') {
-        let path = std::path::Path::new(path_str);
-        let contents = std::fs::read_to_string(path).map_err(|e| {
-            BeadsError::Config(format!(
-                "agent-context: cannot read {}: {e}",
-                path.display()
-            ))
-        })?;
-        let is_yaml = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"));
-        let normalized = if is_yaml {
-            let value: serde_yml::Value = serde_yml::from_str(&contents).map_err(|e| {
-                BeadsError::Config(format!(
-                    "agent-context: YAML parse failed for {}: {e}",
-                    path.display()
-                ))
-            })?;
-            serde_json::to_string(&value).map_err(|e| {
-                BeadsError::Config(format!(
-                    "agent-context: YAML to JSON conversion failed for {}: {e}",
-                    path.display()
-                ))
-            })?
-        } else {
-            let value: serde_json::Value = serde_json::from_str(&contents).map_err(|e| {
-                BeadsError::Config(format!(
-                    "agent-context: JSON parse failed for {}: {e}",
-                    path.display()
-                ))
-            })?;
-            serde_json::to_string(&value).map_err(|e| {
-                BeadsError::Config(format!(
-                    "agent-context: JSON re-serialization failed for {}: {e}",
-                    path.display()
-                ))
-            })?
-        };
-        (path.display().to_string(), normalized)
-    } else {
-        let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
-            BeadsError::Config(format!(
-                "agent-context: inline argument is not valid JSON: {e} (hint: use \
-                 `--agent-context @path/to/instructions.yaml` for a file, or pass an \
-                 empty string to clear)"
-            ))
-        })?;
-        let normalized = serde_json::to_string(&value).map_err(|e| {
-            BeadsError::Config(format!("agent-context: JSON re-serialization failed: {e}"))
-        })?;
-        ("<inline>".to_string(), normalized)
-    };
-    tracing::debug!(
-        bytes = body.len(),
-        source = %source_label,
-        "agent-context: parsed and normalized to canonical JSON"
-    );
-    Ok(Some(Some(body)))
 }
 
 #[allow(clippy::option_option)]
@@ -1701,20 +1496,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_update_with_claim() {
-        init_test_logging();
-        info!("test_build_update_with_claim: starting");
-        let args = UpdateArgs {
-            claim: true,
-            ..Default::default()
-        };
-        let update = build_update(&args, "test_actor", false).unwrap();
-        assert_eq!(update.status, Some(Status::InProgress));
-        assert_eq!(update.assignee, Some(Some("test_actor".to_string())));
-        info!("test_build_update_with_claim: assertions passed");
-    }
-
-    #[test]
     fn test_resolve_update_description_file_preserves_exact_content() {
         init_test_logging();
         let temp = TempDir::new().unwrap();
@@ -1758,18 +1539,17 @@ mod tests {
             status: Some("blocked".to_string()),
             ..Default::default()
         };
-        let update_blocked = build_update(&args_blocked, "test_actor", false).unwrap();
+        let update_blocked = build_update(&args_blocked).unwrap();
         assert_eq!(update_blocked.status, Some(Status::Blocked));
         // Close metadata should be explicitly cleared for non-terminal statuses.
         assert_eq!(update_blocked.closed_at, Some(None));
         assert_eq!(update_blocked.close_reason, Some(None));
-        assert_eq!(update_blocked.closed_by_session, Some(None));
 
         let args_in_progress = UpdateArgs {
             status: Some("in_progress".to_string()),
             ..Default::default()
         };
-        let update_in_progress = build_update(&args_in_progress, "test_actor", false).unwrap();
+        let update_in_progress = build_update(&args_in_progress).unwrap();
         assert_eq!(update_in_progress.status, Some(Status::InProgress));
         info!("test_build_update_with_status: assertions passed");
     }
@@ -1844,24 +1624,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_update_rejects_session_without_closing() {
-        let args = UpdateArgs {
-            session: Some("session-123".to_string()),
-            ..Default::default()
-        };
-        let err = build_update(&args, "test_actor", false).unwrap_err();
-        assert!(err.to_string().contains("--session can only be used"));
-
-        let args_open = UpdateArgs {
-            status: Some("open".to_string()),
-            session: Some("session-123".to_string()),
-            ..Default::default()
-        };
-        let err = build_update(&args_open, "test_actor", false).unwrap_err();
-        assert!(err.to_string().contains("--session can only be used"));
-    }
-
-    #[test]
     fn test_build_update_with_priority() {
         init_test_logging();
         info!("test_build_update_with_priority: starting");
@@ -1869,7 +1631,7 @@ mod tests {
             priority: Some("1".to_string()),
             ..Default::default()
         };
-        let update = build_update(&args, "test_actor", false).unwrap();
+        let update = build_update(&args).unwrap();
         assert_eq!(update.priority, Some(Priority(1)));
         info!("test_build_update_with_priority: assertions passed");
     }
@@ -1879,7 +1641,7 @@ mod tests {
         init_test_logging();
         info!("test_build_update_empty: starting");
         let args = UpdateArgs::default();
-        let update = build_update(&args, "test_actor", false).unwrap();
+        let update = build_update(&args).unwrap();
         assert!(update.is_empty());
         info!("test_build_update_empty: assertions passed");
     }
@@ -2068,42 +1830,6 @@ mod tests {
 
         validate_mutable_target_issues(&storage, &["bd-closed".to_string()], true, None)
             .expect("a closed issue must still accept field-only updates");
-    }
-
-    #[test]
-    fn test_validate_route_runtime_guards_rejects_assigned_claim_target() {
-        init_test_logging();
-        info!("test_validate_route_runtime_guards_rejects_assigned_claim_target: starting");
-
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let issue = Issue {
-            id: "bd-claimed".to_string(),
-            title: "Claimed issue".to_string(),
-            assignee: Some("bob".to_string()),
-            status: Status::InProgress,
-            priority: Priority::MEDIUM,
-            issue_type: IssueType::Task,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            ..Issue::default()
-        };
-        storage.create_issue(&issue, "tester").unwrap();
-
-        let update = IssueUpdate {
-            expect_unassigned: true,
-            claim_actor: Some("alice".to_string()),
-            assignee: Some(Some("alice".to_string())),
-            status: Some(Status::InProgress),
-            ..IssueUpdate::default()
-        };
-
-        let err = validate_route_runtime_guards(&storage, &["bd-claimed".to_string()], &update)
-            .unwrap_err();
-        assert!(err.to_string().contains("already assigned to bob"));
-
-        info!(
-            "test_validate_route_runtime_guards_rejects_assigned_claim_target: assertions passed"
-        );
     }
 
     #[test]

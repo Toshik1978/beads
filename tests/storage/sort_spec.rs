@@ -90,35 +90,6 @@ fn status_orders_by_workflow_rank_not_alphabetically() {
     assert_eq!(ids(&issues), vec!["zzz-open", "aaa-blocked"]);
 }
 
-#[test]
-fn unassigned_sorts_last_under_both_assignee_directions() {
-    let mut storage = test_db();
-    let anna = fixtures::IssueBuilder::new("anna's")
-        .with_id("test-a")
-        .with_assignee("anna")
-        .build();
-    let zoe = fixtures::IssueBuilder::new("zoe's")
-        .with_id("test-z")
-        .with_assignee("zoe")
-        .build();
-    let nobody = fixtures::IssueBuilder::new("nobody's")
-        .with_id("test-n")
-        .build();
-    for issue in [&anna, &zoe, &nobody] {
-        storage.create_issue(issue, "tester").expect("create");
-    }
-
-    let ascending = storage
-        .list_issues(&filters_sorted("assignee"))
-        .expect("list");
-    assert_eq!(ids(&ascending), vec!["test-a", "test-z", "test-n"]);
-
-    let descending = storage
-        .list_issues(&filters_sorted("-assignee"))
-        .expect("list");
-    assert_eq!(ids(&descending), vec!["test-z", "test-a", "test-n"]);
-}
-
 /// Seed three stale-eligible issues whose relative order differs depending
 /// on whether `updated_at` alone or `updated_at` *and* `priority` drive the
 /// ordering. Two of the three share an `updated_at` (the only way a

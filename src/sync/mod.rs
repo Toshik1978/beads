@@ -1848,7 +1848,7 @@ fn stream_export_issues<W: Write>(
 ///
 /// This implements the classic beads export semantics:
 /// - Include tombstones (for sync propagation)
-/// - Exclude ephemerals/wisps
+/// - Exclude wisps (IDs containing `-wisp-`)
 /// - Sort by ID for deterministic output
 /// - Populate dependencies and labels for each issue
 /// - Atomic write (temp file -> rename)
@@ -2677,7 +2677,9 @@ fn find_post_import_fk_violation(storage: &SqliteStorage) -> Result<Option<(Stri
 }
 
 fn is_issue_exportable(issue: &Issue, retention_days: Option<u64>) -> bool {
-    !issue.ephemeral && !issue.id.contains("-wisp-") && !issue.is_expired_tombstone(retention_days)
+    // `ephemeral` (bds-b4f.2.2) was set only by wisp-ID detection in
+    // `normalize_issue`; the ID check below is the same condition directly.
+    !issue.id.contains("-wisp-") && !issue.is_expired_tombstone(retention_days)
 }
 
 fn finalize_incremental_auto_flush(
@@ -3484,7 +3486,6 @@ fn determine_action(
 /// Normalize an issue for import.
 ///
 /// - Recomputes `content_hash`
-/// - Sets ephemeral=true if ID contains "-wisp-"
 /// - Applies defaults and repairs `closed_at` invariant
 fn normalize_issue(issue: &mut Issue) {
     use crate::util::content_hash;
@@ -3550,11 +3551,6 @@ fn normalize_issue(issue: &mut Issue) {
         ) {
             issue.status = crate::model::Status::Closed;
         }
-    }
-
-    // Wisp detection: if ID contains "-wisp-", mark as ephemeral
-    if issue.id.contains("-wisp-") {
-        issue.ephemeral = true;
     }
 
     // Repair closed_at invariant: if status is terminal (closed/tombstone), ensure closed_at is set
@@ -3846,7 +3842,9 @@ fn scan_import_collision_renames(
     for_each_jsonl_import_issue(input_path, |_line_num, mut issue| {
         apply_prefix_renames(&mut issue, prefix_renames);
 
-        if issue.ephemeral {
+        // `ephemeral` (bds-b4f.2.2) was set only by wisp-ID detection in
+        // `normalize_issue`; check the ID directly now that the field is gone.
+        if issue.id.contains("-wisp-") {
             result.skipped_count += 1;
             progress.inc(1);
             return Ok(());
@@ -4050,7 +4048,9 @@ fn stream_import_actions_in_tx(
     for_each_jsonl_import_issue(input_path, |_line_num, mut issue| {
         apply_prefix_renames(&mut issue, prefix_renames);
 
-        if issue.ephemeral {
+        // `ephemeral` (bds-b4f.2.2) was set only by wisp-ID detection in
+        // `normalize_issue`; check the ID directly now that the field is gone.
+        if issue.id.contains("-wisp-") {
             progress.inc(1);
             return Ok(());
         }
@@ -5236,35 +5236,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at: Utc::now(),
             created_by: None,
             updated_at: Utc::now(),
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -5399,35 +5384,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at,
             created_by: None,
             updated_at,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -5906,8 +5876,15 @@ mod tests {
                 "{\"id\":\"bd-001\",\"title\":\"Broken\",\"comments\":[{\"id\":1}\n".to_string(),
             ),
             (
-                "object nested in numeric field",
-                "{\"id\":\"bd-001\",\"title\":\"Broken\",\"original_size\":{\"id\":\"bd-002\"}}\n"
+                // Must name a field this epic's field-removal tasks never
+                // drop and that has a strict, non-`String` deserializer, so
+                // a nested object still fails to parse. A field the epic
+                // later removes becomes an unrecognised key once gone —
+                // serde skips unrecognised keys silently, the corruption
+                // stops being corruption, and this case would pass while
+                // asserting nothing.
+                "object nested in strictly-typed field",
+                "{\"id\":\"bd-001\",\"title\":\"Broken\",\"created_at\":{\"id\":\"bd-002\"}}\n"
                     .to_string(),
             ),
         ];
@@ -5972,18 +5949,25 @@ mod tests {
     }
 
     #[test]
-    fn test_export_excludes_ephemerals() {
+    fn test_export_excludes_wisp_issues() {
+        // `ephemeral` no longer exists on `Issue` (bds-b4f.2.2); it was set
+        // only by wisp-ID detection. This pins the full-export exclusion path:
+        // `export_to_jsonl` never calls `is_issue_exportable` (that function
+        // gates the separate incremental/auto-flush export path) — the rows
+        // here are filtered by `get_all_issues_for_export`'s own
+        // `id NOT LIKE '%-wisp-%'` SQL predicate. Same was true before this
+        // field's removal: the old `ephemeral = true` version of this test was
+        // also excluded by that SQL clause, not by `is_issue_exportable`.
         let mut storage = SqliteStorage::open_memory().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let output_path = temp_dir.path().join("issues.jsonl");
 
-        // Create regular and ephemeral issues
+        // Create regular and wisp issues
         let regular = make_test_issue("bd-regular", "Regular issue");
-        let mut ephemeral = make_test_issue("bd-ephemeral", "Ephemeral issue");
-        ephemeral.ephemeral = true;
+        let wisp = make_test_issue("bd-wisp-1", "Wisp issue");
 
         storage.create_issue(&regular, "test").unwrap();
-        storage.create_issue(&ephemeral, "test").unwrap();
+        storage.create_issue(&wisp, "test").unwrap();
 
         let config = ExportConfig::default();
         let result = export_to_jsonl(&storage, &output_path, &config).unwrap();
@@ -5991,7 +5975,7 @@ mod tests {
         // Only regular issue should be exported
         assert_eq!(result.exported_count, 1);
         assert!(result.exported_ids.contains(&"bd-regular".to_string()));
-        assert!(!result.exported_ids.contains(&"bd-ephemeral".to_string()));
+        assert!(!result.exported_ids.contains(&"bd-wisp-1".to_string()));
     }
 
     #[test]
@@ -6454,17 +6438,6 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_issue_wisp_detection() {
-        let mut issue = make_test_issue("bd-wisp-123", "Wisp issue");
-        assert!(!issue.ephemeral);
-
-        normalize_issue(&mut issue);
-
-        // Issue ID containing "-wisp-" should be marked ephemeral
-        assert!(issue.ephemeral);
-    }
-
-    #[test]
     fn test_normalize_issue_closed_at_repair() {
         let mut issue = make_test_issue("bd-001", "Closed issue");
         issue.status = Status::Closed;
@@ -6880,22 +6853,27 @@ mod tests {
     }
 
     #[test]
-    fn test_import_skips_ephemerals() {
+    fn test_import_skips_wisp_issues() {
+        // `ephemeral` no longer exists on `Issue` (bds-b4f.2.2); it was set
+        // only by wisp-ID detection, so exercise the import skip path
+        // directly via a wisp-pattern ID.
         let mut storage = SqliteStorage::open_memory().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("issues.jsonl");
 
-        // Create JSONL with ephemeral issue
-        let mut ephemeral = make_test_issue("test-001", "Ephemeral");
-        ephemeral.ephemeral = true;
-        let json = serde_json::to_string(&ephemeral).unwrap();
+        // Create JSONL with a wisp-ID issue
+        let wisp = make_test_issue("test-wisp-001", "Wisp");
+        let json = serde_json::to_string(&wisp).unwrap();
         fs::write(&path, format!("{json}\n")).unwrap();
 
+        // `parse_id` treats the ID's last `-` as the prefix/hash boundary
+        // (hyphenated prefixes are supported), so a wisp ID's expected
+        // prefix includes the `wisp` segment.
         let config = ImportConfig::default();
-        let result = import_from_jsonl(&mut storage, &path, &config, Some("test-")).unwrap();
+        let result = import_from_jsonl(&mut storage, &path, &config, Some("test-wisp-")).unwrap();
         assert_eq!(result.skipped_count, 1);
         assert_eq!(result.imported_count, 0);
-        assert!(storage.get_issue("test-001").unwrap().is_none());
+        assert!(storage.get_issue("test-wisp-001").unwrap().is_none());
     }
 
     #[test]
@@ -7404,7 +7382,7 @@ mod tests {
     fn timestamp_tie_with_differing_content_adopts_the_jsonl() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let mut seed = make_issue_at("bd-1", "Existing", fixed_time(100));
-        seed.assignee = Some("alice".to_string());
+        seed.owner = Some("alice".to_string());
         storage.create_issue(&seed, "test").unwrap();
 
         // Read the row back rather than reusing `seed`: `create_issue`
@@ -7412,9 +7390,9 @@ mod tests {
         // stored issue is what a JSONL record round-trips through, not the
         // struct handed in.
         let mut incoming = storage.get_issue_for_export("bd-1").unwrap().unwrap();
-        // The same revision by timestamp, but the assignee has been removed
+        // The same revision by timestamp, but the owner has been removed
         // from the record -- the hand edit the bead reported.
-        incoming.assignee = None;
+        incoming.owner = None;
 
         let action = resolve_timestamp_tie(
             &storage,
@@ -8730,35 +8708,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at,
             created_by: None,
             updated_at,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],

@@ -494,68 +494,6 @@ fn list_filters_type_multiple() {
 }
 
 #[test]
-fn list_filters_assignee() {
-    let mut storage = test_db();
-
-    let alice_issue = fixtures::IssueBuilder::new("alice task")
-        .with_assignee("alice")
-        .build();
-    let bob_issue = fixtures::IssueBuilder::new("bob task")
-        .with_assignee("bob")
-        .build();
-    let unassigned = fixtures::IssueBuilder::new("unassigned task").build();
-
-    storage.create_issue(&alice_issue, "tester").unwrap();
-    storage.create_issue(&bob_issue, "tester").unwrap();
-    storage.create_issue(&unassigned, "tester").unwrap();
-
-    // Filter for alice's issues
-    let filters = ListFilters {
-        assignee: Some("alice".to_string()),
-        ..Default::default()
-    };
-    let issues = storage.list_issues(&filters).unwrap();
-    assert_eq!(issues.len(), 1);
-    assert!(issue_ids(&issues).contains(&alice_issue.id));
-
-    // Filter for bob's issues
-    let filters = ListFilters {
-        assignee: Some("bob".to_string()),
-        ..Default::default()
-    };
-    let issues = storage.list_issues(&filters).unwrap();
-    assert_eq!(issues.len(), 1);
-    assert!(issue_ids(&issues).contains(&bob_issue.id));
-}
-
-#[test]
-fn list_filters_unassigned() {
-    let mut storage = test_db();
-
-    let assigned = fixtures::IssueBuilder::new("assigned task")
-        .with_assignee("alice")
-        .build();
-    let unassigned1 = fixtures::IssueBuilder::new("unassigned task 1").build();
-    let unassigned2 = fixtures::IssueBuilder::new("unassigned task 2").build();
-
-    storage.create_issue(&assigned, "tester").unwrap();
-    storage.create_issue(&unassigned1, "tester").unwrap();
-    storage.create_issue(&unassigned2, "tester").unwrap();
-
-    // Filter for unassigned issues
-    let filters = ListFilters {
-        unassigned: true,
-        ..Default::default()
-    };
-    let issues = storage.list_issues(&filters).unwrap();
-    let ids = issue_ids(&issues);
-    assert_eq!(issues.len(), 2);
-    assert!(!ids.contains(&assigned.id));
-    assert!(ids.contains(&unassigned1.id));
-    assert!(ids.contains(&unassigned2.id));
-}
-
-#[test]
 fn list_filters_include_closed() {
     let mut storage = test_db();
 
@@ -615,35 +553,11 @@ fn list_filters_include_closed() {
     );
 }
 
-#[test]
-fn list_filters_include_templates() {
-    let mut storage = test_db();
-
-    let regular = fixtures::IssueBuilder::new("regular issue").build();
-    let template = fixtures::IssueBuilder::new("template issue")
-        .with_template()
-        .build();
-
-    storage.create_issue(&regular, "tester").unwrap();
-    storage.create_issue(&template, "tester").unwrap();
-
-    // Default: exclude templates
-    let filters = ListFilters::default();
-    let issues = storage.list_issues(&filters).unwrap();
-    let ids = issue_ids(&issues);
-    assert!(ids.contains(&regular.id));
-    assert!(!ids.contains(&template.id));
-
-    // Include templates
-    let filters = ListFilters {
-        include_templates: true,
-        ..Default::default()
-    };
-    let issues = storage.list_issues(&filters).unwrap();
-    let ids = issue_ids(&issues);
-    assert!(ids.contains(&regular.id));
-    assert!(ids.contains(&template.id));
-}
+// `list_filters_include_templates` used to live here, exercising
+// `IssueBuilder::with_template()` (`Issue.is_template`). That field was
+// removed in bds-b4f.2.2 — it was never populated through any live write
+// path — and with it gone there is no public API left that can construct an
+// `is_template = true` row for `ListFilters::include_templates` to filter on.
 
 #[test]
 fn list_filters_title_contains() {
@@ -754,38 +668,6 @@ fn list_filters_combined_status_and_priority() {
 }
 
 #[test]
-fn list_filters_combined_type_and_assignee() {
-    let mut storage = test_db();
-
-    let alice_bug = fixtures::IssueBuilder::new("alice bug")
-        .with_type(IssueType::Bug)
-        .with_assignee("alice")
-        .build();
-    let alice_feature = fixtures::IssueBuilder::new("alice feature")
-        .with_type(IssueType::Feature)
-        .with_assignee("alice")
-        .build();
-    let bob_bug = fixtures::IssueBuilder::new("bob bug")
-        .with_type(IssueType::Bug)
-        .with_assignee("bob")
-        .build();
-
-    storage.create_issue(&alice_bug, "tester").unwrap();
-    storage.create_issue(&alice_feature, "tester").unwrap();
-    storage.create_issue(&bob_bug, "tester").unwrap();
-
-    // Bugs assigned to alice
-    let filters = ListFilters {
-        types: Some(vec![IssueType::Bug]),
-        assignee: Some("alice".to_string()),
-        ..Default::default()
-    };
-    let issues = storage.list_issues(&filters).unwrap();
-    assert_eq!(issues.len(), 1);
-    assert!(issue_ids(&issues).contains(&alice_bug.id));
-}
-
-#[test]
 fn list_filters_combined_status_type_priority() {
     let mut storage = test_db();
 
@@ -854,36 +736,6 @@ fn list_filters_combined_title_and_type() {
     let issues = storage.list_issues(&filters).unwrap();
     assert_eq!(issues.len(), 1);
     assert!(issue_ids(&issues).contains(&api_bug.id));
-}
-
-#[test]
-fn list_filters_combined_unassigned_and_priority() {
-    let mut storage = test_db();
-
-    let unassigned_high = fixtures::IssueBuilder::new("unassigned high")
-        .with_priority(Priority::HIGH)
-        .build();
-    let unassigned_low = fixtures::IssueBuilder::new("unassigned low")
-        .with_priority(Priority::LOW)
-        .build();
-    let assigned_high = fixtures::IssueBuilder::new("assigned high")
-        .with_priority(Priority::HIGH)
-        .with_assignee("alice")
-        .build();
-
-    storage.create_issue(&unassigned_high, "tester").unwrap();
-    storage.create_issue(&unassigned_low, "tester").unwrap();
-    storage.create_issue(&assigned_high, "tester").unwrap();
-
-    // Unassigned AND high priority
-    let filters = ListFilters {
-        unassigned: true,
-        priorities: Some(vec![Priority::HIGH]),
-        ..Default::default()
-    };
-    let issues = storage.list_issues(&filters).unwrap();
-    assert_eq!(issues.len(), 1);
-    assert!(issue_ids(&issues).contains(&unassigned_high.id));
 }
 
 #[test]
@@ -1032,7 +884,7 @@ fn list_filters_combined_include_closed_with_status_filter() {
 }
 
 #[test]
-fn list_filters_combined_five_filters() {
+fn list_filters_combined_four_filters() {
     let mut storage = test_db();
 
     // Create the target issue that matches all filters
@@ -1040,7 +892,6 @@ fn list_filters_combined_five_filters() {
         .with_status(Status::InProgress)
         .with_type(IssueType::Bug)
         .with_priority(Priority::HIGH)
-        .with_assignee("alice")
         .build();
 
     // Create non-matching issues (each misses one filter)
@@ -1048,31 +899,21 @@ fn list_filters_combined_five_filters() {
         .with_status(Status::InProgress)
         .with_type(IssueType::Bug)
         .with_priority(Priority::HIGH)
-        .with_assignee("alice")
         .build();
     let wrong_status = fixtures::IssueBuilder::new("API bug")
         .with_status(Status::Open)
         .with_type(IssueType::Bug)
         .with_priority(Priority::HIGH)
-        .with_assignee("alice")
         .build();
     let wrong_type = fixtures::IssueBuilder::new("API task")
         .with_status(Status::InProgress)
         .with_type(IssueType::Task)
         .with_priority(Priority::HIGH)
-        .with_assignee("alice")
         .build();
     let wrong_priority = fixtures::IssueBuilder::new("API bug low")
         .with_status(Status::InProgress)
         .with_type(IssueType::Bug)
         .with_priority(Priority::LOW)
-        .with_assignee("alice")
-        .build();
-    let wrong_assignee = fixtures::IssueBuilder::new("API bug bob")
-        .with_status(Status::InProgress)
-        .with_type(IssueType::Bug)
-        .with_priority(Priority::HIGH)
-        .with_assignee("bob")
         .build();
 
     storage.create_issue(&target, "tester").unwrap();
@@ -1080,15 +921,13 @@ fn list_filters_combined_five_filters() {
     storage.create_issue(&wrong_status, "tester").unwrap();
     storage.create_issue(&wrong_type, "tester").unwrap();
     storage.create_issue(&wrong_priority, "tester").unwrap();
-    storage.create_issue(&wrong_assignee, "tester").unwrap();
 
-    // All five filters
+    // All four filters
     let filters = ListFilters {
         title_contains: Some("API".to_string()),
         statuses: Some(vec![Status::InProgress]),
         types: Some(vec![IssueType::Bug]),
         priorities: Some(vec![Priority::HIGH]),
-        assignee: Some("alice".to_string()),
         ..Default::default()
     };
     let issues = storage.list_issues(&filters).unwrap();

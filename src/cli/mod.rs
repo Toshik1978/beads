@@ -64,8 +64,6 @@ struct CompletionIssue {
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
-    assignee: Option<String>,
-    #[serde(default)]
     owner: Option<String>,
 }
 
@@ -73,7 +71,6 @@ struct CompletionIssue {
 struct CompletionIndex {
     issues: Vec<CompletionIssue>,
     labels: Vec<String>,
-    assignees: Vec<String>,
     owners: Vec<String>,
     types: Vec<String>,
 }
@@ -200,7 +197,6 @@ const SORT_KEY_CANDIDATES: &[(&str, &str)] = &[
     ("priority", "Priority (critical first)"),
     ("status", "Status, in workflow order"),
     ("type", "Issue type"),
-    ("assignee", "Assignee (unassigned last)"),
     ("created_at", "Created at (newest first)"),
     ("updated_at", "Updated at (newest first)"),
     ("title", "Title (A-Z)"),
@@ -218,12 +214,10 @@ const CSV_FIELD_CANDIDATES: &[(&str, &str)] = &[
     ("status", "Status"),
     ("priority", "Priority"),
     ("issue_type", "Issue type"),
-    ("assignee", "Assignee"),
     ("owner", "Owner"),
     ("created_at", "Created at"),
     ("updated_at", "Updated at"),
     ("closed_at", "Closed at"),
-    ("due_at", "Due at"),
     ("defer_until", "Defer until"),
     ("notes", "Notes"),
     ("external_ref", "External ref"),
@@ -275,7 +269,6 @@ fn build_completion_index() -> CompletionIndex {
     let reader = BufReader::new(file);
     let mut issues = Vec::new();
     let mut labels = BTreeSet::new();
-    let mut assignees = BTreeSet::new();
     let mut owners = BTreeSet::new();
     let mut types = BTreeSet::new();
 
@@ -298,12 +291,6 @@ fn build_completion_index() -> CompletionIndex {
                 labels.insert(label.to_string());
             }
         }
-        if let Some(assignee) = issue.assignee.as_deref() {
-            let assignee = assignee.trim();
-            if !assignee.is_empty() {
-                assignees.insert(assignee.to_string());
-            }
-        }
         if let Some(owner) = issue.owner.as_deref() {
             let owner = owner.trim();
             if !owner.is_empty() {
@@ -323,7 +310,6 @@ fn build_completion_index() -> CompletionIndex {
     CompletionIndex {
         issues,
         labels: labels.into_iter().collect(),
-        assignees: assignees.into_iter().collect(),
         owners: owners.into_iter().collect(),
         types: types.into_iter().collect(),
     }
@@ -555,13 +541,6 @@ fn label_completer(current: &OsStr) -> Vec<CompletionCandidate> {
 
 fn label_completer_delimited(current: &OsStr) -> Vec<CompletionCandidate> {
     dynamic_candidates_delimited(current, ',', &completion_index().labels)
-}
-
-fn assignee_completer(current: &OsStr) -> Vec<CompletionCandidate> {
-    let Some(prefix) = current.to_str() else {
-        return Vec::new();
-    };
-    dynamic_candidates(prefix, &completion_index().assignees)
 }
 
 fn owner_completer(current: &OsStr) -> Vec<CompletionCandidate> {
@@ -930,10 +909,6 @@ pub struct CreateArgs {
     #[arg(long, visible_alias = "acceptance")]
     pub acceptance_criteria: Option<String>,
 
-    /// Assign to person
-    #[arg(long, short = 'a', add = ArgValueCompleter::new(assignee_completer))]
-    pub assignee: Option<String>,
-
     /// Set owner email
     #[arg(long, add = ArgValueCompleter::new(owner_completer))]
     pub owner: Option<String>,
@@ -950,14 +925,6 @@ pub struct CreateArgs {
     #[arg(long, value_delimiter = ',', add = ArgValueCompleter::new(deps_completer))]
     pub deps: Vec<String>,
 
-    /// Time estimate in minutes
-    #[arg(long, short = 'e')]
-    pub estimate: Option<i32>,
-
-    /// Due date (RFC3339 or relative)
-    #[arg(long)]
-    pub due: Option<String>,
-
     /// Defer until date (RFC3339 or relative)
     #[arg(long)]
     pub defer: Option<String>,
@@ -965,10 +932,6 @@ pub struct CreateArgs {
     /// External reference
     #[arg(long)]
     pub external_ref: Option<String>,
-
-    /// Mark as ephemeral (not exported to JSONL)
-    #[arg(long)]
-    pub ephemeral: bool,
 
     /// Initial status (open, deferred, in_progress, closed)
     #[arg(long, short = 's', add = ArgValueCompleter::new(status_completer))]
@@ -1048,48 +1011,25 @@ pub struct UpdateArgs {
     #[arg(long = "type", short = 't', add = ArgValueCompleter::new(issue_type_completer))]
     pub type_: Option<String>,
 
-    /// Assign to user (empty string clears)
-    #[arg(long, add = ArgValueCompleter::new(assignee_completer))]
-    pub assignee: Option<String>,
-
     /// Set owner (empty string clears)
     #[arg(long, add = ArgValueCompleter::new(owner_completer))]
     pub owner: Option<String>,
 
-    /// Atomic claim (assignee=actor + `status=in_progress`)
-    #[arg(long)]
-    pub claim: bool,
-
     /// Compare-and-set guard: apply the update only while the issue still has
     /// this status, and fail without writing otherwise. Evaluated inside the
     /// write transaction, so two agents racing the same guarded transition
-    /// produce exactly one winner. Composable with `--if-assignee` and
-    /// `--claim`. Exit code 4 / `PRECONDITION_FAILED` when the guard does not
-    /// hold — distinct from `ISSUE_NOT_FOUND`
+    /// produce exactly one winner. Exit code 4 / `PRECONDITION_FAILED` when
+    /// the guard does not hold — distinct from `ISSUE_NOT_FOUND`
     #[arg(long = "if-status", add = ArgValueCompleter::new(status_completer))]
     pub if_status: Option<String>,
-
-    /// Compare-and-set guard on the assignee. Pass an empty string to require
-    /// that the issue is still unassigned, mirroring `--assignee ""`. See
-    /// `--if-status`
-    #[arg(long = "if-assignee", add = ArgValueCompleter::new(assignee_completer))]
-    pub if_assignee: Option<String>,
 
     /// Force update even if issue is blocked
     #[arg(long)]
     pub force: bool,
 
-    /// Set due date (empty string clears)
-    #[arg(long)]
-    pub due: Option<String>,
-
     /// Set defer until date (empty string clears)
     #[arg(long)]
     pub defer: Option<String>,
-
-    /// Set time estimate
-    #[arg(long)]
-    pub estimate: Option<i32>,
 
     /// Add label(s)
     #[arg(long, add = ArgValueCompleter::new(label_completer))]
@@ -1114,26 +1054,6 @@ pub struct UpdateArgs {
     /// Override `source_repo` (display name; usually the repo's basename, e.g. `widget_engine`)
     #[arg(long = "source-repo")]
     pub source_repo: Option<String>,
-
-    /// Override `source_repo_path` (absolute path to the directory containing
-    /// the `.beads` folder; populates the canonical filesystem location of the
-    /// repo for cross-machine sync awareness — see #289)
-    #[arg(long = "source-repo-path")]
-    pub source_repo_path: Option<String>,
-
-    /// Set the `agent_context` governing-instructions JSON (beads#297).
-    /// Accepts inline JSON or a `@path` to a JSON or YAML file (extension
-    /// determines parser; YAML is normalized to JSON before storage).
-    /// Pass `--agent-context ""` (empty string) to clear the field back
-    /// to NULL. Emitted on descendant `br show` / `br update --status
-    /// in_progress` / `--claim` when `inherited_context.enabled` is set
-    /// in `.beads/config.yaml`.
-    #[arg(long = "agent-context")]
-    pub agent_context: Option<String>,
-
-    /// Set `closed_by_session` when closing
-    #[arg(long)]
-    pub session: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1292,9 +1212,8 @@ pub fn resolve_output_format_basic_with_outer_mode(
 /// three; these are their complements, so "everything except the noise" is one
 /// query instead of `list` piped through `grep`, which loses the JSON contract.
 ///
-/// `--no-assignee` is deliberately absent. `--unassigned` already is that
-/// filter on every one of these commands, and shipping a second spelling of it
-/// would be a synonym to keep working forever.
+/// `--no-assignee` is deliberately absent: `assignee` and its whole query
+/// surface, including `--unassigned`, were removed from `Issue` (bds-b4f.2.6).
 #[derive(Args, Debug, Default, Clone)]
 pub struct ExclusionArgs {
     /// Exclude issues carrying this label (can repeat). Repeating means "none of
@@ -1332,13 +1251,13 @@ pub struct ExclusionArgs {
 ///
 /// A backwards offset has to be written `--updated-after=-7d`, attached with
 /// `=`: given a space, the shell hands clap `-7d` and clap reads it as flags. The
-/// same applies to `--sort=-updated` and `--due=-7d`, and these flags follow that
+/// same applies to `--sort=-updated` and `--defer=-7d`, and these flags follow that
 /// existing convention rather than setting `allow_hyphen_values` — which would
 /// make `--updated-after --json` silently consume `--json` as the value.
 ///
-/// `closed_at`, `due_at` and `defer_until` are nullable, and a row whose column
-/// is NULL never matches a bound on it: "closed before Friday" does not include
-/// issues that are still open.
+/// `closed_at` and `defer_until` are nullable, and a row whose column is NULL
+/// never matches a bound on it: "closed before Friday" does not include issues
+/// that are still open.
 #[derive(Args, Debug, Default, Clone)]
 pub struct DateRangeArgs {
     /// Only issues created at or after this point
@@ -1366,15 +1285,6 @@ pub struct DateRangeArgs {
     #[arg(long, value_name = "WHEN")]
     pub closed_before: Option<String>,
 
-    /// Only issues due at or after this point (excludes issues with no due date)
-    #[arg(long, value_name = "WHEN")]
-    pub due_after: Option<String>,
-
-    /// Only issues due at or before this point (excludes issues with no due
-    /// date)
-    #[arg(long, value_name = "WHEN")]
-    pub due_before: Option<String>,
-
     /// Only issues deferred until at or after this point (excludes issues with
     /// no defer date)
     #[arg(long, value_name = "WHEN")]
@@ -1397,14 +1307,6 @@ pub struct ListArgs {
     /// Filter by issue type (can be repeated)
     #[arg(long = "type", short = 't', add = ArgValueCompleter::new(issue_type_completer))]
     pub type_: Vec<String>,
-
-    /// Filter by assignee
-    #[arg(long, add = ArgValueCompleter::new(assignee_completer))]
-    pub assignee: Option<String>,
-
-    /// Filter for unassigned issues only
-    #[arg(long)]
-    pub unassigned: bool,
 
     /// Filter by specific IDs (can be repeated)
     #[arg(long, add = ArgValueCompleter::new(issue_id_completer))]
@@ -1454,7 +1356,7 @@ pub struct ListArgs {
     #[arg(long)]
     pub offset: Option<usize>,
 
-    /// Sort keys, comma-separated: `priority`, `status`, `type`, `assignee`,
+    /// Sort keys, comma-separated: `priority`, `status`, `type`,
     /// `created_at`, `updated_at`, `title`. Prefix a key with `-` for
     /// descending or `+` for ascending; a bare key uses its natural direction
     /// (timestamps newest first, everything else ascending). Example:
@@ -1471,10 +1373,6 @@ pub struct ListArgs {
     /// Include deferred issues
     #[arg(long)]
     pub deferred: bool,
-
-    /// Filter for overdue issues
-    #[arg(long)]
-    pub overdue: bool,
 
     #[command(flatten)]
     pub dates: DateRangeArgs,
@@ -1501,10 +1399,10 @@ pub struct ListArgs {
     /// CSV fields to include (comma-separated)
     ///
     /// Available: id, title, description, status, priority, `issue_type`,
-    /// assignee, owner, `created_at`, `updated_at`, `closed_at`, `due_at`,
+    /// owner, `created_at`, `updated_at`, `closed_at`,
     /// `defer_until`, notes, `external_ref`
     ///
-    /// Default: id, title, status, priority, `issue_type`, assignee, `created_at`, `updated_at`
+    /// Default: id, title, status, priority, `issue_type`, `created_at`, `updated_at`
     #[arg(long, value_name = "FIELDS", add = ArgValueCompleter::new(csv_fields_completer))]
     pub fields: Option<String>,
 }
@@ -1814,20 +1712,6 @@ pub struct ReadyArgs {
     #[arg(long, default_value_t = 0)]
     pub limit: usize,
 
-    /// Filter by assignee (no value = current actor)
-    #[arg(
-        long,
-        num_args = 0..=1,
-        default_missing_value = "",
-        conflicts_with = "unassigned",
-        add = ArgValueCompleter::new(assignee_completer)
-    )]
-    pub assignee: Option<String>,
-
-    /// Show only unassigned issues
-    #[arg(long, conflicts_with = "assignee")]
-    pub unassigned: bool,
-
     /// Filter by label (AND logic, can be repeated)
     #[arg(long, short = 'l', add = ArgValueCompleter::new(label_completer))]
     pub label: Vec<String>,
@@ -1954,10 +1838,6 @@ pub struct CloseArgs {
     /// After closing, return newly unblocked issues (single ID only)
     #[arg(long)]
     pub suggest_next: bool,
-
-    /// Session ID for tracking
-    #[arg(long)]
-    pub session: Option<String>,
 }
 
 /// Arguments for the reopen command.
@@ -2164,10 +2044,6 @@ pub struct StatsArgs {
     /// Show breakdown by priority
     #[arg(long)]
     pub by_priority: bool,
-
-    /// Show breakdown by assignee
-    #[arg(long)]
-    pub by_assignee: bool,
 
     /// Show breakdown by label
     #[arg(long)]
@@ -2450,26 +2326,6 @@ mod tests {
             return;
         };
         assert_eq!(args.limit, Some(0));
-    }
-
-    #[test]
-    fn test_ready_assignee_flag_accepts_missing_value() {
-        let cli = Cli::parse_from(["br", "ready", "--assignee"]);
-        assert!(
-            matches!(&cli.command, Commands::Ready(_)),
-            "expected ready command"
-        );
-        let Commands::Ready(args) = cli.command else {
-            return;
-        };
-        assert_eq!(args.assignee.as_deref(), Some(""));
-    }
-
-    #[test]
-    fn test_ready_assignee_conflicts_with_unassigned() {
-        let err = Cli::try_parse_from(["br", "ready", "--assignee", "alice", "--unassigned"])
-            .expect_err("ready filters should conflict");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

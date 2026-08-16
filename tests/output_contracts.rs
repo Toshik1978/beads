@@ -567,18 +567,18 @@ pub(crate) fn normalize_json(json: &Value) -> Value {
                         Value::String("ISSUE_ID".to_string())
                     }
                     "root" => Value::String("ISSUE_ID".to_string()),
-                    "created_at" | "updated_at" | "closed_at" | "due_at" | "defer_until"
-                    | "deleted_at" | "marked_at" | "exported_at" => {
-                        Value::String("TIMESTAMP".to_string())
-                    }
+                    "created_at" | "updated_at" | "closed_at" | "defer_until" | "deleted_at"
+                    | "marked_at" | "exported_at" => Value::String("TIMESTAMP".to_string()),
                     "content_hash" => Value::String("HASH".to_string()),
-                    // Normalize source_repo/source_repo_path: br resolves "." to the absolute
+                    // Normalize source_repo: br resolves "." to the absolute
                     // path of the workspace; under tempdir-based tests this is
                     // a randomly-named ".tmpXXXXXX" path, so the snapshot must
                     // collapse it back to a stable token. (Issue surfaced by
                     // beads-l6xl audit; PC-RECOVERY-adjacent: not a
                     // safety problem, just a snapshot determinism gap.)
-                    "source_repo" | "source_repo_path" => {
+                    // `source_repo_path` (bds-b4f.2.4) no longer exists as a
+                    // field, so it can no longer appear as a key here.
+                    "source_repo" => {
                         if let Value::String(_) = value {
                             Value::String("SOURCE_REPO".to_string())
                         } else {
@@ -586,8 +586,7 @@ pub(crate) fn normalize_json(json: &Value) -> Value {
                         }
                     }
                     // Normalize actor/user fields that vary by system
-                    "created_by" | "assignee" | "owner" | "author" | "deleted_by"
-                    | "closed_by_session" | "actor" => {
+                    "created_by" | "owner" | "author" | "deleted_by" | "actor" => {
                         // Only normalize if the value is a non-empty string
                         if let Value::String(s) = value {
                             if s.is_empty() {

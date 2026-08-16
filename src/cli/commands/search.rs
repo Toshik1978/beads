@@ -16,7 +16,6 @@ use crate::model::sort::SortSpec;
 use crate::model::{Issue, IssueType, Priority, Status};
 use crate::output::{IssueTable, IssueTableColumns, JsonArrayPageMeta, OutputContext, OutputMode};
 use crate::storage::{ListFilters, SqliteStorage};
-use chrono::Utc;
 use regex::{Regex, RegexBuilder};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
@@ -266,7 +265,6 @@ fn render_search_results(
             status: true,
             issue_type: true,
             title: true,
-            assignee: true,
             context: show_context,
             ..Default::default()
         };
@@ -506,8 +504,6 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
         statuses,
         types,
         priorities,
-        assignee: args.assignee.clone(),
-        unassigned: args.unassigned,
         include_closed,
         include_deferred,
         include_templates: false,
@@ -548,7 +544,6 @@ fn needs_client_filters(args: &ListArgs) -> bool {
         || args.desc_contains.is_some()
         || args.notes_contains.is_some()
         || args.deferred
-        || args.overdue
 }
 
 fn requires_post_query_ordering(_args: &ListArgs, client_filters: bool) -> bool {
@@ -566,7 +561,6 @@ fn apply_client_filters(
     };
 
     let mut filtered = Vec::new();
-    let now = Utc::now();
     let min_priority = args.priority_min.map(i32::from);
     let max_priority = args.priority_max.map(i32::from);
 
@@ -584,11 +578,10 @@ fn apply_client_filters(
             .ok()
     });
 
-    // Deferred issues are included by default when no status filter is specified,
-    // except `--overdue` keeps deferred work hidden unless requested.
+    // Deferred issues are included by default when no status filter is specified.
     let include_deferred = args.deferred
         || args.all
-        || (!args.overdue && args.status.is_empty())
+        || args.status.is_empty()
         || args
             .status
             .iter()
@@ -643,13 +636,6 @@ fn apply_client_filters(
 
         if !include_deferred && matches!(issue.status, Status::Deferred) {
             continue;
-        }
-
-        if args.overdue {
-            let overdue = issue.due_at.is_some_and(|due| due < now) && !issue.status.is_terminal();
-            if !overdue {
-                continue;
-            }
         }
 
         filtered.push(issue);
@@ -722,35 +708,20 @@ mod tests {
             status: Status::Open,
             priority: Priority::MEDIUM,
             issue_type: IssueType::Task,
-            assignee: None,
             owner: None,
-            estimated_minutes: None,
             created_at,
             created_by: None,
             updated_at: created_at,
             closed_at: None,
             close_reason: None,
-            closed_by_session: None,
-            due_at: None,
             defer_until: None,
             external_ref: None,
-            source_system: None,
             source_repo: None,
-            source_repo_path: None,
-            agent_context: None,
             deleted_at: None,
             deleted_by: None,
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -1029,69 +1000,6 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "bd-old");
-    }
-
-    #[test]
-    fn test_search_overdue_excludes_deferred_unless_requested() {
-        let mut storage = SqliteStorage::open_memory().expect("db");
-        let created_at = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-        let overdue_at = Utc::now() - chrono::Duration::days(1);
-
-        let mut open_overdue = make_issue("bd-open", "match open overdue", None, created_at);
-        open_overdue.due_at = Some(overdue_at);
-
-        let mut deferred_overdue =
-            make_issue("bd-deferred", "match deferred overdue", None, created_at);
-        deferred_overdue.status = Status::Deferred;
-        deferred_overdue.due_at = Some(overdue_at);
-
-        for issue in [open_overdue, deferred_overdue] {
-            storage.create_issue(&issue, "tester").expect("create");
-        }
-
-        let overdue_only = collect_search_results(
-            &storage,
-            "match",
-            &ListArgs {
-                overdue: true,
-                ..Default::default()
-            },
-        )
-        .expect("search overdue");
-        let overdue_only_ids: Vec<_> = overdue_only.iter().map(|issue| issue.id.as_str()).collect();
-        assert_eq!(overdue_only_ids, vec!["bd-open"]);
-
-        let overdue_with_deferred = collect_search_results(
-            &storage,
-            "match",
-            &ListArgs {
-                overdue: true,
-                deferred: true,
-                ..Default::default()
-            },
-        )
-        .expect("search overdue with deferred");
-        let overdue_with_deferred_ids: Vec<_> = overdue_with_deferred
-            .iter()
-            .map(|issue| issue.id.as_str())
-            .collect();
-        assert_eq!(overdue_with_deferred_ids, vec!["bd-deferred", "bd-open"]);
-
-        let overdue_with_all = collect_search_results(
-            &storage,
-            "match",
-            &ListArgs {
-                overdue: true,
-                all: true,
-                ..Default::default()
-            },
-        )
-        .expect("search overdue with all");
-        let overdue_with_all_ids: Vec<_> = overdue_with_all
-            .iter()
-            .map(|issue| issue.id.as_str())
-            .collect();
-        assert_eq!(overdue_with_all_ids, vec!["bd-deferred", "bd-open"]);
     }
 
     #[test]

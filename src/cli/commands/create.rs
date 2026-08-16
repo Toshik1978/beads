@@ -392,7 +392,6 @@ pub fn create_issue_impl(
         config.default_issue_type.clone()
     };
 
-    let due_at = parse_optional_date(args.due.as_deref())?;
     let defer_until = parse_optional_date(args.defer.as_deref())?;
     let id_resolver = IdResolver::new(ResolverConfig::with_prefix(config.id_config.prefix.clone()));
     let resolved_parent = args
@@ -447,13 +446,9 @@ pub fn create_issue_impl(
             issue_type: issue_type.clone(),
             created_at: now,
             updated_at: now,
-            assignee: args.assignee.clone(),
             owner: args.owner.clone(),
-            estimated_minutes: args.estimate,
-            due_at,
             defer_until,
             external_ref: args.external_ref.clone(),
-            ephemeral: args.ephemeral,
             // Settable at creation (bds-yo8): both fields already existed on
             // `Issue` and were reachable only through a follow-up `br update`,
             // which made a fully-populated issue cost two commands and two
@@ -466,15 +461,7 @@ pub fn create_issue_impl(
             created_by: Some(config.actor.clone()),
             closed_at,
             close_reason: None,
-            closed_by_session: None,
-            source_system: None,
             source_repo: config.source_repo.clone(),
-            // Deliberately never derived from the workspace (bds-31i): the
-            // absolute path named the author's machine in a committed file and
-            // nothing consumed it. `br update --source-repo-path` still sets it
-            // for anyone who wants beads#289's cross-clone disambiguation.
-            source_repo_path: None,
-            agent_context: None,
             deleted_at,
             deleted_by: if deleted_at.is_some() {
                 Some(config.actor.clone())
@@ -484,13 +471,6 @@ pub fn create_issue_impl(
             delete_reason: None,
             original_type: None,
             former_ids: vec![],
-            compaction_level: None,
-            compacted_at: None,
-            compacted_at_commit: None,
-            original_size: None,
-            sender: None,
-            pinned: false,
-            is_template: false,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
@@ -788,7 +768,6 @@ fn execute_import(
     let import_source_repo = canonical_source_repo(&storage_ctx.paths.beads_dir);
     let now = Utc::now();
     let _json_mode = cli.json.unwrap_or(false);
-    let due_at = parse_optional_date(args.due.as_deref())?;
     let defer_until = parse_optional_date(args.defer.as_deref())?;
 
     // Parse status (default to Open if not provided)
@@ -860,15 +839,16 @@ fn execute_import(
         let description = parsed.description.clone();
         let priority_override = parsed.priority.clone();
         let issue_type_override = parsed.issue_type.clone();
-        let assignee = parsed.assignee.or_else(|| args.assignee.clone());
         let design = parsed.design.clone();
-        // A per-item `## Acceptance` block wins; the CLI flag is the fallback,
-        // the same precedence `assignee` above already uses.
+        // A per-item `## Acceptance` block wins; the CLI flag is the fallback.
         let acceptance_criteria = parsed
             .acceptance_criteria
             .clone()
             .or_else(|| args.acceptance_criteria.clone());
-        let agent_context = parsed.agent_context.clone();
+        // Same precedence: a per-item `### Notes` block (or its legacy
+        // `Agent Context` aliases, see `ParsedIssue::notes`) wins over the
+        // CLI flag.
+        let notes = parsed.notes.clone().or_else(|| args.notes.clone());
 
         // Resolve parent (item-specific header or CLI global fallback)
         let parent_candidate = parsed.parent.as_deref().or(args.parent.as_deref());
@@ -962,30 +942,19 @@ fn execute_import(
                 issue_type,
                 created_at: now,
                 updated_at: now,
-                assignee: assignee.clone(),
                 owner: args.owner.clone(),
-                estimated_minutes: args.estimate,
-                due_at,
                 defer_until,
                 external_ref: args.external_ref.clone(),
-                ephemeral: args.ephemeral,
                 design: design.clone(),
                 acceptance_criteria: acceptance_criteria.clone(),
                 content_hash: None,
-                // The markdown import format has no notes block, so the CLI flag
-                // is the only source here.
-                notes: args.notes.clone(),
+                notes: notes.clone(),
                 // Keep import hashes actor-independent so identical markdown imports
                 // still deduplicate across sync boundaries.
                 created_by: None,
                 closed_at: import_closed_at,
                 close_reason: None,
-                closed_by_session: None,
-                source_system: None,
                 source_repo: import_source_repo.clone(),
-                // Never derived — see the note in `create_issue_impl` (bds-31i).
-                source_repo_path: None,
-                agent_context: agent_context.clone(),
                 deleted_at: import_deleted_at,
                 deleted_by: if import_deleted_at.is_some() {
                     Some(actor.clone())
@@ -995,13 +964,6 @@ fn execute_import(
                 delete_reason: None,
                 original_type: None,
                 former_ids: vec![],
-                compaction_level: None,
-                compacted_at: None,
-                compacted_at_commit: None,
-                original_size: None,
-                sender: None,
-                pinned: false,
-                is_template: false,
                 labels: vec![],
                 dependencies: vec![],
                 comments: vec![],
@@ -1585,17 +1547,13 @@ mod tests {
             priority: None,
             description: None,
             description_file: None,
-            assignee: None,
             owner: None,
             labels: vec![],
             parent: None,
             deps: vec![],
-            estimate: None,
-            due: None,
             defer: None,
             external_ref: None,
             status: None,
-            ephemeral: false,
             dry_run: false,
             silent: false,
             file: None,

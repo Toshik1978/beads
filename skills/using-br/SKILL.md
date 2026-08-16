@@ -61,10 +61,10 @@ br show bd-abc123 --json | jq '.status'
 
 ```bash
 # Find unblocked work
-br ready --json --unassigned
+br ready --json
 
-# Claim atomically (sets assignee=actor and status=in_progress in one step)
-br update bd-abc123 --claim --json
+# Claim it: claiming is assigning, so moving it to in_progress is the claim
+br update bd-abc123 --status in_progress --json
 
 # ... do the work ...
 
@@ -123,5 +123,3 @@ All 27 top-level commands. Flags, subcommands, and exit codes are in
   ready status group" in `CLI_REFERENCE.md`.
 - `search` and `blocked` default to a capped result count (50); `list` and
   `ready` are unlimited by default. Pass `--limit N` either direction.
-- Prefer `br update <id> --claim` over hand-setting `--assignee` and
-  `--status in_progress` separately: it is one atomic transaction.

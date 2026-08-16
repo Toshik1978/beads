@@ -2125,7 +2125,8 @@ fn e2e_actor_oriented_command_families_preserve_workspace_integrity() {
                     "alice".to_string(),
                     "update".to_string(),
                     claim_id.clone(),
-                    "--claim".to_string(),
+                    "--status".to_string(),
+                    "in_progress".to_string(),
                     "--json".to_string(),
                 ];
                 results.push(run_br_in_dir(&root, args));
@@ -2263,7 +2264,6 @@ fn e2e_actor_oriented_command_families_preserve_workspace_integrity() {
     let claim_json: Vec<serde_json::Value> =
         serde_json::from_str(&extract_json_payload(&claim_show.stdout)).expect("claim show json");
     assert_eq!(claim_json[0]["status"].as_str(), Some("in_progress"));
-    assert_eq!(claim_json[0]["assignee"].as_str(), Some("alice"));
 
     let comments = run_br_in_dir(
         &root,
