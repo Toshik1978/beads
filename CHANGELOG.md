@@ -9,6 +9,154 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.7.0 — 2026-08-16
+
+`br` gains a second surface: **`br remote`**, which mirrors a workspace into a
+YouTrack project. It is the only command in the CLI that opens a socket —
+nothing else does — and the mirror moves only when one of its five verbs is
+actually run, never as a side effect of `list`, `create`, or `sync`. Without a
+`.beads/remote.yaml` there is no network and no behaviour change at all, so
+every existing workspace is unaffected by this release.
+
+The design is stateless full reconciliation. There is no watermark, no
+sidecar, and no local sync state to corrupt or resynchronise: every run
+fetches both sides and re-derives the whole plan from nothing. Pairing
+identity is single-sided and lives in the bead's own `external_ref`, so the
+mirror's memory rides in `issues.jsonl` and survives `git clean -fdx`, a fresh
+clone, or a deleted database. Beads stays authoritative for every field except
+the three a human actually edits in a web UI — **`State`, `Priority` and
+comments** — and those two fields resolve by timestamp, with a tie going to
+beads.
+
+The subsystem was built and then validated end to end against a live YouTrack
+instance, which is where six of its assumptions turned out to be wrong and got
+corrected; the fixes below are mostly that.
+
+### Highlights
+
+- **`br remote init` provisions the project, then does nothing.** It
+  reconciles the project's schema against `remote.yaml` — five custom fields,
+  plus every `Type`/`State`/`Priority` value the maps name — and a project
+  that already matches issues **zero write requests**, so re-running it is
+  free. Two of its effects are visible to people who never run `br`, and it
+  names each one before it acts: custom field prototypes are instance-wide
+  (YouTrack has no per-project field namespace to use instead), and the
+  project's adoption defaults are rewritten. Stock YouTrack adopts a new issue
+  as `Bug` / `Submitted` / `Normal`, which reads back as *a deferred bug at
+  P3* — wrong on all three axes, for every issue a human types into the web
+  UI. `--keep-project-defaults` leaves them alone.
+- **Bundles are never written blind.** Before adding a value to a `Type` or
+  `State` bundle, `init` scans which projects use it. A provably private
+  bundle is filled in place; a shared bundle on an empty project is copied,
+  the project's field re-pointed at the copy, and the copy filled; a shared
+  bundle on a project that already holds issues is refused, with both ways
+  forward named. A scan the token cannot complete refuses as well, rather than
+  assuming privacy — the branch that assumes privacy is the branch that writes
+  into another team's vocabulary. `--allow-shared-bundle` opts into that write
+  and says out loud, before making it, which projects will see the new values.
+- **`status` writes nothing, and a consumer can assert that.** It fetches both
+  sides and prints the plan — creates, field changes with the winning
+  direction marked, link changes, comments pending each way, adoption
+  candidates, refusals, dangling refs, unmapped values, tombstoned pairs and
+  unmirrored relations — printing each section only when it has content.
+  `--json` emits `{"project", "plan", "reads", "writes"}`, where `writes` is
+  always `0`.
+- **A first `push` refuses without `--confirm-initial`.** A run where no bead
+  is paired yet would create an issue for every unpaired bead, and since
+  nothing here deletes a remote issue, aiming that at the wrong project means
+  cleaning up by hand. The asymmetry is documented rather than papered over:
+  `pull` carries no such gate, and adopting even one issue writes a pairing
+  that satisfies the gate for the *next* push — so `url` and `project` deserve
+  the same check before a first pull as before a first push.
+- **A first run is resumable, and cannot double-create.** Creates land in
+  batches with progress reported; the plan is then recomputed once the new
+  pairings exist, so the same run goes on to mirror their links, comments and
+  labels. An issue whose create succeeded but whose response was lost is
+  recognised on the next run by the `Beads ID` it already carries and simply
+  paired — never created a second time, never adopted as a stranger.
+- **Nothing is ever deleted on the remote.** No code path in this codebase
+  issues an HTTP `DELETE` against an issue — the client has no general delete,
+  only one narrowly typed to link removal — and an end-to-end test drives a
+  local delete and asserts the run made no `DELETE` request at all. A local
+  `br delete` moves the mirrored issue to `deleted_state` and comments saying
+  so; a tombstone left behind by `br rename` is forwarded to the new id
+  instead, so a rename never reads as a deletion.
+- **Adoption is whole, once, and refuses rather than guesses.** An issue
+  created in the web UI that no bead claims is imported entire on the next
+  `pull` or `sync` — the one direction where a remote record outranks the
+  local one — and is an ordinary mirrored bead from then on. Adoptees are
+  minted in parentage order, so a child adopted alongside its parent is
+  created as a proper child rather than flat and reparented afterwards. A
+  `Type`, `State` or `Priority` no map covers is refused and named
+  individually, together with the config key that would cover it; refusing one
+  adoptee does not stop the run.
+- **Comments cross both ways with stateless echo suppression.** Outbound
+  comments carry a `[br]` marker and inbound ones are filtered by author, so
+  neither side re-imports its own writing — with nothing recorded between runs
+  to keep in step.
+- **The token has exactly one source.** `BR_YOUTRACK_TOKEN`, and nowhere else:
+  no file `br` writes — not config, not logs, not `--dry-run` output — can
+  carry it. Its `Debug` is redacted, and a test asserts that no error variant
+  can leak it.
+
+### What it deliberately does not do
+
+- **A link drawn by hand between two already-paired issues is deleted on the
+  next push.** Links are local-wins like every other field except the three
+  named above. That is the contract working, not a bug — but it is the one
+  local-wins consequence most likely to surprise, so it is stated here.
+- **Editing an already-mirrored comment appends a duplicate instead of
+  updating it.** Comments are matched by exact body text, there being no
+  shared identity for either side to key on; an edited body no longer matches
+  the original it was being suppressed against. For the same reason, a second
+  local comment identical to one already pushed is never pushed, being
+  indistinguishable from an echo. Both are tracked as follow-up work rather
+  than fixed here.
+- **Only three dependency types mirror.** Hierarchy becomes a `Subtask` link,
+  `blocks` a `Depend` link, and `related`/`relates-to` a `Relates` link.
+  Everything else — `waits-for`, `duplicates`, `conditional-blocks`,
+  `discovered-from`, `replies-to`, `supersedes`, `caused-by` and any custom
+  type — has no YouTrack equivalent, and collapsing one onto `Depend` would be
+  lossy in a way nothing could undo. They are listed under "unmirrored
+  relations" so a `br dep list` row with no matching link change is explained
+  rather than silently dropped.
+- **Creation timestamps do not survive either crossing.** A mirrored issue
+  reads as created today by the token's owner, because `created` and
+  `reporter` are read-only on YouTrack's issue entity; an adopted issue reads
+  locally as created at adoption time, for the same reason on the beads side.
+- **YouTrack is the only backend.** The CLI surface and everything above the
+  wire are backend-neutral, but nothing else is implemented.
+
+### Features
+
+- [dbe9df9](https://github.com/Toshik1978/beads/commit/dbe9df9687140d3aa3f40f8bb912458d0d7aacb4) feat(remote): add the remote client, config, and credentials
+- [f9b22a8](https://github.com/Toshik1978/beads/commit/f9b22a893faf538b508f7504e982b36b0bf8a818) feat(remote): map beads issues, links, and labels to YouTrack
+- [0a58376](https://github.com/Toshik1978/beads/commit/0a58376652e20c2f4be0677d4268cae50a392e4a) feat(remote): add br remote init and its YouTrack provisioning
+- [65155f2](https://github.com/Toshik1978/beads/commit/65155f267eca2c09b791d86e1e1f848470917805) feat(remote): reconcile a workspace against the mirror, statelessly
+- [218f2f6](https://github.com/Toshik1978/beads/commit/218f2f64515447abea2d52d11864eb0906c2411f) feat(remote): sync comments with symmetric echo suppression
+- [2d50ce7](https://github.com/Toshik1978/beads/commit/2d50ce745683ba3f8908b5fc3ee075b390303e73) feat(remote): forward renamed tombstones and mark genuine deletions
+- [f34a181](https://github.com/Toshik1978/beads/commit/f34a1811c491a5dd799b079feb1426799b8f2aac) feat(remote): adopt web-UI issues into the workspace, once
+- [65a7745](https://github.com/Toshik1978/beads/commit/65a7745cf287fbeb01b0ae0ee028491b027e402b) feat(remote): add push, pull and sync with a resumable first run
+
+### Bug Fixes
+
+- [06f6dda](https://github.com/Toshik1978/beads/commit/06f6dda1af36fc3c4bd4db5a81ef62938b034901) fix(remote): validate priority_map totality and correct sync --help
+- [bcf5ff1](https://github.com/Toshik1978/beads/commit/bcf5ff1db3b8249ce329a5a98d528183e3abe86f) fix(remote): correct init's dry-run and adopted-clone disclosures
+- [7604d19](https://github.com/Toshik1978/beads/commit/7604d1936d37a913af26c4275159c866591ba573) fix(remote): account for comment pulls a bare push leaves unexplained
+- [29ba56c](https://github.com/Toshik1978/beads/commit/29ba56c91970c8535d75cf5f7e5160c25e4aeda1) fix(remote): make init's out-of-range priority pre-flight reachable
+- [d36178b](https://github.com/Toshik1978/beads/commit/d36178b896ed3b54561de7b77b74332b69f0777c) fix(test-support): time out a stalled mock-server read/write
+- [ff8cf58](https://github.com/Toshik1978/beads/commit/ff8cf58b15f87e5fab5915f18b4ce72e89dbf61e) fix(remote): paginate every YouTrack read that could be truncated
+- [edea7eb](https://github.com/Toshik1978/beads/commit/edea7ebf29f8daf4a5295265176694307a8970dc) fix(remote): page the link-type read, pin the field-summary paging, and stop double-printing the scan
+- [9842d5e](https://github.com/Toshik1978/beads/commit/9842d5e7d9191e1321907bb47545a256bff08fb9) fix(remote): name the bundle type inside a re-point body
+- [4fb7e9d](https://github.com/Toshik1978/beads/commit/4fb7e9d1b8f38c903e833421edb60eb369b0efeb) fix(remote): render each verb's own half of the plan
+
+### Documentation
+
+- [51933c7](https://github.com/Toshik1978/beads/commit/51933c75fac2ba434e70cc8cc008e510118ec064) docs: amend the br remote spec and plan it against a live YouTrack instance
+- [0741a68](https://github.com/Toshik1978/beads/commit/0741a68d2d5ee8e2018d61d438bcedee8dd94908) docs: document br remote, its verbs, and what init changes
+
+---
+
 ## v1.6.0 — 2026-08-16
 
 An audit of the heaviest consumer of this tool — a workspace with 885 issues,
