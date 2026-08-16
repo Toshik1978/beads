@@ -765,6 +765,12 @@ pub enum Commands {
     /// List ready issues (open, unblocked, not deferred)
     Ready(ReadyArgs),
 
+    /// Mirror this workspace into an external tracker
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommands,
+    },
+
     /// Reopen an issue
     Reopen(ReopenArgs),
 
@@ -1579,6 +1585,74 @@ pub struct DepCyclesArgs {
     /// Include archived cycles where every issue is closed or tombstoned
     #[arg(long)]
     pub include_closed: bool,
+}
+
+/// `br remote` — mirroring this workspace into an external tracker.
+///
+/// The whole surface is declared here in one place even though only `init`
+/// executes today: the four commands below land in `bds-4r2.4` and `.8`, and a
+/// CLI that grows a subcommand at a time reads as four unrelated additions in
+/// the history rather than one feature.
+#[derive(Subcommand, Debug)]
+pub enum RemoteCommands {
+    /// Provision the remote project so this workspace can mirror into it
+    Init(RemoteInitArgs),
+    /// Report what a push or pull would do, writing nothing
+    Status(RemoteStatusArgs),
+    /// Push local changes to the remote tracker
+    Push(RemotePushArgs),
+    /// Pull remote changes into this workspace
+    Pull(RemotePullArgs),
+    /// Push, then pull
+    Sync(RemoteSyncArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct RemoteInitArgs {
+    /// Add values to a bundle other projects also use, instead of refusing
+    ///
+    /// `init` proves sharedness from the instance's own field/bundle map. A
+    /// bundle with a second user is copied for this project when the project
+    /// is empty, and refused otherwise — this flag says to write to the
+    /// shared bundle anyway, which changes what the other projects see.
+    #[arg(long)]
+    pub allow_shared_bundle: bool,
+
+    /// Leave the project's Type/State/Priority defaults exactly as they are
+    ///
+    /// By default `init` sets them to the beads defaults (Task/Open/Major),
+    /// because stock YouTrack adopts a new issue as Bug/Submitted/Normal —
+    /// which reads back as a deferred bug at P3.
+    #[arg(long)]
+    pub keep_project_defaults: bool,
+
+    /// Report what would change without writing anything
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RemoteStatusArgs {}
+
+#[derive(Args, Debug)]
+pub struct RemotePushArgs {
+    /// Report what would change without writing anything
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RemotePullArgs {
+    /// Report what would change without writing anything
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RemoteSyncArgs {
+    /// Report what would change without writing anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Subcommand, Debug)]

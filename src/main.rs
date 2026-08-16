@@ -378,6 +378,9 @@ fn main() {
             || commands::stale::execute(&args, &overrides, &output_ctx),
             |res| commands::stale::execute_with_storage(&args, &output_ctx, &res.storage),
         ),
+        Commands::Remote { command } => {
+            commands::remote::execute(&command, cli.json, &overrides, &output_ctx)
+        }
         Commands::Ready(args) => {
             if let (Some(res), Some(beads_dir)) = (storage_result.as_ref(), ctx.beads_dir.as_ref())
             {
@@ -719,6 +722,10 @@ const fn needs_write_lock(cmd: &Commands) -> bool {
         | Commands::Epic { .. }
         | Commands::Info(_)
         | Commands::Init { .. } => true,
+        // `br remote` opens storage inside `commands::remote::execute` — to
+        // read the workspace vocabulary for `init`'s pre-flight, and to write
+        // pulled issues once `pull`/`sync` land. `status` only reports.
+        Commands::Remote { command } => !is_read_only_remote_command(command),
         Commands::Sync(args) => sync_mode_opens_storage(args),
         Commands::Config { command } => !matches!(
             command,
@@ -754,6 +761,16 @@ const fn should_auto_import(cmd: &Commands) -> bool {
         | Commands::Comments(_)
         | Commands::Dep { .. }
         | Commands::Label { .. }
+        // `br remote init`'s pre-flight scans the workspace's distinct
+        // `issue_type` and `status` values out of SQLite and refuses on any no
+        // map covers. That guarantee is only worth as much as the rows it
+        // reads: after a `git pull` brings in issues carrying a new type, a
+        // stale DB makes the pre-flight pass and `init` then provisions a
+        // project whose maps do not actually cover the workspace — defeating
+        // the one thing the pre-flight exists to do. `open_storage_with_cli`
+        // does not close this: it recovers a missing or corrupt DB, which is
+        // a different question from a DB that is intact and behind.
+        | Commands::Remote { .. }
         | Commands::Epic { .. } => true,
 
         Commands::Init { .. }
@@ -789,7 +806,21 @@ const fn supports_read_only_fast_open(cmd: &Commands) -> bool {
         } => true,
         Commands::Dep { command } => is_read_only_dep_command(command),
         Commands::Label { command } => is_read_only_label_listing(command),
+        Commands::Remote { command } => is_read_only_remote_command(command),
         _ => false,
+    }
+}
+
+/// `br remote status` reports and writes nothing, locally or remotely. The
+/// other four all write: `init` provisions the remote schema, and `push`,
+/// `pull` and `sync` move issues in one or both directions.
+const fn is_read_only_remote_command(command: &beads::cli::RemoteCommands) -> bool {
+    match command {
+        beads::cli::RemoteCommands::Status(_) => true,
+        beads::cli::RemoteCommands::Init(_)
+        | beads::cli::RemoteCommands::Push(_)
+        | beads::cli::RemoteCommands::Pull(_)
+        | beads::cli::RemoteCommands::Sync(_) => false,
     }
 }
 

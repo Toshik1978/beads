@@ -26,6 +26,7 @@ pub mod init;
 pub mod label;
 pub mod list;
 pub mod ready;
+pub mod remote;
 pub mod rename;
 pub mod reopen;
 pub mod search;

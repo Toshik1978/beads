@@ -81,7 +81,7 @@ idempotent final check before committing.
 
 ## Command index
 
-All 27 top-level commands. Flags, subcommands, and exit codes are in
+All 28 top-level commands. Flags, subcommands, and exit codes are in
 `CLI_REFERENCE.md`, linked above.
 
 | Command | Purpose |
@@ -108,6 +108,7 @@ All 27 top-level commands. Flags, subcommands, and exit codes are in
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |
+| `remote` | Mirror this workspace into an external tracker (only `remote init` works today; `status`, `push`, `pull` and `sync` are declared but not implemented) |
 | `stats` | Show project statistics |
 | `info` | Show diagnostic metadata about the workspace |
 | `version` | Show version information |

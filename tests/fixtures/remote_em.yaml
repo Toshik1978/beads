@@ -1,5 +1,11 @@
+# The reference `.beads/remote.yaml` from the `br remote` design, kept as one
+# tracked copy so the unit tests and the e2e tests cannot drift apart.
+#
+# `url` points at a host that cannot resolve on purpose: nothing in this
+# repository's tests may reach a real instance, and every test that needs a
+# reachable endpoint rewrites this line to the loopback mock's base URL.
 backend: youtrack
-url: https://example.youtrack.cloud
+url: https://example.invalid
 project: EM
 status_map:
   open: Open
@@ -17,6 +23,11 @@ type_map:
   chore: Chore
   docs: Docs
   question: Question
-priority_map: { 0: Show-stopper, 1: Critical, 2: Major, 3: Normal, 4: Minor }
+priority_map:
+  0: Show-stopper
+  1: Critical
+  2: Major
+  3: Normal
+  4: Minor
 deleted_state: "Won't fix"
 page_size: 100

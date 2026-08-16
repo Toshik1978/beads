@@ -36,6 +36,7 @@ Comprehensive reference for all `br` commands.
 - [Sync & Config](#sync--config)
   - [sync](#sync)
   - [config](#config)
+  - [remote](#remote)
 - [Diagnostics & Info](#diagnostics--info)
   - [stats](#stats)
   - [info](#info)
@@ -1208,6 +1209,87 @@ br config set id.prefix myproj
 
 # Edit in editor
 br config edit
+```
+
+---
+
+### remote
+
+Mirror this workspace into an external tracker. The CLI surface is
+backend-neutral; the only backend today is YouTrack.
+
+```bash
+br remote <COMMAND>
+```
+
+Configuration lives in `.beads/remote.yaml` — the backend, the instance URL,
+the project short name, and total, injective maps from every beads
+`issue_type`, `status` and priority onto the remote's own vocabulary. The
+credential is read from the `BR_YOUTRACK_TOKEN` environment variable and from
+nowhere else, so no file `br` writes can carry it.
+
+| Subcommand | Description |
+|------------|-------------|
+| `init` | Provision the remote project so this workspace can mirror into it |
+| `status` | Report what a push or pull would do, writing nothing |
+| `push` | Push local changes to the remote tracker |
+| `pull` | Pull remote changes into this workspace |
+| `sync` | Push, then pull |
+
+Only `init` is implemented today; the other four are declared so the whole
+surface lands in one place.
+
+**`br remote init`**
+
+| Option | Description |
+|--------|-------------|
+| `--allow-shared-bundle` | Add values to a bundle other projects also use, instead of refusing |
+| `--keep-project-defaults` | Leave the project's Type/State/Priority defaults alone |
+| `--dry-run` | Report what would change without writing anything |
+
+`init` reconciles the remote project's schema against `remote.yaml`. Before it
+opens a socket it checks that every `issue_type` and `status` this workspace
+actually holds is named by a map, and fails naming both the value and the
+config key that would cover it — so a config gap costs one local read rather
+than dying several hundred writes into a first run.
+
+Two of its effects are visible to people who never run `br`, and both are
+deliberate:
+
+- **Custom field prototypes are instance-wide.** Creating `Design`,
+  `Acceptance Criteria`, `Notes`, `Close Reason` and `Beads ID` makes them
+  appear in every project's administration UI. There is no per-project field
+  namespace to use instead. `init` names each one before it creates it.
+- **The project's `Type`/`State`/`Priority` defaults are rewritten** to the
+  beads defaults (`task` / `open` / P2, through the configured maps). Stock
+  YouTrack adopts a new issue as `Bug` / `Submitted` / `Normal`, which reads
+  back as a deferred bug at P3 — wrong on all three axes. `init` prints each
+  change as `old → new` and skips any that already matches;
+  `--keep-project-defaults` turns the whole step off.
+
+Values are added to a bundle only when that bundle is *provably* private —
+one request returns every `(field, project)` pair using every bundle, and a
+bundle whose only user is this project's field is safe. A shared bundle on an
+empty project is copied, the project's field re-pointed at the copy, and the
+copy filled; a shared bundle on a project that already holds issues is refused
+with both ways forward named. A sharedness scan the token cannot complete
+refuses too, rather than assuming privacy.
+
+A project that already matches the maps issues **zero write requests**, so
+`init` is safe to re-run.
+
+**Examples:**
+```bash
+export BR_YOUTRACK_TOKEN=perm-…
+
+# See what would change, writing nothing
+br remote init --dry-run
+
+# Provision for real
+br remote init
+
+# Leave the web UI's adoption defaults as they are
+br remote init --keep-project-defaults
 ```
 
 ---
