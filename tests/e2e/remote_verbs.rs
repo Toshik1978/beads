@@ -254,3 +254,47 @@ fn e2e_a_web_ui_comment_arrives_authored_by_the_integration_user() {
     );
     assert!(second.stdout.contains("nothing to do"), "{}", second.stdout);
 }
+
+/// A bare `push` never applies a comment the remote won, exactly like a field
+/// it does not apply. `ReconcilePlan::render` marks that comment line
+/// `[YouTrack wins]` the same way it marks a field pull, but until now only
+/// the field-pull count was ever explained afterward — a plan with a comment
+/// pull and zero field pulls printed an unexplained `[YouTrack wins]` line.
+#[test]
+fn e2e_a_bare_push_names_the_comment_it_left_for_pull() {
+    let _log = common::test_log("e2e_a_bare_push_names_the_comment_it_left_for_pull");
+    let server = MockServer::start();
+    let (workspace, _bead) = paired_workspace("Mirrored");
+
+    server.on("GET", LINK_TYPES_PATH, 200, LINK_TYPES);
+    // State already agrees with the bead's default (Open), so nothing here is
+    // a field pull — only the comment is.
+    server.on(
+        "GET",
+        &issues_path(0),
+        200,
+        &mirrored("Mirrored", "Open", 1, 1000),
+    );
+    server.on(
+        "GET",
+        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$top=500",
+        200,
+        r#"[{"id":"4-1","text":"typed in the web UI","author":{"login":"kate"},"created":1000}]"#,
+    );
+    write_remote_config(&beads_dir(&workspace), &server.base_url());
+
+    let run = run_verb(&workspace, "push", "push_comment_left");
+
+    assert!(
+        run.stdout.contains("1 comment(s)")
+            && run.stdout.contains("marked [YouTrack wins]")
+            && run.stdout.contains("br remote pull"),
+        "the comment left for pull must be named, not just the field-pull count: {}",
+        run.stdout
+    );
+    assert!(
+        server.write_requests().is_empty(),
+        "a push that only has a comment to pull writes nothing: {:?}",
+        server.write_requests()
+    );
+}

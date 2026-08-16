@@ -508,6 +508,97 @@ fn e2e_a_first_push_mirrors_links_comments_and_labels_in_the_same_run() {
     assert_eq!(creates, 2, "the second pass has no create step: {writes:?}");
 }
 
+/// A re-planning push's `[YouTrack wins]` note must not claim the numbers it
+/// prints came from "the plan above": that plan was built before the create
+/// even landed, so it cannot have shown a comment the *second*, post-create
+/// read discovered. Here the bead is created with nothing pending, and only
+/// the re-plan turns up a comment already sitting on the freshly created
+/// issue — so the first (printed) plan has no `[YouTrack wins]` line at all,
+/// and a message that still pointed "above" would be pointing at nothing.
+#[test]
+fn e2e_a_replanned_push_does_not_blame_the_stale_plan_for_a_comment_only_the_second_found() {
+    let _log = common::test_log(
+        "e2e_a_replanned_push_does_not_blame_the_stale_plan_for_a_comment_only_the_second_found",
+    );
+    let server = MockServer::start();
+    let workspace = BrWorkspace::new();
+    init(&workspace);
+    create(&workspace, vec!["create", "Child", "--priority", "2"]);
+
+    server.on("GET", LINK_TYPES_PATH, 200, LINK_TYPES);
+    server.on("GET", PROJECTS_PATH, 200, PROJECTS);
+    // Empty on the first read — nothing is paired yet, so the printed plan
+    // has only a create in it. The re-plan's read shows the same issue
+    // already carrying one comment, as if it existed the instant it was
+    // created — which the plan printed before the create could not have
+    // known.
+    server.on_sequence(
+        "GET",
+        &issues_path(0),
+        vec![
+            (200, "[]".to_string()),
+            (
+                200,
+                format!(
+                    "[{}]",
+                    mirrored(1, "Child", "").replace("\"commentsCount\":0", "\"commentsCount\":1")
+                ),
+            ),
+        ],
+    );
+    server.on(
+        "POST",
+        "/api/issues?fields=id,idReadable",
+        200,
+        r#"{"id":"3-1","idReadable":"EM-1"}"#,
+    );
+    server.on(
+        "GET",
+        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$top=500",
+        200,
+        r#"[{"id":"4-1","text":"typed in the web UI","author":{"login":"kate"},"created":1000}]"#,
+    );
+    write_remote_config(&beads_dir(&workspace), &server.base_url());
+
+    let run = run_br_with_env(
+        &workspace,
+        ["remote", "push", "--confirm-initial"],
+        TOKEN,
+        "replanned_push_comment",
+    );
+    assert!(
+        run.status.success(),
+        "push failed: stdout={} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+
+    assert!(
+        run.stdout.contains("re-planned after 1 new pairing(s)"),
+        "the re-plan must be reported: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("1 comment(s)") && run.stdout.contains("fresh read"),
+        "must name the comment and say the count comes from the fresh, post-create read, not \
+         the plan printed above: {}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("comment(s) above are marked"),
+        "must not claim the printed plan shows a line the first read never had: {}",
+        run.stdout
+    );
+    let writes = server.write_requests();
+    assert_eq!(
+        writes.len(),
+        1,
+        "only the create itself writes anything — no field, link or comment write follows, and \
+         a comment pull is never written by a push: {writes:?}"
+    );
+    assert_eq!(writes[0].path, "/api/issues?fields=id,idReadable");
+}
+
 /// The push half doing real work: a field a local edit won, and a bead comment
 /// that has never crossed.
 #[test]

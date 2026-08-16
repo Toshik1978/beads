@@ -252,9 +252,21 @@ pub fn execute_creates(
     let orphans = orphaned_creates(plan);
     report.ambiguous.clone_from(&orphans.ambiguous);
     let total = plan.creates.len();
-    // Resolved once, and only when there is something to create: a run with
-    // nothing to create must not pay for a project lookup.
-    let project_id = resolve_project_id(http, cfg)?;
+    // Resolved once, and only when a create might actually need to POST a
+    // new issue. `plan.creates` being non-empty is not enough on its own: an
+    // entry that turns out recoverable is paired against an issue that
+    // already exists, and an ambiguous one is skipped outright — neither
+    // ever reaches `issue_create_body`, the only place `project_id` is used.
+    // A run where every pending create lands in one of those two buckets
+    // must not pay for a project lookup it will never spend.
+    let needs_project_id = plan.creates.iter().any(|bead_id| {
+        !orphans.recoverable.contains_key(bead_id) && !orphans.is_ambiguous(bead_id)
+    });
+    let project_id = if needs_project_id {
+        resolve_project_id(http, cfg)?
+    } else {
+        String::new()
+    };
     let mut done = 0_usize;
     let mut reported = 0_usize;
 
@@ -655,6 +667,13 @@ pub struct PushReport {
     /// Field changes this push deliberately left alone because the remote won
     /// them. `br remote pull` is what applies those.
     pub left_to_pull: usize,
+    /// Comments this push deliberately left alone because the remote won
+    /// them — the plan's `N comment(s) [YouTrack wins]` lines, which a bare
+    /// push renders (via [`crate::remote::plan::ReconcilePlan::render`]) but
+    /// never acts on, exactly like a field pull. Counted separately from
+    /// `left_to_pull` because the two come from different plan sections and
+    /// the CLI names them separately.
+    pub comments_left_to_pull: usize,
     pub failures: Vec<String>,
 }
 
@@ -752,6 +771,18 @@ fn apply_push(
         .flat_map(|issue| issue.changes.iter())
         .filter(|change| change.direction == Direction::Pull)
         .count();
+    // The plan's render also marks comment pulls `[YouTrack wins]`
+    // (`ReconcilePlan::render`), and a bare push does not act on those
+    // either — `apply_push` never reads `CommentWork::to_pull`, only
+    // `to_push` (see `push_comments`). Counted here so the CLI can name that
+    // line too instead of leaving it the one `[YouTrack wins]` marker
+    // nothing in the report explains.
+    report.comments_left_to_pull = plan
+        .comment_changes
+        .iter()
+        .filter(|entry| entry.direction == Direction::Pull)
+        .map(|entry| entry.count)
+        .sum();
 
     let by_id: HashMap<&str, &Issue> = inputs
         .beads

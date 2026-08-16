@@ -318,14 +318,36 @@ fn print_push_report(report: &PushReport, ctx: &OutputContext) {
             report.tags_skipped.join(", ")
         ));
     }
-    if report.left_to_pull > 0 {
+    if report.left_to_pull > 0 || report.comments_left_to_pull > 0 {
         // Otherwise nothing distinguishes a `[YouTrack wins]` line in the plan
-        // above from work this push actually did.
-        ctx.print_line(&format!(
-            "{} field change(s) above are marked [YouTrack wins] and are `br remote pull`'s \
-             work; this push did not apply them",
-            report.left_to_pull
-        ));
+        // above from work this push actually did — and that applies to a
+        // comment pull exactly as much as a field pull, so both are named
+        // here rather than just the one the count used to cover.
+        let mut left = Vec::new();
+        if report.left_to_pull > 0 {
+            left.push(format!("{} field change(s)", report.left_to_pull));
+        }
+        if report.comments_left_to_pull > 0 {
+            left.push(format!("{} comment(s)", report.comments_left_to_pull));
+        }
+        let what = left.join(" and ");
+        if report.replanned_after > 0 {
+            // The plan printed above predates this push's creates; the counts
+            // here come from the fresh read taken after they landed (see
+            // `execute_push`'s re-plan), which can disagree with what is
+            // "above" if the remote changed in between. Say so rather than
+            // pointing at a plan these numbers may not match.
+            ctx.print_line(&format!(
+                "{what} are marked [YouTrack wins] in a fresh read taken after this push's \
+                 creates landed, which can differ from the plan printed above; `br remote pull` \
+                 is what applies them"
+            ));
+        } else {
+            ctx.print_line(&format!(
+                "{what} above are marked [YouTrack wins] and are `br remote pull`'s work; this \
+                 push did not apply them"
+            ));
+        }
     }
     for failure in &report.failures {
         ctx.print_line(&format!("failed: {failure}"));

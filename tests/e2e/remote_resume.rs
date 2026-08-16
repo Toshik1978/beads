@@ -387,6 +387,18 @@ fn e2e_a_create_that_applied_before_a_503_is_recovered_by_the_next_push() {
         "the recovery must be reported: {}",
         second.stdout
     );
+    // The one pending create in this plan recovers rather than posting, so
+    // nothing here ever calls `issue_create_body` — the only place a project
+    // id is used. `execute_creates` must not spend a project lookup a run
+    // like this one will never need.
+    assert!(
+        !resumed
+            .requests()
+            .iter()
+            .any(|request| request.path == PROJECTS_PATH),
+        "an all-recoverable create must not resolve the project id: {:?}",
+        resumed.requests()
+    );
 
     let paired = pairings(&workspace);
     assert_eq!(
