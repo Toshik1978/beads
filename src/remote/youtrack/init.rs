@@ -74,6 +74,12 @@ pub struct BundleClone {
     pub field_name: String,
     pub source: String,
     pub clone: String,
+    /// `true` when `clone` already existed — an orphan left by an earlier,
+    /// interrupted run — and this run re-pointed the project at it rather
+    /// than creating it. A `--json` consumer that only reads `clone` cannot
+    /// otherwise tell an adoption from a fresh copy; the prose note says
+    /// "adopted", but until this field existed nothing machine-readable did.
+    pub adopted: bool,
 }
 
 /// Everything `init` did, for the CLI layer to print.
@@ -284,27 +290,24 @@ pub fn run(
                 // afterwards: this is the most consequential thing init does —
                 // it changes a vocabulary another project reads — and the rule
                 // stated on `announce` is that a disclosure printed after the
-                // write has missed its moment.
-                let note = format!(
-                    "--allow-shared-bundle: adding {} to '{}', which {} also use(s) — \
-                     those values will appear in their vocabulary too",
-                    quoted_list(&missing),
-                    field.bundle.name,
-                    others.join(", ")
-                );
-                announce(&note);
+                // write has missed its moment. A dry run has no write to get
+                // ahead of, so it neither speaks in the present tense nor
+                // jumps the queue on stderr — the note still lands in the
+                // report, worded as a plan rather than an act performed.
+                let note =
+                    shared_bundle_allow_note(&missing, &field.bundle.name, others, opts.dry_run);
+                if !opts.dry_run {
+                    announce(&note);
+                }
                 report.notes.push(note);
                 add_values(admin, &bundle, &missing, field_name, opts, &mut report)?;
             }
             Sharedness::Unavailable { ref reason } if opts.allow_shared_bundle => {
-                let note = format!(
-                    "--allow-shared-bundle: adding {} to '{}' without a completed sharedness \
-                     scan ({reason}) — if another project uses this bundle, those values will \
-                     appear in its vocabulary too",
-                    quoted_list(&missing),
-                    field.bundle.name
-                );
-                announce(&note);
+                let note =
+                    unavailable_allow_note(&missing, &field.bundle.name, reason, opts.dry_run);
+                if !opts.dry_run {
+                    announce(&note);
+                }
                 report.notes.push(note);
                 add_values(admin, &bundle, &missing, field_name, opts, &mut report)?;
             }
@@ -348,6 +351,62 @@ pub fn run(
     }
 
     Ok(report)
+}
+
+/// The `--allow-shared-bundle` disclosure for a bundle a scan proved shared,
+/// worded in the tense the run actually earns: a real run is about to write,
+/// so it says "adding"; a dry run never writes, so it says "would add"
+/// rather than describing a write that has not happened.
+fn shared_bundle_allow_note(
+    missing: &[PendingValue],
+    bundle_name: &str,
+    others: &[String],
+    dry_run: bool,
+) -> String {
+    if dry_run {
+        format!(
+            "--allow-shared-bundle: would add {} to '{}', which {} also use(s) — those values \
+             would appear in their vocabulary too",
+            quoted_list(missing),
+            bundle_name,
+            others.join(", ")
+        )
+    } else {
+        format!(
+            "--allow-shared-bundle: adding {} to '{}', which {} also use(s) — those values will \
+             appear in their vocabulary too",
+            quoted_list(missing),
+            bundle_name,
+            others.join(", ")
+        )
+    }
+}
+
+/// The same disclosure as [`shared_bundle_allow_note`], for a bundle whose
+/// sharedness a scan could not determine rather than one it proved shared.
+fn unavailable_allow_note(
+    missing: &[PendingValue],
+    bundle_name: &str,
+    reason: &str,
+    dry_run: bool,
+) -> String {
+    if dry_run {
+        format!(
+            "--allow-shared-bundle: would add {} to '{}' without a completed sharedness scan \
+             ({reason}) — if another project uses this bundle, those values would appear in its \
+             vocabulary too",
+            quoted_list(missing),
+            bundle_name
+        )
+    } else {
+        format!(
+            "--allow-shared-bundle: adding {} to '{}' without a completed sharedness scan \
+             ({reason}) — if another project uses this bundle, those values will appear in its \
+             vocabulary too",
+            quoted_list(missing),
+            bundle_name
+        )
+    }
 }
 
 /// The refusal for `Sharedness::Unavailable`, split on its two causes.
@@ -513,10 +572,21 @@ fn reconcile_shared(
     }
 
     let clone_name = clone_name(project, &field.bundle);
+
+    // Decided before either `report.clones` entry or any write: a previous
+    // run may have created this clone and died before re-pointing the
+    // project at it, and whether this run adopts that orphan or creates a
+    // fresh copy is exactly what `report.clones` must say — not just the
+    // prose note below, which a `--json` consumer never reads. The read is
+    // a GET, so it costs nothing to make in a dry run too, and a dry run
+    // that skipped it would have to guess at the very distinction it is
+    // reporting on.
+    let existing = adopt_existing_clone(admin, field, missing, usage, &clone_name)?;
     report.clones.push(BundleClone {
         field_name: field.field_name.clone(),
         source: field.bundle.name.clone(),
         clone: clone_name.clone(),
+        adopted: existing.is_some(),
     });
     if opts.dry_run {
         report.values_added.push((
@@ -526,10 +596,7 @@ fn reconcile_shared(
         return Ok(field.bundle.clone());
     }
 
-    // A previous run may have created this clone and died before re-pointing
-    // the project at it. Adopt it rather than making a second one — see
-    // `adopt_existing_clone`.
-    let clone = match adopt_existing_clone(admin, field, missing, usage, &clone_name)? {
+    let clone = match existing {
         Some(existing) => {
             let note = format!(
                 "adopted the bundle '{}' left behind by an interrupted earlier run \
@@ -1249,6 +1316,7 @@ mod tests {
                 field_name: "Type".into(),
                 source: "Types".into(),
                 clone: "EasyMoney: Types".into(),
+                adopted: false,
             }],
             "a shared bundle is copied, never mutated"
         );
@@ -1320,7 +1388,9 @@ mod tests {
                 field_name: "Type".into(),
                 source: "Types".into(),
                 clone: "EasyMoney: Types".into(),
-            }]
+                adopted: true,
+            }],
+            "the machine-readable field must say 'adopted', not just the prose note"
         );
         assert!(
             report.notes.iter().any(|n| n.contains("adopted")),

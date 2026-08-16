@@ -443,6 +443,9 @@ struct CloneJson<'a> {
     field: &'a str,
     source: &'a str,
     clone: &'a str,
+    /// `true` when `clone` already existed — an orphan left by an earlier,
+    /// interrupted run — and this run adopted it rather than creating it.
+    adopted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -473,6 +476,7 @@ fn print_init_report(report: &InitReport, json: bool, ctx: &OutputContext) {
                     field: &c.field_name,
                     source: &c.source,
                     clone: &c.clone,
+                    adopted: c.adopted,
                 })
                 .collect(),
             defaults_changed: report
@@ -517,10 +521,18 @@ fn print_init_report(report: &InitReport, json: bool, ctx: &OutputContext) {
         ctx.print_line(&format!("{field}: added {}", values.join(", ")));
     }
     for clone in &report.clones {
-        ctx.print_line(&format!(
-            "{}: bundle '{}' was shared, so the project now uses a copy named '{}'",
-            clone.field_name, clone.source, clone.clone
-        ));
+        if clone.adopted {
+            ctx.print_line(&format!(
+                "{}: bundle '{}' was shared, so the project now uses '{}', a copy an earlier \
+                 interrupted run left behind and this run adopted rather than duplicated",
+                clone.field_name, clone.source, clone.clone
+            ));
+        } else {
+            ctx.print_line(&format!(
+                "{}: bundle '{}' was shared, so the project now uses a copy named '{}'",
+                clone.field_name, clone.source, clone.clone
+            ));
+        }
     }
     for change in &report.defaults_changed {
         let old = if change.old.is_empty() {
