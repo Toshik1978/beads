@@ -97,6 +97,10 @@ fn child_with_parent_link(id_readable: &str, summary: &str, parent_readable: &st
     })
 }
 
+// One scenario stated end to end: build the workspace, rename, reparent,
+// then assert on every request the mock saw. Splitting it into helpers would
+// scatter the setup this test's assertions are read against.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn e2e_a_reparenting_rename_produces_link_changes_and_no_create_or_delete() {
     let _log =
