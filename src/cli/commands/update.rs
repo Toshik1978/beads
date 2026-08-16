@@ -9,7 +9,7 @@ use super::{
 };
 use crate::cli::UpdateArgs;
 use crate::config;
-use crate::error::{BeadsError, Result};
+use crate::error::{BeadsError, PartialApplication, Result};
 use crate::format::{format_status_label, format_type_label, sanitize_terminal_inline};
 use crate::model::{Issue, IssueType, Priority, Status};
 use crate::output::OutputContext;
@@ -225,10 +225,14 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
                 ));
             }
 
-            let all_resolved_ids = prepared_routes
+            // Captured before the loop consumes `prepared_routes`, because the
+            // error path below needs every route's targets — including those of
+            // routes that never got to run.
+            let route_resolved_ids = prepared_routes
                 .iter()
-                .flat_map(|(_, route)| route.resolved_ids.iter().cloned())
+                .map(|(_, route)| route.resolved_ids.clone())
                 .collect::<Vec<_>>();
+            let all_resolved_ids = route_resolved_ids.concat();
             validate_multi_issue_external_ref_update(
                 args.external_ref.as_deref(),
                 &all_resolved_ids,
@@ -245,8 +249,26 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
             // committed write. `prepare_single_route` above validates what it
             // can before any commit, but a commit-time guard is checked only
             // inside this loop, per route.
-            for (issue_inputs, prepared_route) in prepared_routes {
-                let route_output = execute_prepared_route(prepared_route, ctx)?;
+            //
+            // Since the write cannot be undone, the failure is reported
+            // instead: `partial_route_failure` replaces the bare cause with an
+            // error naming which targets landed (bds-j1m).
+            for (route_index, (issue_inputs, prepared_route)) in
+                prepared_routes.into_iter().enumerate()
+            {
+                let mut route_has_mutated = false;
+                let route_output =
+                    match execute_prepared_route(prepared_route, ctx, &mut route_has_mutated) {
+                        Ok(output) => output,
+                        Err(error) => {
+                            return Err(partial_route_failure(
+                                &route_resolved_ids,
+                                route_index,
+                                route_has_mutated,
+                                error,
+                            ));
+                        }
+                    };
 
                 routed_capacity_warnings.extend(route_output.capacity_warnings);
 
@@ -288,8 +310,14 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
                 routed_capacity_warnings,
             )
         } else {
-            let route_output =
-                execute_prepared_route(prepare_single_route(args, cli, &beads_dir, false)?, ctx)?;
+            // A single route has nothing to be partial *across*, so its
+            // mutation flag is discarded and the cause propagates unchanged.
+            let mut route_has_mutated = false;
+            let route_output = execute_prepared_route(
+                prepare_single_route(args, cli, &beads_dir, false)?,
+                ctx,
+                &mut route_has_mutated,
+            )?;
             (
                 route_output.updated_issues,
                 route_output.render_items,
@@ -337,6 +365,47 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
     }
 
     Ok(())
+}
+
+/// Describe a fan-out that failed partway through, in terms of which targets
+/// were written (bds-j1m).
+///
+/// Routes commit independently, so once an earlier route has landed there is
+/// nothing to roll back and the only honest response is to say so. The failing
+/// route's own targets are reported as possibly-partly-written when it had
+/// already committed something, and as untouched when it had not — the
+/// distinction a caller needs to decide what to re-run.
+///
+/// When no earlier route committed, the cause is returned unchanged. Nothing
+/// partial happened across routes, and wrapping a plain failure in a
+/// partial-application error would tell the caller to inspect damage that does
+/// not exist. That deliberately leaves the single-route case reporting exactly
+/// what it reported before, matching the unrouted path.
+fn partial_route_failure(
+    route_resolved_ids: &[Vec<String>],
+    failed_index: usize,
+    failed_route_has_mutated: bool,
+    error: BeadsError,
+) -> BeadsError {
+    let applied = route_resolved_ids[..failed_index].concat();
+    if applied.is_empty() {
+        return error;
+    }
+
+    let failed_route_ids = route_resolved_ids[failed_index].clone();
+    let (uncertain, mut not_applied) = if failed_route_has_mutated {
+        (failed_route_ids, Vec::new())
+    } else {
+        (Vec::new(), failed_route_ids)
+    };
+    not_applied.extend(route_resolved_ids[failed_index + 1..].concat());
+
+    BeadsError::PartiallyApplied(Box::new(PartialApplication {
+        applied,
+        uncertain,
+        not_applied,
+        source: error,
+    }))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -459,13 +528,22 @@ fn prepare_single_route(
     })
 }
 
+/// Execute one route's prepared update.
+///
+/// `route_has_mutated` is an out-parameter rather than a local because the
+/// caller needs it on the error path: when a fan-out fails mid-flight, whether
+/// this route had already written anything is what decides between reporting
+/// its targets as untouched and reporting them as possibly-partly-written
+/// (bds-j1m). It is set as each write commits, so it is meaningful even when
+/// this function returns `Err`.
 #[allow(clippy::too_many_lines)]
 fn execute_prepared_route(
     mut prepared: PreparedUpdateRoute,
     ctx: &OutputContext,
+    route_has_mutated: &mut bool,
 ) -> Result<UpdateRouteOutput> {
     if can_use_bulk_label_only_route(&prepared) {
-        return execute_bulk_label_only_route(prepared, ctx);
+        return execute_bulk_label_only_route(prepared, ctx, route_has_mutated);
     }
 
     let mut updated_issues: Vec<UpdatedIssueOutput> = Vec::new();
@@ -479,7 +557,6 @@ fn execute_prepared_route(
     let mut final_ids: Vec<String> = Vec::with_capacity(prepared.resolved_ids.len());
     let use_machine_output = update_uses_machine_output(ctx);
     let use_human_output = update_uses_human_output(ctx);
-    let mut route_has_mutated = false;
     let mut blocked_cache_dirty = false;
     let defer_blocked_cache_rebuild = prepared.update.status.is_some()
         || !matches!(prepared.resolved_parent, ParentUpdatePlan::Unchanged);
@@ -529,7 +606,7 @@ fn execute_prepared_route(
         if prepared.update.status.is_some() {
             blocked_cache_dirty = true;
         }
-        route_has_mutated = true;
+        *route_has_mutated = true;
     }
 
     for id in &prepared.resolved_ids {
@@ -539,7 +616,7 @@ fn execute_prepared_route(
         for label in &prepared.add_labels {
             let add_label_result = retry_mutation_with_jsonl_recovery(
                 &mut prepared.storage_ctx,
-                !route_has_mutated,
+                !*route_has_mutated,
                 "update label add",
                 Some(id.as_str()),
                 |storage| storage.add_label(id, label),
@@ -550,12 +627,12 @@ fn execute_prepared_route(
                 "update",
                 add_label_result,
             )?;
-            route_has_mutated = true;
+            *route_has_mutated = true;
         }
         for label in &prepared.remove_labels {
             let remove_label_result = retry_mutation_with_jsonl_recovery(
                 &mut prepared.storage_ctx,
-                !route_has_mutated,
+                !*route_has_mutated,
                 "update label remove",
                 Some(id.as_str()),
                 |storage| storage.remove_label(id, label),
@@ -566,12 +643,12 @@ fn execute_prepared_route(
                 "update",
                 remove_label_result,
             )?;
-            route_has_mutated = true;
+            *route_has_mutated = true;
         }
         if prepared.set_labels {
             let set_labels_result = retry_mutation_with_jsonl_recovery(
                 &mut prepared.storage_ctx,
-                !route_has_mutated,
+                !*route_has_mutated,
                 "update label set",
                 Some(id.as_str()),
                 |storage| storage.set_labels(id, &prepared.valid_set_labels),
@@ -582,13 +659,13 @@ fn execute_prepared_route(
                 "update",
                 set_labels_result,
             )?;
-            route_has_mutated = true;
+            *route_has_mutated = true;
         }
 
         // Apply parent
         let parent_result = apply_parent_update(
             &mut prepared.storage_ctx,
-            !route_has_mutated,
+            !*route_has_mutated,
             id,
             &prepared.resolved_parent,
             &prepared.actor,
@@ -601,7 +678,7 @@ fn execute_prepared_route(
             parent_result,
         )?;
         if parent_changes_cache {
-            route_has_mutated = true;
+            *route_has_mutated = true;
             blocked_cache_dirty = true;
         }
 
@@ -704,16 +781,16 @@ fn can_use_bulk_label_only_route(prepared: &PreparedUpdateRoute) -> bool {
 fn execute_bulk_label_only_route(
     mut prepared: PreparedUpdateRoute,
     ctx: &OutputContext,
+    route_has_mutated: &mut bool,
 ) -> Result<UpdateRouteOutput> {
     let resolved_ids = prepared.resolved_ids.clone();
     let add_labels = prepared.add_labels.clone();
     let remove_labels = prepared.remove_labels.clone();
-    let mut route_has_mutated = false;
 
     for label in add_labels {
         let add_label_result = retry_mutation_with_jsonl_recovery(
             &mut prepared.storage_ctx,
-            !route_has_mutated,
+            !*route_has_mutated,
             "bulk update label add",
             None,
             |storage| storage.add_label_to_issues_bulk(&resolved_ids, &label),
@@ -724,13 +801,13 @@ fn execute_bulk_label_only_route(
             "update",
             add_label_result,
         )?;
-        route_has_mutated = true;
+        *route_has_mutated = true;
     }
 
     for label in remove_labels {
         let remove_label_result = retry_mutation_with_jsonl_recovery(
             &mut prepared.storage_ctx,
-            !route_has_mutated,
+            !*route_has_mutated,
             "bulk update label remove",
             None,
             |storage| storage.remove_label_from_issues_bulk(&resolved_ids, &label),
@@ -741,7 +818,7 @@ fn execute_bulk_label_only_route(
             "update",
             remove_label_result,
         )?;
-        route_has_mutated = true;
+        *route_has_mutated = true;
     }
 
     let issues = prepared
@@ -1380,6 +1457,91 @@ mod tests {
     use tempfile::TempDir;
     use tracing::info;
 
+    /// Three routes; the second fails before writing anything. The first
+    /// route's targets are written and unrecoverable, the second and third
+    /// are untouched.
+    #[test]
+    fn partial_route_failure_reports_untouched_routes_when_the_failure_wrote_nothing() {
+        init_test_logging();
+        let routes = vec![
+            vec!["bd-1".to_string(), "bd-2".to_string()],
+            vec!["bd-3".to_string()],
+            vec!["bd-4".to_string()],
+        ];
+
+        let error = partial_route_failure(
+            &routes,
+            1,
+            false,
+            BeadsError::validation("if-status", "guard rejected"),
+        );
+
+        let BeadsError::PartiallyApplied(partial) = error else {
+            panic!("expected a partial-application error, got: {error}");
+        };
+        assert_eq!(
+            partial.applied,
+            vec!["bd-1".to_string(), "bd-2".to_string()]
+        );
+        assert!(partial.uncertain.is_empty());
+        assert_eq!(
+            partial.not_applied,
+            vec!["bd-3".to_string(), "bd-4".to_string()]
+        );
+    }
+
+    /// Same shape, except the failing route had already committed something.
+    /// Its own targets move out of "untouched" and into "uncertain" — a route
+    /// is atomic in its field update but not across the label and re-parent
+    /// steps that follow.
+    #[test]
+    fn partial_route_failure_reports_a_half_written_route_as_uncertain() {
+        init_test_logging();
+        let routes = vec![
+            vec!["bd-1".to_string()],
+            vec!["bd-2".to_string(), "bd-3".to_string()],
+            vec!["bd-4".to_string()],
+        ];
+
+        let error = partial_route_failure(
+            &routes,
+            1,
+            true,
+            BeadsError::validation("label", "no table"),
+        );
+
+        let BeadsError::PartiallyApplied(partial) = error else {
+            panic!("expected a partial-application error, got: {error}");
+        };
+        assert_eq!(partial.applied, vec!["bd-1".to_string()]);
+        assert_eq!(
+            partial.uncertain,
+            vec!["bd-2".to_string(), "bd-3".to_string()]
+        );
+        assert_eq!(partial.not_applied, vec!["bd-4".to_string()]);
+    }
+
+    /// The first route failing is not a partial application: nothing landed,
+    /// so the cause is returned untouched rather than dressed up as damage the
+    /// caller now has to inspect.
+    #[test]
+    fn partial_route_failure_passes_the_cause_through_when_no_route_committed() {
+        init_test_logging();
+        let routes = vec![vec!["bd-1".to_string()], vec!["bd-2".to_string()]];
+
+        let error = partial_route_failure(
+            &routes,
+            0,
+            true,
+            BeadsError::validation("if-status", "guard rejected"),
+        );
+
+        assert!(
+            matches!(error, BeadsError::Validation { .. }),
+            "expected the cause unchanged, got: {error}"
+        );
+    }
+
     #[test]
     fn test_optional_string_field_with_value() {
         init_test_logging();
@@ -1994,7 +2156,10 @@ mod tests {
         };
 
         let ctx = OutputContext::from_flags(true, false, true);
-        let output = execute_prepared_route(prepared, &ctx).expect("bulk route update");
+        let mut route_has_mutated = false;
+        let output = execute_prepared_route(prepared, &ctx, &mut route_has_mutated)
+            .expect("bulk route update");
+        assert!(route_has_mutated, "the bulk label write committed");
         assert_eq!(output.updated_issues.len(), 2);
         assert_eq!(
             output.resolved_ids,
@@ -2076,7 +2241,10 @@ mod tests {
         };
 
         let ctx = OutputContext::from_flags(true, false, true);
-        let output = execute_prepared_route(prepared, &ctx).expect("bulk route update");
+        let mut route_has_mutated = false;
+        let output = execute_prepared_route(prepared, &ctx, &mut route_has_mutated)
+            .expect("bulk route update");
+        assert!(route_has_mutated, "the bulk label write committed");
         assert_eq!(output.updated_issues.len(), 2);
         assert_eq!(
             output.resolved_ids,
@@ -2197,7 +2365,16 @@ mod tests {
         };
 
         let ctx = OutputContext::from_flags(false, false, true);
-        let err = execute_prepared_route(prepared, &ctx).expect_err("update should fail");
+        let mut route_has_mutated = false;
+        let err = execute_prepared_route(prepared, &ctx, &mut route_has_mutated)
+            .expect_err("update should fail");
+        // The status update committed before the label write hit the dropped
+        // table, which is exactly the state `route_has_mutated` exists to
+        // report: a caller cannot treat this route's targets as untouched.
+        assert!(
+            route_has_mutated,
+            "the status update committed before the label write failed"
+        );
         assert!(
             !err.to_string().contains("failed to rebuild blocked cache"),
             "late runtime error should not be masked by blocked-cache repair: {err}"

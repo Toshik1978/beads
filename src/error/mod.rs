@@ -190,6 +190,20 @@ pub enum BeadsError {
     #[error("Partially completed: {reason}")]
     PartiallyCompleted { reason: String },
 
+    /// A command fanned out across routed workspaces failed after at least one
+    /// route had already committed (bds-j1m).
+    ///
+    /// Distinct from [`Self::PartiallyCompleted`], which reports a batch the
+    /// caller explicitly asked to continue past failures. This one is not
+    /// opt-in and not retryable: it reports damage the caller did not ask for
+    /// and cannot undo, because each routed workspace is its own database and
+    /// its own transaction, so nothing rolls back a route that already landed.
+    ///
+    /// Boxed to keep [`BeadsError`] small — three id lists plus a nested error
+    /// would otherwise set the size of every `Result` in the crate.
+    #[error("{}", .0.render())]
+    PartiallyApplied(Box<PartialApplication>),
+
     // === Policy Errors ===
     /// One or more `workflow.required_fields` gates fired for a status
     /// transition (issue #312/#388) — raised from any command that changes
@@ -212,6 +226,71 @@ pub enum BeadsError {
     WorkflowCapacityExceeded {
         violation: Box<crate::close_policy::WorkflowCapacityViolation>,
     },
+}
+
+/// Which targets a fan-out command wrote before it failed (bds-j1m).
+///
+/// The three buckets are deliberately not two: a route that failed *after* its
+/// field update committed but *before* its label or re-parent work finished is
+/// neither cleanly applied nor cleanly untouched, and collapsing it into either
+/// bucket would state something the command cannot know.
+#[derive(Debug)]
+pub struct PartialApplication {
+    /// Targets whose route committed in full before the failure. These are
+    /// written and cannot be rolled back.
+    pub applied: Vec<String>,
+    /// Targets in the route that failed after it had already written
+    /// something. A route is atomic in its field update but not across the
+    /// label and re-parent steps that follow it, so these may be partly
+    /// updated.
+    pub uncertain: Vec<String>,
+    /// Targets whose route was never reached, or whose route failed before
+    /// writing anything. These are untouched.
+    pub not_applied: Vec<String>,
+    /// The failure that stopped the fan-out.
+    pub source: BeadsError,
+}
+
+impl PartialApplication {
+    /// Render the operator-facing message.
+    ///
+    /// Each bucket is named on its own line because the whole point is that
+    /// the caller must read them; a single-line summary invites skipping to
+    /// the cause, which is the part that does *not* say what landed.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut message = String::from(
+            "Partially applied across routed workspaces: routes commit independently, \
+             so nothing rolls back what already landed.",
+        );
+        for (label, ids) in [
+            ("written", &self.applied),
+            ("possibly partly written", &self.uncertain),
+            ("not written", &self.not_applied),
+        ] {
+            if !ids.is_empty() {
+                message.push_str(&format!("\n  {label}: {}", render_id_list(ids)));
+            }
+        }
+        message.push_str(&format!("\n  cause: {}", self.source));
+        message
+    }
+}
+
+/// Join ids for an operator-facing list, naming at most eight.
+///
+/// The full lists are always present in the structured `context`, so truncating
+/// here loses nothing a machine consumer needs.
+fn render_id_list(ids: &[String]) -> String {
+    const MAX_NAMED: usize = 8;
+    if ids.len() <= MAX_NAMED {
+        return ids.join(", ");
+    }
+    format!(
+        "{}, (+{} more)",
+        ids[..MAX_NAMED].join(", "),
+        ids.len() - MAX_NAMED
+    )
 }
 
 impl BeadsError {
@@ -279,6 +358,7 @@ impl BeadsError {
                 | Self::WorkflowCapacityExceeded { .. }
                 | Self::PreconditionFailed { .. }
                 | Self::PartiallyCompleted { .. }
+                | Self::PartiallyApplied(_)
         )
     }
 
@@ -316,6 +396,9 @@ impl BeadsError {
             ),
             Self::PartiallyCompleted { .. } => Some(
                 "Part of the batch succeeded. Fix the reported items and re-run; the ones that already succeeded will be reported as already closed and will not be redone.",
+            ),
+            Self::PartiallyApplied(_) => Some(
+                "Do not re-run the same command: the targets listed as written have already moved, so a guard such as --if-status will now reject them too. Re-run against the remaining targets only.",
             ),
             Self::PreconditionFailed { .. } => Some(
                 "Nothing was written. Re-read the issue with `br show` and decide whether to retry against the value it holds now.",

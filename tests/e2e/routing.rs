@@ -2486,8 +2486,8 @@ fn e2e_routing_update_failure_does_not_print_partial_success() {
 }
 
 /// A routed multi-target update commits each route independently: there is
-/// no cross-route rollback (see the comment at
-/// `src/cli/commands/update.rs:240`). Unlike
+/// no cross-route rollback (see the comment at the commit loop in
+/// `src/cli/commands/update.rs`). Unlike
 /// `e2e_routing_update_failure_does_not_print_partial_success` above — which
 /// fails on a *nonexistent* ID and so aborts in `prepare_single_route` before
 /// any route ever commits — this uses `--if-status`, a guard checked only at
@@ -2495,6 +2495,11 @@ fn e2e_routing_update_failure_does_not_print_partial_success() {
 /// commits; the external route is listed second and its guard is rejected,
 /// so the overall command fails. The earlier, already-committed write is not
 /// undone by the later failure.
+///
+/// What bds-j1m changed is the reporting, not the writing: the command still
+/// cannot roll the earlier route back, but it now names the target it wrote
+/// instead of surfacing the bare guard rejection, which read as though nothing
+/// had happened.
 #[test]
 fn e2e_routing_update_guard_failure_on_a_later_route_does_not_undo_an_earlier_commit() {
     let _log = common::test_log(
@@ -2576,6 +2581,139 @@ fn e2e_routing_update_guard_failure_on_a_later_route_does_not_undo_an_earlier_co
         external_after[0]["status"].as_str(),
         Some("blocked"),
         "the external route's guard should have rejected the update: {external_after:?}"
+    );
+
+    // And the operator is told which target landed. Without this the command
+    // reported only "Precondition failed on <external>", which reads as though
+    // the whole update had been refused.
+    assert!(
+        update.stderr.contains(&local_id),
+        "the failure must name the target it already wrote: {}",
+        update.stderr
+    );
+    assert_eq!(
+        update.status.code(),
+        Some(3),
+        "3 (the request did not fully apply), not 4 (the guard rejected it and \
+         nothing was written): {}",
+        update.stderr
+    );
+}
+
+/// The machine-readable half of the contract above: an agent driving `br` gets
+/// the committed and untouched targets as lists, not as prose it has to parse
+/// out of the message (bds-j1m).
+#[test]
+fn e2e_routing_update_partial_application_reports_each_target_in_json() {
+    let _log =
+        common::test_log("e2e_routing_update_partial_application_reports_each_target_in_json");
+
+    let main_workspace = BrWorkspace::new();
+    let external_workspace = BrWorkspace::new();
+
+    init_workspace(&main_workspace, "init_partial_json_main");
+    init_workspace(&external_workspace, "init_partial_json_external");
+    configure_external_route(&main_workspace, &external_workspace);
+
+    let local_id = create_issue_and_get_id(
+        &main_workspace,
+        "Local partial target",
+        "create_local_partial_target",
+    );
+    let external_id = create_issue_and_get_id(
+        &external_workspace,
+        "External partial target",
+        "create_external_partial_target",
+    );
+
+    let derail_external = run_br(
+        &external_workspace,
+        ["update", &external_id, "--status", "blocked"],
+        "derail_external_for_partial_json",
+    );
+    assert!(
+        derail_external.status.success(),
+        "external derail failed: {}",
+        derail_external.stderr
+    );
+
+    let update = run_br(
+        &main_workspace,
+        [
+            "update",
+            &local_id,
+            &external_id,
+            "--status",
+            "in_progress",
+            "--if-status",
+            "open",
+            "--json",
+        ],
+        "update_partial_application_json",
+    );
+    assert!(
+        !update.status.success(),
+        "expected the external route's guard to fail the overall command: {}",
+        update.stdout
+    );
+
+    // The error document is pretty-printed and shares stdout with whatever the
+    // command emitted first, so read stdout as a JSON stream rather than
+    // guessing at line boundaries.
+    let documents: Vec<Value> = serde_json::Deserializer::from_str(&update.stdout)
+        .into_iter::<Value>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| {
+            panic!("parse stdout as a JSON stream ({error}): {}", update.stdout)
+        });
+    let failure = documents
+        .iter()
+        .find(|value| value.get("error").is_some())
+        .unwrap_or_else(|| panic!("no error document: {}", update.stdout));
+
+    assert_eq!(
+        failure["error"]["code"].as_str(),
+        Some("PARTIALLY_APPLIED"),
+        "{}",
+        update.stdout
+    );
+    assert_eq!(
+        failure["error"]["context"]["applied"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec![local_id.as_str()]),
+        "the local route committed: {}",
+        update.stdout
+    );
+    assert_eq!(
+        failure["error"]["context"]["not_applied"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec![external_id.as_str()]),
+        "the external route's guard rejected it inside the transaction, so it \
+         wrote nothing: {}",
+        update.stdout
+    );
+    assert_eq!(
+        failure["error"]["context"]["uncertain"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "no route was left half-written: {}",
+        update.stdout
+    );
+    assert_eq!(
+        failure["error"]["context"]["cause_code"].as_str(),
+        Some("PRECONDITION_FAILED"),
+        "the underlying reason stays available to branch on: {}",
+        update.stdout
+    );
+    assert_eq!(
+        failure["error"]["retryable"].as_bool(),
+        Some(false),
+        "re-running the same command would now trip the guard on the target \
+         that already moved: {}",
+        update.stdout
     );
 }
 

@@ -117,6 +117,29 @@ Safety boundaries:
 - Cross-project dependency status checks use explicit IDs such as
   `external:api:api-123` plus config keys like `external_projects.api=../api`.
 
+**A routed `update` is not atomic across routes, and says so.** Each route is a
+separate database and a separate transaction, so once one route has committed
+nothing can undo it. A guard that is only checked at commit time — `--if-status`
+is the one that reaches this — can therefore reject a later route after an
+earlier one has already been written.
+
+When that happens `br update` exits **3** with error code `PARTIALLY_APPLIED`
+instead of surfacing the bare cause, whose message would name only the target
+that failed and read as though the whole command had been refused. Its `context`
+splits every target three ways:
+
+| Field | Meaning |
+| --- | --- |
+| `applied` | Written. The route committed in full and cannot be rolled back. |
+| `uncertain` | The failing route's targets, when it had already committed something. A route is atomic in its field update but not across the label and re-parent steps that follow, so these may be partly updated. |
+| `not_applied` | Untouched — the route was never reached, or it failed before writing anything. |
+
+`context.cause_code` carries the code the failure would have had on its own
+(`PRECONDITION_FAILED` for a rejected `--if-status`), so a caller can still
+branch on *why* the fan-out stopped after branching on the fact that it stopped
+halfway. `retryable` is `false`: re-running the same command would now trip the
+guard on the targets that already moved. Re-run against `not_applied` instead.
+
 ---
 
 ## Core Commands
@@ -452,6 +475,11 @@ A guard needs a field update to guard. Label and parent changes are written in
 their own transactions and cannot be guarded atomically, so `br update <id>
 --add-label x --if-status open` is refused rather than silently unguarded.
 
+"Nothing is written" holds within one workspace. A multi-target update whose IDs
+[route](#cross-project-routing) to different workspaces commits each route in
+turn, so a guard rejecting a later route cannot undo an earlier one; that case
+exits 3 with `PARTIALLY_APPLIED` and names which targets landed.
+
 ---
 
 ### close
@@ -677,7 +705,9 @@ workflow:
 - Routed commands transact each repository independently. There is no
   distributed transaction across repositories, so an earlier route may already
   be committed if a later route fails and cross-repository atomicity is
-  intentionally not claimed.
+  intentionally not claimed. `update` reports that case rather than leaving it
+  to be inferred; see `PARTIALLY_APPLIED` under
+  [Cross-Project Routing](#cross-project-routing).
 - Omitting `workflow.capacity` preserves existing behavior exactly.
 - The current enforcement layer has fixed `repository` scope and `all`
   counting. Hierarchy-aware counting, audited exemptions, actor/harness/

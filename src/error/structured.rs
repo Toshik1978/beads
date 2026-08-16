@@ -118,6 +118,9 @@ pub enum ErrorCode {
     NothingToDo,
     /// Part of a batch succeeded and part did not (bds-yo8)
     PartiallyCompleted,
+    /// A fan-out across routed workspaces failed after an earlier route had
+    /// already committed (bds-j1m)
+    PartiallyApplied,
 
     // === Policy Errors (exit code 4) ===
     /// Closure-time policy gate fired (issue #274)
@@ -178,6 +181,7 @@ impl ErrorCode {
             Self::ShuttingDown => "SHUTTING_DOWN",
             Self::NothingToDo => "NOTHING_TO_DO",
             Self::PartiallyCompleted => "PARTIALLY_COMPLETED",
+            Self::PartiallyApplied => "PARTIALLY_APPLIED",
             // Policy
             Self::PolicyViolation => "POLICY_VIOLATION",
             Self::WorkflowCapacityExceeded => "WORKFLOW_CAPACITY_EXCEEDED",
@@ -244,7 +248,14 @@ impl ErrorCode {
             // Grouped with NothingToDo at 3 rather than given a code of its own:
             // both mean "the request did not fully apply", and the distinction a
             // caller needs is in the error code, which is machine-readable.
-            | Self::PartiallyCompleted => 3,
+            //
+            // PartiallyApplied joins them for the same reason, and deliberately
+            // takes 3 even when its cause would have been 4 on its own (a
+            // rejected --if-status guard, say): "nothing was written" and "some
+            // of it was written" are different outcomes, and the exit code a
+            // caller reads must not claim the first when the second happened.
+            | Self::PartiallyCompleted
+            | Self::PartiallyApplied => 3,
             Self::ShuttingDown => 130,
             // Validation (4)
             Self::ValidationFailed
@@ -541,6 +552,22 @@ impl StructuredError {
             BeadsError::PartiallyCompleted { reason } => (
                 ErrorCode::PartiallyCompleted,
                 Some(json!({"reason": reason})),
+            ),
+            // The three id lists go out in full, untruncated: the human message
+            // names at most eight per bucket, and an agent deciding what to
+            // re-run needs every one of them. `cause_code` is the code the
+            // failure would have carried on its own, kept so a caller can still
+            // branch on *why* the fan-out stopped after branching on the fact
+            // that it stopped halfway.
+            BeadsError::PartiallyApplied(partial) => (
+                ErrorCode::PartiallyApplied,
+                Some(json!({
+                    "applied": partial.applied,
+                    "uncertain": partial.uncertain,
+                    "not_applied": partial.not_applied,
+                    "cause_code": Self::extract_code_and_context(&partial.source).0.as_str(),
+                    "cause": partial.source.to_string(),
+                })),
             ),
             BeadsError::JsonlParse { line, reason } => (
                 ErrorCode::JsonlParseError,

@@ -157,7 +157,7 @@ piping through `tail`, too: a pipeline reports the *last* command's status, so
 (`set: [pipefail]` covers this inside the Taskfile; an ad-hoc shell command is
 on its own.)
 
-A full run at the time of writing: **3203 tests, 0 failed, 4 skipped (1
+A full run at the time of writing: **3210 tests, 0 failed, 4 skipped (1
 leaky)**, in 80s under nextest, plus the doctest pass. The `cargo test` runner
 it replaced took roughly twice as long on a suite of comparable size; that
 figure has not been re-measured since, and is here only to say why the switch
