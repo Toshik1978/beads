@@ -4,6 +4,11 @@
 //! (`youtrack`). See the `bds-4r2` epic's `design` field for the full spec.
 
 pub mod config;
+pub mod diff;
 pub mod error;
 pub mod http;
+pub mod link_diff;
+pub mod model;
+pub mod plan;
+pub mod reconcile;
 pub mod youtrack;

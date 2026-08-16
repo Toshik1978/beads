@@ -11,7 +11,8 @@ use crate::remote::http::HttpClient;
 use serde_json::{Value, json};
 
 /// The three link types beads emits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LinkKind {
     Subtask,
     Depend,

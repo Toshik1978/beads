@@ -9,11 +9,15 @@
 use crate::cli::{RemoteCommands, RemoteInitArgs};
 use crate::config;
 use crate::error::{BeadsError, Result};
+use crate::model::Issue;
 use crate::output::OutputContext;
 use crate::remote::config::RemoteConfig;
 use crate::remote::http::HttpClient;
+use crate::remote::plan::{ReconcilePlan, build_plan};
 use crate::remote::youtrack::admin::AdminClient;
+use crate::remote::youtrack::fetch::fetch_snapshot;
 use crate::remote::youtrack::init::{self, InitOptions, InitReport, WorkspaceVocabulary};
+use crate::remote::youtrack::links::LinkTypes;
 use crate::storage::{ListFilters, SqliteStorage};
 use serde::Serialize;
 
@@ -42,15 +46,30 @@ pub fn execute(
             print_init_report(&report, json, ctx);
             Ok(())
         }
-        RemoteCommands::Status(_)
-        | RemoteCommands::Push(_)
-        | RemoteCommands::Pull(_)
-        | RemoteCommands::Sync(_) => Err(BeadsError::ExternalCommand {
-            command: "br remote".to_string(),
-            reason: "this subcommand is declared but not implemented yet; \
-                     `br remote init` is the only one that runs today"
-                .to_string(),
-        }),
+        RemoteCommands::Status(_) => {
+            let storage_ctx = config::open_storage_with_cli(&beads_dir, cli)?;
+            let issues = hydrated_issues(&storage_ctx.storage)?;
+            let http = HttpClient::from_env(&cfg)?;
+            // Both of these are GETs, and nothing below them writes. The e2e
+            // proves it from the other side, by asserting the mock server saw
+            // no state-changing method at all.
+            let types = LinkTypes::resolve(&http)?;
+            // The non-fatal fetch on purpose: a remote value this config
+            // cannot map is exactly what `status` exists to report, so it
+            // must land in the plan rather than abort the command.
+            let snapshot = fetch_snapshot(&http, &cfg, &types)?;
+            let plan = build_plan(&cfg, &issues, snapshot, &types);
+            print_status(&cfg, &plan, &http, json, ctx);
+            Ok(())
+        }
+        RemoteCommands::Push(_) | RemoteCommands::Pull(_) | RemoteCommands::Sync(_) => {
+            Err(BeadsError::ExternalCommand {
+                command: "br remote".to_string(),
+                reason: "this subcommand is declared but not implemented yet; \
+                     `br remote init` and `br remote status` are the ones that run today"
+                    .to_string(),
+            })
+        }
     }
 }
 
@@ -77,6 +96,58 @@ fn workspace_vocabulary(storage: &SqliteStorage) -> Result<WorkspaceVocabulary> 
         vocab.statuses.insert(issue.status.as_str().to_string());
     }
     Ok(vocab)
+}
+
+/// Every issue with its relations and labels attached.
+///
+/// `list_issues` returns bare rows: it does not populate `dependencies`,
+/// `labels` or `comments`, and the link differ is only as good as the
+/// relations it is handed. The three export readers below are the same ones
+/// the JSONL export uses, and they cost three queries rather than 3N.
+fn hydrated_issues(storage: &SqliteStorage) -> Result<Vec<Issue>> {
+    let mut issues = storage.get_all_issues_for_export()?;
+    let mut dependencies = storage.get_all_dependency_records()?;
+    let mut labels = storage.get_labels_for_export()?;
+    for issue in &mut issues {
+        if let Some(rows) = dependencies.remove(&issue.id) {
+            issue.dependencies = rows;
+        }
+        if let Some(names) = labels.remove(&issue.id) {
+            issue.labels = names;
+        }
+    }
+    Ok(issues)
+}
+
+#[derive(Debug, Serialize)]
+struct StatusJson<'a> {
+    project: &'a str,
+    plan: &'a ReconcilePlan,
+    /// Read requests issued. Its companion is the point: `br remote status`
+    /// reports and never writes, so `writes` is always 0.
+    reads: u32,
+    writes: u32,
+}
+
+fn print_status(
+    cfg: &RemoteConfig,
+    plan: &ReconcilePlan,
+    http: &HttpClient,
+    json: bool,
+    ctx: &OutputContext,
+) {
+    if json {
+        ctx.json(&StatusJson {
+            project: &cfg.project,
+            plan,
+            reads: http.read_count(),
+            writes: http.write_count(),
+        });
+        return;
+    }
+    for line in plan.render().lines() {
+        ctx.print_line(line);
+    }
 }
 
 #[derive(Debug, Serialize)]

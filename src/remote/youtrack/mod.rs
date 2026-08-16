@@ -4,6 +4,7 @@
 pub mod admin;
 pub mod bundles;
 pub mod clone;
+pub mod fetch;
 pub mod init;
 pub mod links;
 pub mod mapping;
