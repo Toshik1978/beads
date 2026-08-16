@@ -60,6 +60,16 @@ product decision to stop carrying surface nobody used, not a dead-code sweep.
   behind the fifteen removed fields stayed in place, unread, through the field
   removal so no `content_hash` moved before this step; v19 drops them and
   their indexes and recomputes every stored digest in the same transaction.
+- **A routed command that fails partway now says what it wrote.** `update`,
+  `close`, `reopen`, `delete`, `label add`/`remove` and `detach` commit each
+  routed workspace before opening the next, so a later route's failure cannot
+  undo an earlier route's write — and used to surface only the cause, which
+  names the target that failed and reads as though nothing had happened. That
+  case is now exit **3** with a new error code `PARTIALLY_APPLIED`, whose
+  `context` splits every target into `applied`, `uncertain` and `not_applied`
+  and carries the underlying `cause_code`. It is marked non-retryable: re-run
+  against `not_applied`, not against the whole command. Unrouted commands and
+  single-route fan-outs are unaffected and report exactly what they did before.
 
 ### Four behavior changes that fall out of the column drop, not a redesign
 
@@ -134,9 +144,18 @@ already-migrated workspace.
 
 - [cb7e5b7](https://github.com/Toshik1978/beads/commit/cb7e5b7cd06e062c7f891c0f49aa9194162b125a) feat(storage)!: schema v19 drops the dead columns and rebuilds hashes
 
+### Bug Fixes
+
+- [2850922](https://github.com/Toshik1978/beads/commit/2850922c7c8e5c287331991020f69d67169450ee) fix: correct the findings from the whole-branch review
+- [c5b07bf](https://github.com/Toshik1978/beads/commit/c5b07bfe33f2989200e96f275973f71a92da4463) fix(storage): remove the unwritable workflow-policy bypass field
+- [863ea63](https://github.com/Toshik1978/beads/commit/863ea63685757be155fed0c45225df157cb943d3) fix(cli): report which targets a routed update already wrote
+- [d357d80](https://github.com/Toshik1978/beads/commit/d357d80d469d86b8a00dd9927b0f1920e68297fa) fix(cli): report partial application from every routed fan-out
+
 ### Documentation
 
 - [4f72584](https://github.com/Toshik1978/beads/commit/4f72584379f1e985b8538659eddb390d20492285) docs: record the cleanup spec, the br remote spec, and the cleanup plan
+- [4ee592e](https://github.com/Toshik1978/beads/commit/4ee592e85128079c8dc6f0a1d68b6d78af1694dc) docs: remove the deleted fields, flags and subsystems from the docs
+- [0dd8085](https://github.com/Toshik1978/beads/commit/0dd808519d4a2b91e40ef1cb22218ac3ad02c68f) docs: record inbound adoption and bundle provisioning in the br remote spec
 
 ### Others
 
