@@ -99,6 +99,26 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 serde_yml = { package = "serde_norway", version = "0.9.42" }
 
+# HTTP for `br remote`. Blocking on purpose: introducing an async runtime into
+# a synchronous CLI is a larger change than the feature that would need it.
+# `rustls` rather than native-tls so the build needs no platform TLS headers.
+#
+# Deliberately *without* ureq's own `json` feature: that feature's
+# `cookie_store?/serde_json` weak-dependency edge makes Cargo resolve (though
+# never activate or compile) `cookie_store` and its whole `url`/`idna`/`icu_*`
+# transitive tree — verified with an isolated single-dependency reproduction
+# and confirmed to survive even a from-scratch `cargo generate-lockfile`, so
+# it cannot be pruned by editing the lockfile. Dropping the feature removes
+# the edge instead of the symptom. `serde_json` is already a direct
+# dependency above, so request bodies are serialized with that and sent via
+# `RequestBuilder::send`, not ureq's own `send_json`.
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }
+
+# `IndexMap` for the `br remote` field maps, so declaration order survives
+# parse and reversing a map is deterministic. Already compiled into the tree
+# via `serde_norway`; this entry only makes it nameable from our own source.
+indexmap = { version = "2", features = ["serde"] }
+
 # Time
 chrono = { version = "0.4.43", features = ["serde"] }
 
