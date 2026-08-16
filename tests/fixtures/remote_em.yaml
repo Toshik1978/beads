@@ -1,0 +1,22 @@
+backend: youtrack
+url: https://example.youtrack.cloud
+project: EM
+status_map:
+  open: Open
+  in_progress: In Progress
+  blocked: Blocked
+  deferred: Deferred
+  draft: Draft
+  pinned: Pinned
+  closed: Fixed
+type_map:
+  task: Task
+  bug: Bug
+  feature: Feature
+  epic: Epic
+  chore: Chore
+  docs: Docs
+  question: Question
+priority_map: { 0: Show-stopper, 1: Critical, 2: Major, 3: Normal, 4: Minor }
+deleted_state: "Won't fix"
+page_size: 100
