@@ -234,7 +234,7 @@ fn render_search_results(
             return Ok(());
         }
         OutputFormat::Csv => {
-            let fields = csv::parse_fields(list_args.fields.as_deref());
+            let fields = csv::parse_fields(list_args.fields.as_deref())?;
             let csv_output = csv::format_csv(&issues, &fields);
             print!("{csv_output}");
             return Ok(());

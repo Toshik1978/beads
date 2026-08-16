@@ -1025,6 +1025,24 @@ fn list_issues_with_counts_accurate_dependencies() {
     assert_eq!(storage.count_dependencies(&grandchild.id).unwrap(), 1); // grandchild depends on child1
 }
 
+const DROPPED_COLUMNS: &[&str] = &[
+    "assignee",
+    "estimated_minutes",
+    "closed_by_session",
+    "due_at",
+    "source_system",
+    "compaction_level",
+    "compacted_at",
+    "compacted_at_commit",
+    "original_size",
+    "sender",
+    "ephemeral",
+    "pinned",
+    "is_template",
+    "source_repo_path",
+    "agent_context",
+];
+
 /// No `WHERE` clause in the storage layer may still constrain a column schema
 /// v19 dropped.
 ///
@@ -1033,14 +1051,19 @@ fn list_issues_with_counts_accurate_dependencies() {
 /// disjunct that was constant-false against a `NOT NULL` column and cost
 /// partial-index use, or with `INDEXED BY` failed the query outright. Now that
 /// the column does not exist, the failure is louder and broader: any predicate
-/// naming `ephemeral`, `pinned` or `is_template` is a runtime `no such column`
-/// on the first query that reaches it, and `cargo check` cannot see it because
-/// these are SQL string literals.
+/// naming a dropped column is a runtime `no such column` on the first query
+/// that reaches it, and `cargo check` cannot see it because these are SQL
+/// string literals. Covers all fifteen columns schema v19 drops (see the
+/// `for column in [...]` list in `src/storage/schema.rs`'s v18 -> v19 arm),
+/// not just the three (`ephemeral`, `pinned`, `is_template`) that used to
+/// gate query predicates directly — the other twelve have the identical
+/// runtime failure mode if a predicate ever names them.
 ///
 /// Scoped to predicates (`col =`, `col IS`) rather than to the bare names so
 /// that `LEGACY_NULLABLE_FLAGS_DDL` — a deliberate legacy `CREATE TABLE`
-/// fixture that must keep declaring all three — does not trip it. Comments are
-/// exempt: several explain why the predicates are gone.
+/// fixture that must keep declaring `ephemeral`, `pinned` and `is_template` —
+/// does not trip it. Comments are exempt: several explain why the predicates
+/// are gone.
 #[test]
 fn dropped_flag_columns_stay_out_of_storage_sql_predicates() {
     let source = std::fs::read_to_string(
@@ -1048,14 +1071,10 @@ fn dropped_flag_columns_stay_out_of_storage_sql_predicates() {
     )
     .expect("src/storage/sqlite.rs must be readable");
 
-    let banned = [
-        "is_template =",
-        "is_template IS",
-        "ephemeral =",
-        "ephemeral IS",
-        "pinned =",
-        "pinned IS",
-    ];
+    let banned: Vec<String> = DROPPED_COLUMNS
+        .iter()
+        .flat_map(|column| [format!("{column} ="), format!("{column} IS")])
+        .collect();
 
     let offenders: Vec<String> = source
         .lines()
@@ -1064,16 +1083,17 @@ fn dropped_flag_columns_stay_out_of_storage_sql_predicates() {
             let trimmed = line.trim_start();
             !trimmed.starts_with("//")
                 && !trimmed.starts_with("///")
-                && banned.iter().any(|needle| line.contains(needle))
+                && banned.iter().any(|needle| line.contains(needle.as_str()))
         })
         .map(|(index, line)| format!("  src/storage/sqlite.rs:{}: {}", index + 1, line.trim()))
         .collect();
 
     assert!(
         offenders.is_empty(),
-        "`ephemeral`, `pinned` and `is_template` were dropped from the issues table in \
-         schema v19. A predicate naming one is a runtime `no such column`, invisible to \
-         `cargo check` because it lives in a SQL string literal:\n{}",
+        "the following columns were dropped from the issues table in schema v19: {}. A \
+         predicate naming one is a runtime `no such column`, invisible to `cargo check` \
+         because it lives in a SQL string literal:\n{}",
+        DROPPED_COLUMNS.join(", "),
         offenders.join("\n")
     );
 }

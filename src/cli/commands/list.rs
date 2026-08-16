@@ -226,7 +226,7 @@ fn execute_inner(
             stream_issues_with_counts(&ctx, storage, issues, use_full_relation_scan, page_meta)?;
         }
         OutputFormat::Csv => {
-            let fields = csv::parse_fields(args.fields.as_deref());
+            let fields = csv::parse_fields(args.fields.as_deref())?;
             let csv_output = csv::format_csv(&issues, &fields);
             print!("{csv_output}");
         }

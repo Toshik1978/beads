@@ -1399,9 +1399,12 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
         backfill_storage_null_in_default_columns(conn);
     }
 
-    // Note: source_repo and is_template column backfills are handled in
+    // Note: the source_repo column backfill is handled in
     // run_pre_schema_migrations() via ensure_columns(). Repeating ALTER TABLE
     // here can create duplicate column definitions on some engines.
+    // (is_template was backfilled the same way until schema v19 dropped the
+    // column outright; it is not in ISSUE_COLUMNS and nothing backfills it
+    // now.)
 
     // The v10 and v11 migrations added `source_repo_path` (beads#289) and
     // `agent_context` (beads#297) to `issues` for callers that reach

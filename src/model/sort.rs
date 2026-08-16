@@ -247,16 +247,18 @@ impl SortDirection {
 }
 
 /// How a rendered fragment takes its direction.
+///
+/// The only variant today is `Follow` ("use the key's direction"). A prior
+/// `ForceAsc` variant ("always ascending, whatever the key says", for a
+/// null-rank fragment that should sort last in both directions) existed for
+/// the assignee sort key alone and was removed along with that field
+/// (bds-b4f.2.6). Kept as an enum rather than dropped down to a plain
+/// direction so a future field that needs the same null-rank trick has
+/// somewhere to add the variant back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FragmentDirection {
     /// Use the key's direction.
     Follow,
-    /// Always ascending, whatever the key says. For a null-rank fragment that
-    /// should sort last in both directions, whatever field eventually needs
-    /// that. Currently unused: the assignee sort key was the only field that
-    /// needed it, and it was removed with the field (bds-b4f.2.6).
-    #[allow(dead_code)]
-    ForceAsc,
 }
 
 /// Build `CASE <column> WHEN 'a' THEN 0 … ELSE <custom> END` from a rank table.
@@ -378,15 +380,14 @@ impl SortSpec {
         let mut sql = String::from(" ORDER BY ");
         let mut first = true;
         for key in self.resolved(reverse) {
-            for (expression, mode) in key.field.sql_fragments().into_iter().flatten() {
+            for (expression, FragmentDirection::Follow) in
+                key.field.sql_fragments().into_iter().flatten()
+            {
                 if !first {
                     sql.push_str(", ");
                 }
                 first = false;
-                let direction = match mode {
-                    FragmentDirection::ForceAsc => SortDirection::Asc,
-                    FragmentDirection::Follow => key.direction,
-                };
+                let direction = key.direction;
                 let _ = write!(sql, "{expression} {}", direction.sql());
             }
         }
@@ -424,16 +425,13 @@ impl SortSpec {
 /// drift from the convenient one.
 fn compare_resolved(keys: &[SortKey], left: &Issue, right: &Issue) -> Ordering {
     for key in keys {
-        for (ordering, mode) in key
+        for (ordering, FragmentDirection::Follow) in key
             .field
             .compare_fragments(left, right)
             .into_iter()
             .flatten()
         {
-            let direction = match mode {
-                FragmentDirection::ForceAsc => SortDirection::Asc,
-                FragmentDirection::Follow => key.direction,
-            };
+            let direction = key.direction;
             let ordering = match direction {
                 SortDirection::Asc => ordering,
                 SortDirection::Desc => ordering.reverse(),

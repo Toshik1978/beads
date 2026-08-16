@@ -10745,8 +10745,10 @@ pub struct IssueUpdate {
     /// inserts it in the same transaction as the status change.
     pub transition_comment: Option<String>,
     /// Audited reason for explicitly bypassing workflow transition gates and
-    /// required fields. A non-empty value skips those checks for this issue and
-    /// records a `workflow_policy_bypassed` event in the same transaction.
+    /// required fields. A non-empty value skips those checks for this issue.
+    /// (It used to also record a `workflow_policy_bypassed` event, but the
+    /// events subsystem was removed in schema v17; the reason is no longer
+    /// recorded anywhere beyond skipping the checks.)
     pub workflow_policy_bypass_reason: Option<String>,
     /// If true, do not rebuild the blocked cache after update.
     /// Caller is responsible for rebuilding cache if needed.

@@ -1,7 +1,6 @@
 //! Ready command implementation.
 //!
-//! Shows issues ready to work on next: open, unblocked, not deferred, not pinned,
-//! not ephemeral.
+//! Shows issues ready to work on next: open, unblocked, not deferred.
 
 use super::{auto_import_external_projects_if_stale, resolve_issue_id};
 use crate::cli::{

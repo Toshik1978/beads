@@ -1392,6 +1392,62 @@ mod tests {
         );
     }
 
+    // These two restore, against `evaluate_transition_required_fields`
+    // (the surviving `workflow.required_fields` gate), the intent of
+    // `acceptance_criteria_ignores_section_headers_inside_fenced_code` and
+    // `acceptance_criteria_ignores_unchecked_boxes_inside_fenced_code`, which
+    // commit 098b379 deleted because their names named the removed
+    // close-policy gate. What they actually asserted — that a `- [ ]` inside
+    // a fenced code block is not a criterion — is still true here, and this
+    // was the only place in the repo that ever fed a fence to
+    // `update_code_fence` (bds-b4f review, I4).
+    #[test]
+    fn transition_required_fields_ignore_section_headers_inside_fenced_code() {
+        let mut workflow = Workflow::default();
+        workflow.required_fields.insert(
+            "in_progress -> in_review".to_string(),
+            vec![TransitionRequiredField::AcceptanceCriteria],
+        );
+        let criteria =
+            "```markdown\n## Acceptance Criteria\n- [ ] Example only\n```\n- [x] Real criterion\n";
+
+        assert!(
+            evaluate_transition_required_fields(
+                &workflow,
+                "bd-1",
+                Some("in_progress"),
+                "in_review",
+                Some(criteria),
+                None,
+            )
+            .is_empty(),
+            "an unchecked box inside a fenced example should not block the transition"
+        );
+    }
+
+    #[test]
+    fn transition_required_fields_ignore_unchecked_boxes_inside_fenced_code() {
+        let mut workflow = Workflow::default();
+        workflow.required_fields.insert(
+            "in_progress -> in_review".to_string(),
+            vec![TransitionRequiredField::AcceptanceCriteria],
+        );
+        let criteria = "- [x] Real criterion\n```sh\n- [ ] Example only\n```\n";
+
+        assert!(
+            evaluate_transition_required_fields(
+                &workflow,
+                "bd-1",
+                Some("in_progress"),
+                "in_review",
+                Some(criteria),
+                None,
+            )
+            .is_empty(),
+            "an unchecked box inside a fenced example should not block the transition"
+        );
+    }
+
     #[test]
     fn transition_required_fields_reject_malformed_multi_arrow_rule() {
         let mut workflow = Workflow {

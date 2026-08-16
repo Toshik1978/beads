@@ -39,7 +39,12 @@ product decision to stop carrying surface nobody used, not a dead-code sweep.
   carrying no generation marker at all: a record is `Issue`'s own derived
   `Serialize` output, nothing wrapped around it. A file written by a build
   that still stamped the marker imports cleanly — the key is simply an
-  unmodelled field, dropped on read with no error and no warning.
+  unmodelled field, dropped on read with no error and no warning. `br sync
+  --json` no longer reports `format_upgraded` or `format_upgraded_from` —
+  both were only meaningful when a file stamped with the marker was read —
+  and the `JsonlFormatTooNew` error variant (`JSONL_FORMAT_TOO_NEW` in
+  structured error output) is gone with it: there is no longer a version to
+  be too new.
 - **Fifteen never-populated fields leave `Issue`:** `compaction_level`,
   `compacted_at`, `compacted_at_commit`, `original_size`, `sender`,
   `ephemeral`, `pinned`, `is_template`, `estimated_minutes`, `due_at`,
@@ -56,7 +61,7 @@ product decision to stop carrying surface nobody used, not a dead-code sweep.
   removal so no `content_hash` moved before this step; v19 drops them and
   their indexes and recomputes every stored digest in the same transaction.
 
-### Two behavior changes that fall out of the column drop, not a redesign
+### Four behavior changes that fall out of the column drop, not a redesign
 
 - **`br stats`' "Pinned" count now counts only `Status::Pinned`.** It used to
   also count the boolean `pinned` column, which no workspace on this machine
@@ -67,19 +72,55 @@ product decision to stop carrying surface nobody used, not a dead-code sweep.
   its children's status; with the column gone, an epic that used to be flagged
   as a template is evaluated the same as any other epic once its children are
   closed.
+- **A legacy `is_template = 1` row is now visible in `list`, `search`,
+  `ready`, `stale` and `blocked`.** The flag gated nineteen SQL predicates
+  across those five paths; with the column gone, so is the filter. No CLI
+  path ever set `is_template`, so real exposure is close to zero — but it is
+  not exactly zero for a workspace where the flag was set by hand against the
+  SQLite file directly.
+- **`br list --format csv` and `br search --format csv` emit two fewer
+  columns.** `assignee` left `DEFAULT_FIELDS` (8 columns → 7) and `assignee` /
+  `due_at` left `ALL_FIELDS` along with the fields themselves; all three were
+  valid `--fields` names before this branch. An unrecognised `--fields` name
+  used to be dropped silently — `--fields assignee` alone produced an empty
+  header and an empty row at exit 0 — and is now a validation error instead.
 
-### Upgrading is one-way
+### The real hazard is a v18/v19 ping-pong, not a one-way upgrade
 
-Schema v19 migrates a workspace's `beads.db` irreversibly. Once it has run,
-an older `br` binary (v1.5.0 and earlier) cannot read that database again: it
-fails on the export path with `Database error: no such column: ephemeral`,
-and the failure mode is nasty rather than clean — the mutation succeeds in
-SQLite while the JSONL flush fails, so the workspace silently stops
-exporting from that point on. `beads.db` is gitignored and derived, so a
-teammate who pulls the new JSONL and rebuilds their own database is
-unaffected; the hazard is a single machine carrying two `br` binaries at
-once — an older release still on `PATH` alongside a newer build — pointed at
-the same already-migrated workspace.
+Measured directly against the released `br` 1.5.0 binary, on a workspace
+schema-v19 migrated by this release: reopening a v19 workspace with an older
+`br` does not fail to open it. Its `ensure_columns` step re-adds all fifteen
+dropped columns with `ALTER TABLE ADD COLUMN` — which appends at the end of
+the table, so the physical column order no longer matches
+`EXPECTED_ISSUE_COLUMN_ORDER` ([`src/storage/schema.rs`](src/storage/schema.rs),
+whose own doc comment names mis-ordered appends as the cause of "no such
+column" errors on older databases) — and stamps `user_version` back down to
+18 before the old binary does anything else. The old binary's own read then
+fails with `Database error: no such column: <one of the dropped columns>` —
+which column is named depends on which query the command runs first;
+`assignee`, on `br list --json` and `br show --json`, in the measurement
+here — but a *write* (`br create`, `br update`, and so on) goes through
+cleanly against the downgraded schema, JSONL flush included; there is no
+half-failure and no silently-stopped export. Reopen that same workspace with
+the new binary and it logs `Migrating database to schema version 19 (drop
+dead columns, rehash)`, converges the schema back to v19, and reads back
+everything the old binary wrote correctly.
+
+The real hazard is what that round trip costs, not that it can't be undone.
+Each direction rewrites the whole of `issues.jsonl` on its next flush, but not
+for the same reason. Going v18 → v19, schema v19's own migration exists to
+rebuild every stored `content_hash`, which is what marks every issue dirty.
+Going v19 → v18, the old binary never runs that (or any) rehash arm — it
+stamps `user_version` back to 18 directly — so the rewrite there comes from
+the serialized record shape differing instead: the old `Issue` still emits
+the fifteen removed fields, so every line it writes differs from the v19
+binary's, and the next flush is a full-file diff regardless of the cause.
+`beads.db`
+is gitignored and derived, so a teammate who only ever pulls the new JSONL and
+rebuilds their own database never sees any of this; the hazard is confined to
+a single machine that carries two `br` binaries at once — an older release
+still on `PATH` alongside a newer build — pointed at the same
+already-migrated workspace.
 
 ### ⚠ Breaking Changes
 

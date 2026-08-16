@@ -614,8 +614,9 @@ fn tombstone_excluded_by_default() {
 // was removed in bds-b4f.2.2: `is_template` was never populated through any
 // live write path, and with it gone there is no longer a public API that can
 // construct an `is_template = true` row to filter on. `ListFilters
-// ::include_templates` and its SQL predicates are unaffected and still
-// compile; there is simply nothing left that can make a row match them.
+// ::include_templates` itself is gone too (`rg -c include_templates src/` is
+// 0) — restoring this test needs a new API, not just an `is_template = true`
+// row.
 
 // ============================================================================
 // COMBINED FILTER TESTS

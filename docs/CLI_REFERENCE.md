@@ -769,10 +769,9 @@ br comments list <id> --json
 ```
 
 An `in_progress` issue is a reclaim candidate when `updated_at` is old and
-session metadata no longer points to an active worker, and recent comments or
-Agent Mail reservations do not show live work. Default thresholds are two
-hours for automated swarm claims and one business day for human or unclear
-claims.
+recent comments or Agent Mail reservations do not show live work. Default
+thresholds are two hours for automated swarm claims and one business day for
+human or unclear claims.
 
 Before reclaiming, add an audit comment with the evidence, then move it back:
 

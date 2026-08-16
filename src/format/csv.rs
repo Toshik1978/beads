@@ -3,6 +3,7 @@
 //! Provides CSV output for list/export commands. Handles proper escaping
 //! of fields containing commas, quotes, or newlines.
 
+use crate::error::{BeadsError, Result};
 use crate::model::Issue;
 use std::io::{self, Write};
 
@@ -88,15 +89,43 @@ pub fn get_field_value(issue: &Issue, field: &str) -> String {
 /// Parse a comma-separated list of field names.
 ///
 /// Returns the default fields if the input is empty.
-#[must_use]
-pub fn parse_fields(fields_arg: Option<&str>) -> Vec<&'static str> {
+///
+/// # Errors
+///
+/// Returns [`BeadsError::Validation`] if `fields_arg` names a field that is
+/// not in [`ALL_FIELDS`]. An unrecognised name used to be dropped silently —
+/// `--fields assignee` alone produced an empty header and an empty row at
+/// exit 0 once `assignee` stopped being a valid field — which turned a typo
+/// or a stale field name into a silently empty export rather than a loud
+/// failure.
+pub fn parse_fields(fields_arg: Option<&str>) -> Result<Vec<&'static str>> {
     match fields_arg {
-        Some(arg) if !arg.is_empty() => arg
-            .split(',')
-            .map(str::trim)
-            .filter_map(|f| ALL_FIELDS.iter().find(|&&af| af == f).copied())
-            .collect(),
-        _ => DEFAULT_FIELDS.to_vec(),
+        Some(arg) if !arg.is_empty() => {
+            let mut fields = Vec::new();
+            let mut unrecognized = Vec::new();
+            for raw in arg.split(',').map(str::trim) {
+                if raw.is_empty() {
+                    continue;
+                }
+                match ALL_FIELDS.iter().find(|&&af| af == raw) {
+                    Some(&field) => fields.push(field),
+                    None => unrecognized.push(raw.to_string()),
+                }
+            }
+            if unrecognized.is_empty() {
+                Ok(fields)
+            } else {
+                Err(BeadsError::Validation {
+                    field: "--fields".to_string(),
+                    reason: format!(
+                        "unrecognized field(s): {}. Valid fields: {}",
+                        unrecognized.join(", "),
+                        ALL_FIELDS.join(", ")
+                    ),
+                })
+            }
+        }
+        _ => Ok(DEFAULT_FIELDS.to_vec()),
     }
 }
 
@@ -228,20 +257,47 @@ mod tests {
 
     #[test]
     fn test_parse_fields_default() {
-        let fields = parse_fields(None);
+        let fields = parse_fields(None).unwrap();
         assert_eq!(fields, DEFAULT_FIELDS);
     }
 
     #[test]
     fn test_parse_fields_custom() {
-        let fields = parse_fields(Some("id,title,status"));
+        let fields = parse_fields(Some("id,title,status")).unwrap();
         assert_eq!(fields, vec!["id", "title", "status"]);
     }
 
     #[test]
-    fn test_parse_fields_filters_invalid() {
-        let fields = parse_fields(Some("id,invalid,title"));
-        assert_eq!(fields, vec!["id", "title"]);
+    fn test_parse_fields_tolerates_empty_segments() {
+        // A trailing or doubled comma trims to "", which is not in
+        // ALL_FIELDS. That must still be tolerated (skipped), consistent
+        // with `--fields ""` falling through to DEFAULT_FIELDS, rather than
+        // rejected as an unrecognized field named "".
+        let trailing = parse_fields(Some("id,")).unwrap();
+        assert_eq!(trailing, vec!["id"]);
+
+        let doubled = parse_fields(Some("id,,title")).unwrap();
+        assert_eq!(doubled, vec!["id", "title"]);
+    }
+
+    #[test]
+    fn test_parse_fields_rejects_unrecognized_field() {
+        // bds-b4f review: an unrecognized `--fields` name used to be dropped
+        // silently by a `filter_map`, which is how a stale field name (e.g.
+        // `assignee`, valid before this branch) turned into a silently
+        // truncated or empty CSV export at exit 0. It must now fail loud.
+        let err = parse_fields(Some("id,invalid,title")).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("invalid"), "message was: {message}");
+    }
+
+    #[test]
+    fn test_parse_fields_rejects_field_removed_by_bds_b4f() {
+        // `assignee` and `due_at` were valid `--fields` names before bds-b4f
+        // removed the `Issue` fields behind them. A caller still naming them
+        // must get a validation error, not a quietly narrower CSV.
+        assert!(parse_fields(Some("assignee")).is_err());
+        assert!(parse_fields(Some("id,title,due_at")).is_err());
     }
 
     #[test]
