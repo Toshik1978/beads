@@ -153,6 +153,52 @@ pub struct CommentWork {
     pub to_pull: Vec<crate::remote::comments::RemoteComment>,
 }
 
+/// Which half of a bidirectional plan a rendering covers.
+///
+/// One `ReconcilePlan` describes both directions, and `br remote status`
+/// prints all of it. `pull` and `push` each execute one direction, and
+/// rendering the whole plan under either is worse than noise: a bare
+/// `br remote pull` opened with `create 171 issue(s)` — naming work only a
+/// push performs — and `br remote sync`, being `pull` then `push`, printed
+/// that same 171-line list twice before writing anything.
+///
+/// The sections partition cleanly. Creates, link changes, tombstones and
+/// unmapped locals are push work; adoptions and refused adoptions are pull
+/// work; field and comment changes carry a per-entry [`Direction`] and split
+/// along it. Dangling refs, out-of-scope beads, unmirrored relations and the
+/// standing notes belong to neither direction and are shown under both,
+/// because each is a standing fact about the pairing rather than pending
+/// work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanScope {
+    /// Everything, in both directions. What `br remote status` prints.
+    Both,
+    /// Only what `br remote push` would do.
+    Push,
+    /// Only what `br remote pull` would do.
+    Pull,
+}
+
+impl PlanScope {
+    /// Whether a change resolving this way belongs in this rendering.
+    const fn covers(self, direction: Direction) -> bool {
+        matches!(
+            (self, direction),
+            (Self::Both, _) | (Self::Push, Direction::Push) | (Self::Pull, Direction::Pull)
+        )
+    }
+
+    /// Whether push-only sections belong in this rendering.
+    const fn shows_push(self) -> bool {
+        matches!(self, Self::Both | Self::Push)
+    }
+
+    /// Whether pull-only sections belong in this rendering.
+    const fn shows_pull(self) -> bool {
+        matches!(self, Self::Both | Self::Pull)
+    }
+}
+
 /// Everything a run would do.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ReconcilePlan {
@@ -189,15 +235,34 @@ impl ReconcilePlan {
     /// executes it yet.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.field_changes.is_empty()
-            && self.link_changes.is_empty()
-            && self.creates.is_empty()
-            && self.adoptions.is_empty()
-            && self.refused_adoptions.is_empty()
-            && self.dangling.is_empty()
-            && self.comment_changes.is_empty()
-            && self.unmapped_local.is_empty()
-            && self.tombstoned.is_empty()
+        self.is_empty_for(PlanScope::Both)
+    }
+
+    /// [`ReconcilePlan::is_empty`], restricted to one direction's work.
+    ///
+    /// This is what decides whether a scoped rendering ends with "nothing to
+    /// do", so it must count exactly the sections that rendering shows —
+    /// otherwise a `pull` with only push work pending would print no sections
+    /// and no closing line either, which reads as output that got truncated.
+    #[must_use]
+    pub fn is_empty_for(&self, scope: PlanScope) -> bool {
+        let push_work = scope.shows_push()
+            && !(self.creates.is_empty()
+                && self.link_changes.is_empty()
+                && self.tombstoned.is_empty()
+                && self.unmapped_local.is_empty());
+        let pull_work =
+            scope.shows_pull() && !(self.adoptions.is_empty() && self.refused_adoptions.is_empty());
+        let directed = self
+            .field_changes
+            .iter()
+            .flat_map(|issue| &issue.changes)
+            .any(|change| scope.covers(change.direction))
+            || self
+                .comment_changes
+                .iter()
+                .any(|entry| scope.covers(entry.direction));
+        !(push_work || pull_work || directed || !self.dangling.is_empty())
     }
 
     /// The human rendering, one section per kind of work.
@@ -206,22 +271,45 @@ impl ReconcilePlan {
     /// where a remote edit overwrites a local value, so it is never allowed
     /// to be silent.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn render(&self) -> String {
+        self.render_scoped(PlanScope::Both)
+    }
+
+    /// [`ReconcilePlan::render`], restricted to one direction's work.
+    ///
+    /// See [`PlanScope`] for which section belongs to which direction.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn render_scoped(&self, scope: PlanScope) -> String {
         let mut out = String::new();
 
-        if !self.creates.is_empty() {
+        if scope.shows_push() && !self.creates.is_empty() {
             let _ = writeln!(out, "create {} issue(s):", self.creates.len());
             for bead_id in &self.creates {
                 let _ = writeln!(out, "  {bead_id}");
             }
         }
 
-        if !self.field_changes.is_empty() {
-            let _ = writeln!(out, "update {} issue(s):", self.field_changes.len());
-            for issue in &self.field_changes {
+        // Filtered before the header is written: the count names the issues
+        // this rendering is about to list, so computing it from the unfiltered
+        // vector would announce a number the lines below do not add up to.
+        let field_changes: Vec<(&IssueFieldPlan, Vec<&FieldChange>)> = self
+            .field_changes
+            .iter()
+            .filter_map(|issue| {
+                let changes: Vec<&FieldChange> = issue
+                    .changes
+                    .iter()
+                    .filter(|change| scope.covers(change.direction))
+                    .collect();
+                (!changes.is_empty()).then_some((issue, changes))
+            })
+            .collect();
+        if !field_changes.is_empty() {
+            let _ = writeln!(out, "update {} issue(s):", field_changes.len());
+            for (issue, changes) in field_changes {
                 let _ = writeln!(out, "  {} → {}", issue.bead_id, issue.remote_id);
-                for change in &issue.changes {
+                for change in changes {
                     let marker = match change.direction {
                         Direction::Push => "push",
                         Direction::Pull => "YouTrack wins",
@@ -237,7 +325,7 @@ impl ReconcilePlan {
             }
         }
 
-        if !self.link_changes.is_empty() {
+        if scope.shows_push() && !self.link_changes.is_empty() {
             let _ = writeln!(out, "link changes:");
             for issue in &self.link_changes {
                 let _ = writeln!(out, "  {} → {}", issue.bead_id, issue.remote_id);
@@ -247,9 +335,14 @@ impl ReconcilePlan {
             }
         }
 
-        if !self.comment_changes.is_empty() {
+        let comment_changes: Vec<&CommentPlan> = self
+            .comment_changes
+            .iter()
+            .filter(|entry| scope.covers(entry.direction))
+            .collect();
+        if !comment_changes.is_empty() {
             let _ = writeln!(out, "comments:");
-            for entry in &self.comment_changes {
+            for entry in comment_changes {
                 let marker = match entry.direction {
                     Direction::Push => "push",
                     Direction::Pull => "YouTrack wins",
@@ -262,7 +355,7 @@ impl ReconcilePlan {
             }
         }
 
-        if !self.adoptions.is_empty() {
+        if scope.shows_pull() && !self.adoptions.is_empty() {
             let _ = writeln!(
                 out,
                 "adoption candidates ({} issue(s) no bead claims):",
@@ -278,7 +371,7 @@ impl ReconcilePlan {
             }
         }
 
-        if !self.refused_adoptions.is_empty() {
+        if scope.shows_pull() && !self.refused_adoptions.is_empty() {
             let _ = writeln!(
                 out,
                 "refused adoptions (br cannot read these issues with this remote.yaml):"
@@ -288,7 +381,7 @@ impl ReconcilePlan {
             }
         }
 
-        if !self.tombstoned.is_empty() {
+        if scope.shows_push() && !self.tombstoned.is_empty() {
             let _ = writeln!(
                 out,
                 "deleted beads still mirrored (the tombstone rule owns these; no field change is planned):"
@@ -308,7 +401,7 @@ impl ReconcilePlan {
             }
         }
 
-        if !self.unmapped_local.is_empty() {
+        if scope.shows_push() && !self.unmapped_local.is_empty() {
             let _ = writeln!(
                 out,
                 "unmapped local values (a push would refuse until remote.yaml covers them):"
@@ -349,7 +442,7 @@ impl ReconcilePlan {
             }
         }
 
-        if self.is_empty() {
+        if self.is_empty_for(scope) {
             let _ = writeln!(
                 out,
                 "the mirror already matches this workspace on everything br reconciles today; \
@@ -1038,5 +1131,134 @@ mod tests {
         );
         assert!(plan.comment_changes.is_empty());
         assert!(plan.is_empty());
+    }
+
+    /// A plan carrying work in both directions at once: a create only a push
+    /// performs, an adoption candidate only a pull performs, and one paired
+    /// issue whose two field changes resolve opposite ways.
+    fn two_directional_plan() -> ReconcilePlan {
+        ReconcilePlan {
+            creates: vec!["bds-new".into()],
+            adoptions: vec![Adoption {
+                remote_id: "EM-9".into(),
+                summary: "Unclaimed".into(),
+                beads_id: None,
+            }],
+            field_changes: vec![IssueFieldPlan {
+                bead_id: "bds-1".into(),
+                remote_id: "EM-1".into(),
+                changes: vec![
+                    FieldChange {
+                        field: crate::remote::diff::Field::Title,
+                        direction: Direction::Push,
+                        local: "local title".into(),
+                        remote: "remote title".into(),
+                    },
+                    FieldChange {
+                        field: crate::remote::diff::Field::State,
+                        direction: Direction::Pull,
+                        local: "open".into(),
+                        remote: "in_progress".into(),
+                    },
+                ],
+            }],
+            ..ReconcilePlan::default()
+        }
+    }
+
+    #[test]
+    fn a_push_rendering_omits_the_work_only_a_pull_performs() {
+        let text = two_directional_plan().render_scoped(PlanScope::Push);
+        assert!(text.contains("create 1 issue(s)"), "{text}");
+        assert!(
+            text.contains("title: local title → remote title [push]"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("adoption candidates"),
+            "a push adopts nothing: {text}"
+        );
+        assert!(
+            !text.contains("YouTrack wins"),
+            "a push never resolves a field the remote's way: {text}"
+        );
+    }
+
+    #[test]
+    fn a_pull_rendering_omits_the_work_only_a_push_performs() {
+        let text = two_directional_plan().render_scoped(PlanScope::Pull);
+        assert!(text.contains("adoption candidates"), "{text}");
+        assert!(
+            text.contains("state: open → in_progress [YouTrack wins]"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("create 1 issue(s)"),
+            "a pull creates no remote issue: {text}"
+        );
+        assert!(
+            !text.contains("[push]"),
+            "a pull writes nothing to the remote: {text}"
+        );
+    }
+
+    #[test]
+    fn a_scoped_rendering_counts_only_the_issues_it_goes_on_to_list() {
+        // The header is written from the filtered set, not the whole vector.
+        // Announcing "update 2 issue(s)" and then listing one is the failure
+        // this pins: a reader cannot tell a filtered rendering from a
+        // truncated one.
+        let mut plan = two_directional_plan();
+        plan.field_changes.push(IssueFieldPlan {
+            bead_id: "bds-2".into(),
+            remote_id: "EM-2".into(),
+            changes: vec![FieldChange {
+                field: crate::remote::diff::Field::State,
+                direction: Direction::Pull,
+                local: "open".into(),
+                remote: "closed".into(),
+            }],
+        });
+        let text = plan.render_scoped(PlanScope::Push);
+        assert!(text.contains("update 1 issue(s)"), "{text}");
+        assert!(!text.contains("bds-2"), "{text}");
+        assert!(
+            plan.render_scoped(PlanScope::Pull)
+                .contains("update 2 issue(s)"),
+            "both pull-direction issues belong to the pull half"
+        );
+    }
+
+    #[test]
+    fn a_direction_with_no_work_still_closes_with_nothing_to_do() {
+        // Push-only work must not leave `br remote pull` printing no sections
+        // and no closing line either, which reads as truncated output.
+        let plan = ReconcilePlan {
+            creates: vec!["bds-new".into()],
+            ..ReconcilePlan::default()
+        };
+        assert!(!plan.is_empty(), "the plan as a whole has work");
+        assert!(plan.is_empty_for(PlanScope::Pull));
+        assert!(!plan.is_empty_for(PlanScope::Push));
+        assert!(
+            plan.render_scoped(PlanScope::Pull)
+                .contains("nothing to do"),
+            "{}",
+            plan.render_scoped(PlanScope::Pull)
+        );
+    }
+
+    #[test]
+    fn the_unscoped_rendering_is_unchanged_and_still_shows_both_halves() {
+        // `br remote status` reports on the whole plan and must keep doing so.
+        let plan = two_directional_plan();
+        assert_eq!(plan.render(), plan.render_scoped(PlanScope::Both));
+        let text = plan.render();
+        assert!(text.contains("create 1 issue(s)"), "{text}");
+        assert!(text.contains("adoption candidates"), "{text}");
+        assert!(
+            text.contains("[push]") && text.contains("YouTrack wins"),
+            "{text}"
+        );
     }
 }

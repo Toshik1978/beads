@@ -189,15 +189,30 @@ fn e2e_dry_run_writes_nothing_on_every_mutating_verb() {
     );
     write_remote_config(&beads_dir(&workspace), &server.base_url());
 
-    for (label, args) in [
-        ("pull_dry", vec!["remote", "pull", "--dry-run"]),
+    // Each verb prints its own direction's work and only that. `pull` creates
+    // nothing in YouTrack, so opening its plan with `create 1 issue(s)` named
+    // work it would never do; `push` adopts nothing, so listing adoption
+    // candidates under it did the same in reverse. `sync` is both halves, so
+    // it prints both — each exactly once, which is the whole point: it used to
+    // render the entire plan twice, once per half.
+    for (label, args, expected, forbidden) in [
+        (
+            "pull_dry",
+            vec!["remote", "pull", "--dry-run"],
+            vec!["adoption candidates"],
+            vec!["create 1 issue(s)"],
+        ),
         (
             "push_dry",
             vec!["remote", "push", "--confirm-initial", "--dry-run"],
+            vec!["create 1 issue(s)"],
+            vec!["adoption candidates"],
         ),
         (
             "sync_dry",
             vec!["remote", "sync", "--confirm-initial", "--dry-run"],
+            vec!["adoption candidates", "create 1 issue(s)"],
+            vec![],
         ),
     ] {
         let run = run_br_with_env(&workspace, args, TOKEN, label);
@@ -212,11 +227,21 @@ fn e2e_dry_run_writes_nothing_on_every_mutating_verb() {
             "{label} must say so: {}",
             run.stdout
         );
-        assert!(
-            run.stdout.contains("create 1 issue(s)") && run.stdout.contains("adoption candidates"),
-            "{label} must print the plan it declined to run: {}",
-            run.stdout
-        );
+        for section in expected {
+            assert_eq!(
+                run.stdout.matches(section).count(),
+                1,
+                "{label} must print '{section}' exactly once: {}",
+                run.stdout
+            );
+        }
+        for section in forbidden {
+            assert!(
+                !run.stdout.contains(section),
+                "{label} must not print '{section}', which is the other direction's work: {}",
+                run.stdout
+            );
+        }
         assert!(
             server.write_requests().is_empty(),
             "{label} must issue zero writes, not few: {:?}",

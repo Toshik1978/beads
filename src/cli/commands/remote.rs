@@ -33,7 +33,7 @@ use crate::remote::execute::{
     execute_push, first_run_gate, reconcile,
 };
 use crate::remote::http::HttpClient;
-use crate::remote::plan::ReconcilePlan;
+use crate::remote::plan::{PlanScope, ReconcilePlan};
 use crate::remote::youtrack::admin::AdminClient;
 use crate::remote::youtrack::init::{self, InitOptions, InitReport, WorkspaceVocabulary};
 use crate::remote::youtrack::links::LinkTypes;
@@ -171,7 +171,7 @@ fn pull(
     ctx: &OutputContext,
 ) -> Result<Option<PullReport>> {
     let (http, _types, run) = read_both_sides(cfg, storage)?;
-    print_plan(&run.plan, ctx);
+    print_plan(&run.plan, PlanScope::Pull, ctx);
     // THE dry-run check for this verb: one branch, at the single point where
     // execution begins, so a step added to `execute_pull` cannot forget it.
     if dry_run {
@@ -203,7 +203,7 @@ fn push(
     // path that deletes a YouTrack issue — so the gate comes before any write
     // and after the plan, which is printed so the refusal shows what it
     // refused.
-    print_plan(&run.plan, ctx);
+    print_plan(&run.plan, PlanScope::Push, ctx);
     first_run_gate(&run.beads, cfg, confirm_initial).map_err(|refusal| {
         BeadsError::ExternalCommand {
             command: "br remote push".to_string(),
@@ -257,8 +257,8 @@ fn refuse_unmapped_locals(plan: &ReconcilePlan) -> Result<()> {
     })
 }
 
-fn print_plan(plan: &ReconcilePlan, ctx: &OutputContext) {
-    for line in plan.render().lines() {
+fn print_plan(plan: &ReconcilePlan, scope: PlanScope, ctx: &OutputContext) {
+    for line in plan.render_scoped(scope).lines() {
         ctx.print_line(line);
     }
 }
