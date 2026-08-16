@@ -188,13 +188,34 @@ impl HttpClient {
         self.send("POST", path, Some(body), entity)
     }
 
-    /// DELETE `path`.
+    /// DELETE the link identified by `link_id`, running from `from_readable`
+    /// to `to_internal_id`.
+    ///
+    /// This is the only `DELETE` this client exposes, and on purpose: an
+    /// earlier revision had a general-purpose `delete(path, entity)` any
+    /// caller could point at an issue path, and nothing but convention kept
+    /// it pointed at links instead. `br remote` never deletes a mirrored
+    /// issue (`src/remote/tombstone.rs`), so the client itself now makes that
+    /// true by construction rather than by every caller remembering not to
+    /// — link removal is the one delete this mirror performs, this method
+    /// builds that one path internally, and there is no other way to reach
+    /// `DELETE` through this type.
+    ///
+    /// `to_internal_id` **must** be the linked issue's internal database id
+    /// (e.g. `"3-24"`), not its `idReadable` (e.g. `"EM-5"`) — see
+    /// `youtrack::links::link_remove`'s doc comment for why.
     ///
     /// # Errors
     /// As `get_json`.
-    pub fn delete(&self, path: &str, entity: &str) -> Result<(), RemoteError> {
+    pub fn delete_issue_link(
+        &self,
+        from_readable: &str,
+        link_id: &str,
+        to_internal_id: &str,
+    ) -> Result<(), RemoteError> {
+        let path = format!("/api/issues/{from_readable}/links/{link_id}/issues/{to_internal_id}");
         self.writes.fetch_add(1, Ordering::Relaxed);
-        self.send("DELETE", path, None, entity).map(|_| ())
+        self.send("DELETE", &path, None, "issue link").map(|_| ())
     }
 
     fn send(
@@ -500,7 +521,12 @@ mod tests {
         let server = MockServer::start();
         server.on("GET", "/api/issues", 200, r#"[{"id":"3-1"}]"#);
         server.on("POST", "/api/issues", 200, r#"{"idReadable":"EM-1"}"#);
-        server.on("DELETE", "/api/issueLinks/EM-5", 200, "");
+        server.on(
+            "DELETE",
+            "/api/issues/EM-5/links/173-1t/issues/3-9",
+            200,
+            "",
+        );
         let http = client(&server, RetryPolicy::none());
 
         http.get_json("/api/issues", "issue").expect("get");
@@ -512,7 +538,8 @@ mod tests {
             .expect("post");
         assert_eq!(http.write_count(), 1);
 
-        http.delete("/api/issueLinks/EM-5", "link").expect("delete");
+        http.delete_issue_link("EM-5", "173-1t", "3-9")
+            .expect("delete");
         assert_eq!(
             http.write_count(),
             2,

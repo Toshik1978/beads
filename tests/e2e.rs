@@ -81,6 +81,8 @@ mod ready_limit;
 mod relations;
 #[path = "e2e/remote_init.rs"]
 mod remote_init;
+#[path = "e2e/remote_rename.rs"]
+mod remote_rename;
 #[path = "e2e/remote_status.rs"]
 mod remote_status;
 #[path = "e2e/rename.rs"]

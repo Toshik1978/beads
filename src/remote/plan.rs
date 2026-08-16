@@ -78,8 +78,10 @@ pub struct UnmirroredLink {
 /// Its field diff is deliberately not computed: `tombstone` has no
 /// `status_map` entry (the mirrored-status list excludes it on purpose), so a
 /// diff would emit `state: tombstone → open [push]` and a push would then
-/// fail on a value that cannot be mapped. Deletion semantics belong to the
-/// tombstone rule; until it lands, these are named and left alone.
+/// fail on a value that cannot be mapped. Deletion semantics belong to
+/// [`crate::remote::tombstone`], which classifies each of these bead ids as a
+/// rename forward or a genuine deletion by `former_ids` membership — see
+/// [`crate::remote::tombstone::plan_tombstones`].
 #[derive(Debug, Clone, Serialize)]
 pub struct TombstonedPair {
     pub bead_id: String,
@@ -127,7 +129,10 @@ pub struct ReconcilePlan {
     pub out_of_scope: Vec<String>,
     pub comment_changes: Vec<CommentPlan>,
     pub unmapped_local: Vec<UnmappedLocal>,
-    /// Paired beads that have been deleted locally. Named, never diffed.
+    /// Paired beads that have been deleted locally. Named, never diffed; see
+    /// [`crate::remote::tombstone::plan_tombstones`] for what to do about
+    /// each one — join its `Delete` entries against this field by `bead_id`
+    /// to find the `remote_id` to act on.
     pub tombstoned: Vec<TombstonedPair>,
     /// Dependency rows with no YouTrack equivalent. Informational, permanent.
     pub unmirrored_links: Vec<UnmirroredLink>,

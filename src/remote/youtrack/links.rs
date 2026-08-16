@@ -168,8 +168,7 @@ pub fn link_remove(
     link_id: &str,
     to_internal_id: &str,
 ) -> Result<(), RemoteError> {
-    let path = format!("/api/issues/{from_readable}/links/{link_id}/issues/{to_internal_id}");
-    http.delete(&path, "issue link")
+    http.delete_issue_link(from_readable, link_id, to_internal_id)
 }
 
 /// Read every non-empty link bucket out of a fetched issue's `links` array.

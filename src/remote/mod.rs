@@ -12,4 +12,5 @@ pub mod link_diff;
 pub mod model;
 pub mod plan;
 pub mod reconcile;
+pub mod tombstone;
 pub mod youtrack;
