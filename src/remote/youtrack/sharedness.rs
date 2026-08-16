@@ -22,8 +22,10 @@ use crate::remote::error::RemoteError;
 use crate::remote::youtrack::admin::{AdminClient, json_array, json_str};
 use std::collections::{BTreeMap, BTreeSet};
 
-const SCAN_PATH: &str = "/api/admin/customFieldSettings/customFields\
-?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500";
+const SCAN_FIELDS: &str = "id,name,instances(id,project(shortName),bundle(id,name))";
+
+/// Page size for [`AdminClient::scan_bundle_usage`].
+const SCAN_PAGE_SIZE: u32 = 500;
 
 /// One `(field, project)` pair that uses a bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,41 +116,68 @@ impl BundleUsage {
 }
 
 impl AdminClient {
-    /// Read the complete bundle-to-user map in one request.
+    /// Read the complete bundle-to-user map, paged.
+    ///
+    /// An unpaginated `$top=500` read here fails in the one direction this
+    /// scan exists to prevent: a bundle whose only user is a field past the
+    /// first page would be missing from `usage.users` exactly as if it had
+    /// no users at all, and `BundleUsage::verdict` reports that as
+    /// `Unavailable`, not `Private` — so the immediate effect is a spurious
+    /// refusal, not a wrongly-permitted write. This loops on `$skip`/`$top`
+    /// the same way `fetch::fetch_snapshot` does, stopping on the first short
+    /// page, so a truncated-looking absence never reaches `verdict` at all:
+    /// what it sees is either a *complete* scan or `Err` from this method
+    /// (which callers convert to `BundleUsage::unavailable_from`), never a
+    /// partial one silently passed off as whole. It carries no sort clause:
+    /// the field/instance list this scans is a small, effectively static
+    /// collection for the life of one run, not the issue list
+    /// `fetch::fetch_snapshot` is guarding against concurrent edits to.
     ///
     /// # Errors
-    /// Returns `RemoteError` if the request fails. Callers must convert that
-    /// into `BundleUsage::unavailable_from` rather than proceeding — a scan
-    /// the token cannot complete is not evidence of privacy.
+    /// Returns `RemoteError` if any page's request fails. Callers must
+    /// convert that into `BundleUsage::unavailable_from` rather than
+    /// proceeding — a scan the token cannot complete is not evidence of
+    /// privacy.
     pub fn scan_bundle_usage(&self) -> Result<BundleUsage, RemoteError> {
-        let value = self.http().get_json(SCAN_PATH, "bundle usage scan")?;
         let mut usage = BundleUsage::default();
-        for field in json_array(Some(&value)) {
-            let field_name = json_str(field, "name");
-            for instance in json_array(field.get("instances")) {
-                let Some(bundle_id) = instance.get("bundle").map(|b| json_str(b, "id")) else {
-                    continue;
-                };
-                if bundle_id.is_empty() {
-                    continue;
+        let mut skip = 0_u32;
+        loop {
+            let path = format!(
+                "/api/admin/customFieldSettings/customFields?fields={SCAN_FIELDS}&$skip={skip}&$top={SCAN_PAGE_SIZE}"
+            );
+            let value = self.http().get_json(&path, "bundle usage scan")?;
+            let page = json_array(Some(&value));
+            let count = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            for field in page {
+                let field_name = json_str(field, "name");
+                for instance in json_array(field.get("instances")) {
+                    let Some(bundle_id) = instance.get("bundle").map(|b| json_str(b, "id")) else {
+                        continue;
+                    };
+                    if bundle_id.is_empty() {
+                        continue;
+                    }
+                    let project = instance
+                        .get("project")
+                        .map(|p| json_str(p, "shortName"))
+                        .unwrap_or_default();
+                    usage.projects_seen.insert(project.to_string());
+                    usage
+                        .users
+                        .entry(bundle_id.to_string())
+                        .or_default()
+                        .push(BundleUser {
+                            field_name: field_name.to_string(),
+                            project_short_name: project.to_string(),
+                            instance_id: json_str(instance, "id").to_string(),
+                        });
                 }
-                let project = instance
-                    .get("project")
-                    .map(|p| json_str(p, "shortName"))
-                    .unwrap_or_default();
-                usage.projects_seen.insert(project.to_string());
-                usage
-                    .users
-                    .entry(bundle_id.to_string())
-                    .or_default()
-                    .push(BundleUser {
-                        field_name: field_name.to_string(),
-                        project_short_name: project.to_string(),
-                        instance_id: json_str(instance, "id").to_string(),
-                    });
             }
+            if count < SCAN_PAGE_SIZE {
+                return Ok(usage);
+            }
+            skip += SCAN_PAGE_SIZE;
         }
-        Ok(usage)
     }
 }
 
@@ -159,7 +188,7 @@ mod tests {
     use crate::remote::youtrack::admin::AdminClient;
     use test_support::mock_http::MockServer;
 
-    const SCAN_PATH: &str = "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500";
+    const SCAN_PATH: &str = "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=0&$top=500";
 
     fn admin(server: &MockServer) -> AdminClient {
         AdminClient::new(HttpClient::new(
@@ -290,5 +319,102 @@ mod tests {
 
         let usage = admin(&server).scan_bundle_usage().expect("scan");
         assert!(usage.projects_seen.contains("EM"));
+    }
+
+    #[test]
+    fn a_bundle_used_only_by_a_field_past_the_first_page_is_still_seen() {
+        // The original bug: an unpaginated `$top=500` scan made a bundle
+        // whose only user lived past the first page indistinguishable from a
+        // bundle with no users at all — `verdict` reports both as
+        // `Unavailable`, a spurious refusal rather than the correct `Shared`
+        // answer. This pins that the scan itself now pages, and that a
+        // second-page user is counted exactly as a first-page one would be.
+        let server = MockServer::start();
+        let first_page: Vec<_> = (0..500)
+            .map(|n| {
+                serde_json::json!({"id": format!("161-{n}"), "name": format!("Field {n}"),
+                "instances": []})
+            })
+            .collect();
+        server.on(
+            "GET",
+            SCAN_PATH,
+            200,
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on(
+            "GET",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=500&$top=500",
+            200,
+            &serde_json::json!([
+                {"id":"161-999","name":"Type","instances":[
+                    {"id":"189-8","project":{"shortName":"EM"},"bundle":{"id":"163-1","name":"Types"}},
+                    {"id":"189-80","project":{"shortName":"OTHER"},"bundle":{"id":"163-1","name":"Types"}}]}
+            ])
+            .to_string(),
+        );
+
+        let usage = admin(&server)
+            .scan_bundle_usage()
+            .expect("scan must page past the boundary");
+        match usage.verdict("163-1", "Type", "EM") {
+            Sharedness::Shared { others } => assert!(
+                others.iter().any(|o| o.contains("OTHER")),
+                "the second-page user must be counted: {others:?}"
+            ),
+            other => panic!(
+                "expected Shared from a user on the second page, got {other:?} \
+                 (a truncated scan would report Unavailable instead)"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_bundles_sole_user_on_the_second_page_makes_it_private_not_unavailable() {
+        // The direction the previous test does not cover, and the one that
+        // actually licenses a write: a bundle whose *only* user lives past
+        // the first page. Before pagination that read as no user at all —
+        // `Unavailable`, a refusal — which was at least safe. A scan that
+        // pages but still gets this wrong in the other direction would be
+        // worse than the bug it replaced: it would let `--allow-shared-bundle`
+        // sit unnecessary and a plain mutating write proceed against a bundle
+        // whose one real user was simply on a later page, not because it
+        // is genuinely private. This pins that a sole second-page user still
+        // resolves to `Private`, the same as a sole first-page user would.
+        let server = MockServer::start();
+        let first_page: Vec<_> = (0..500)
+            .map(|n| {
+                serde_json::json!({"id": format!("161-{n}"), "name": format!("Field {n}"),
+                "instances": []})
+            })
+            .collect();
+        server.on(
+            "GET",
+            SCAN_PATH,
+            200,
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on(
+            "GET",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=500&$top=500",
+            200,
+            &serde_json::json!([
+                {"id":"161-999","name":"Type","instances":[
+                    {"id":"189-8","project":{"shortName":"EM"},"bundle":{"id":"163-1","name":"Types"}}]}
+            ])
+            .to_string(),
+        );
+
+        let usage = admin(&server)
+            .scan_bundle_usage()
+            .expect("scan must page past the boundary");
+        assert_eq!(
+            usage.verdict("163-1", "Type", "EM"),
+            Sharedness::Private,
+            "a sole user found only on the second page is still exactly one user, \
+             so the bundle is private — reporting Unavailable here would be a \
+             regression from the pre-pagination behaviour, and reporting Shared \
+             would license a write the bundle's real usage does not justify"
+        );
     }
 }

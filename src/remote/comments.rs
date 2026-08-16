@@ -67,10 +67,8 @@ use std::collections::HashSet;
 /// integration user).
 const COMMENT_FIELDS: &str = "id,text,author(login),created";
 
-/// Page size for the comment fetch. There is no paging loop behind it — a
-/// response this large is refused rather than silently truncated, so the
-/// "one page is always enough" assumption is enforced, not merely hoped for.
-/// See `fetch_comments`.
+/// Page size for the comment fetch, and the threshold `fetch_comments` pages
+/// past rather than trusting as complete. See `fetch_comments`.
 const COMMENT_PAGE_SIZE: u32 = 500;
 
 /// The leading line every comment br pushes carries, so a later fetch can
@@ -124,42 +122,48 @@ pub struct CommentPlan {
     pub to_pull: Vec<RemoteComment>,
 }
 
-/// Fetch every comment on `id_readable`.
+/// Fetch every comment on `id_readable`, paged.
+///
+/// An issue with exactly `COMMENT_PAGE_SIZE` comments used to be refused
+/// outright rather than trusted as complete or silently truncated — a
+/// deliberate hard boundary, but one that made such an issue permanently
+/// unsyncable: `comment_counts_agree` would never agree (the local count can
+/// never equal a count `fetch_comments` refuses to produce), so every run hit
+/// the same refusal forever. This loops on `$skip`/`$top` instead, the same
+/// way `fetch::fetch_snapshot` and `tags::fetch_all_tags` do, stopping on the
+/// first short page — so there is no boundary left to land on exactly.
 ///
 /// # Errors
 /// Returns whatever `http` returns on transport or HTTP failure, and
-/// `RemoteError::Config` when the response body is not a JSON array, a
-/// comment's `created` is not a representable instant, or the page came back
-/// exactly `COMMENT_PAGE_SIZE` long. That last case means there is no paging
-/// loop to fall back on here: a full page could be hiding an unknown number
-/// of further comments, and returning it as if it were complete would make
-/// the count gate (`comment_counts_agree`) never agree again — the run
-/// would refetch, and re-push the never-seen tail, forever.
+/// `RemoteError::Config` when a page's response body is not a JSON array or a
+/// comment's `created` is not a representable instant. Both are genuinely
+/// impossible responses, not a size the fetch merely declines to handle.
 pub fn fetch_comments(
     http: &HttpClient,
     id_readable: &str,
 ) -> Result<Vec<RemoteComment>, RemoteError> {
-    let path = format!(
-        "/api/issues/{id_readable}/comments?fields={COMMENT_FIELDS}&$top={COMMENT_PAGE_SIZE}"
-    );
-    let raw = http.get_json(&path, "comments")?;
-    let items = raw.as_array().ok_or_else(|| {
-        RemoteError::Config(format!(
-            "the comment list for {id_readable} returned a JSON {}, not an array",
-            json_kind(&raw)
-        ))
-    })?;
-    let count = u32::try_from(items.len()).unwrap_or(u32::MAX);
-    if count >= COMMENT_PAGE_SIZE {
-        return Err(RemoteError::Config(format!(
-            "{id_readable} has at least {COMMENT_PAGE_SIZE} comments; this fetch has no paging \
-             and would silently drop the rest, so it is refusing instead of guessing"
-        )));
+    let mut comments = Vec::new();
+    let mut skip = 0_u32;
+    loop {
+        let path = format!(
+            "/api/issues/{id_readable}/comments?fields={COMMENT_FIELDS}&$skip={skip}&$top={COMMENT_PAGE_SIZE}"
+        );
+        let raw = http.get_json(&path, "comments")?;
+        let items = raw.as_array().ok_or_else(|| {
+            RemoteError::Config(format!(
+                "the comment list for {id_readable} returned a JSON {}, not an array",
+                json_kind(&raw)
+            ))
+        })?;
+        let count = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        for item in items {
+            comments.push(parse_comment(id_readable, item)?);
+        }
+        if count < COMMENT_PAGE_SIZE {
+            return Ok(comments);
+        }
+        skip += COMMENT_PAGE_SIZE;
     }
-    items
-        .iter()
-        .map(|item| parse_comment(id_readable, item))
-        .collect()
 }
 
 /// Post `text` verbatim as a new comment on `id_readable`.
@@ -323,7 +327,13 @@ mod tests {
     use test_support::mock_http::MockServer;
 
     const COMMENTS_PATH: &str =
-        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$top=500";
+        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$skip=0&$top=500";
+
+    fn comments_page_path(skip: u32) -> String {
+        format!(
+            "/api/issues/EM-1/comments?fields=id,text,author(login),created&$skip={skip}&$top=500"
+        )
+    }
 
     #[test]
     fn comment_counts_agree_is_an_equality_check() {
@@ -639,9 +649,14 @@ mod tests {
     }
 
     #[test]
-    fn a_full_page_of_comments_is_refused_rather_than_silently_truncated() {
+    fn an_issue_with_five_hundred_and_one_comments_pages_past_the_boundary() {
+        // The original bug: a page landing on exactly COMMENT_PAGE_SIZE was
+        // refused outright, so an issue with precisely 500 comments never
+        // synced at all — comment_counts_agree would never agree, and every
+        // run hit the same refusal forever. This pins that the fetch now
+        // pages instead, reaching a 501st comment on a second page.
         let server = MockServer::start();
-        let items: Vec<serde_json::Value> = (0..500)
+        let first_page: Vec<serde_json::Value> = (0..500)
             .map(|n| {
                 serde_json::json!({
                     "id": format!("7-{n}"),
@@ -653,18 +668,74 @@ mod tests {
             .collect();
         server.on(
             "GET",
-            COMMENTS_PATH,
+            &comments_page_path(0),
             200,
-            &serde_json::Value::Array(items).to_string(),
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on(
+            "GET",
+            &comments_page_path(500),
+            200,
+            r#"[{"id":"7-500","text":"the 501st comment","author":{"login":"anton"},"created":1786881856457}]"#,
         );
         let http = HttpClient::new(&server.base_url(), Token::new("t"), RetryPolicy::none());
 
-        let err = fetch_comments(&http, "EM-1").expect_err("a full page must be refused");
+        let comments = fetch_comments(&http, "EM-1").expect("fetch must page past the boundary");
+
+        assert_eq!(comments.len(), 501, "both pages must be collected");
+        assert_eq!(
+            comments[500].text, "the 501st comment",
+            "the comment beyond the old hard boundary must be visible"
+        );
+    }
+
+    #[test]
+    fn an_issue_with_exactly_five_hundred_comments_pages_to_an_empty_second_page() {
+        // The headline case the previous test's name claimed but its fixture
+        // (501 comments) did not actually exercise: a page landing on
+        // *exactly* COMMENT_PAGE_SIZE, followed by a short (empty) second
+        // page, rather than a second page carrying one more comment. Before
+        // the fix this exact shape was the one that refused outright — a
+        // full page could not be told apart from a truncated one — so it is
+        // worth pinning on its own even though the 501-comment test already
+        // proves the loop pages at all.
+        let server = MockServer::start();
+        let first_page: Vec<serde_json::Value> = (0..500)
+            .map(|n| {
+                serde_json::json!({
+                    "id": format!("7-{n}"),
+                    "text": format!("comment {n}"),
+                    "author": {"login": "anton"},
+                    "created": 1_786_881_856_457_i64,
+                })
+            })
+            .collect();
+        server.on(
+            "GET",
+            &comments_page_path(0),
+            200,
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on("GET", &comments_page_path(500), 200, "[]");
+        let http = HttpClient::new(&server.base_url(), Token::new("t"), RetryPolicy::none());
+
+        let comments = fetch_comments(&http, "EM-1").expect("a full page must not be refused");
+
+        assert_eq!(
+            comments.len(),
+            500,
+            "a page landing exactly on the boundary must not be treated as suspicious"
+        );
+    }
+
+    #[test]
+    fn a_non_array_comment_body_is_still_an_error() {
+        let server = MockServer::start();
+        server.on("GET", COMMENTS_PATH, 200, r#"{"error":"Not Found"}"#);
+        let http = HttpClient::new(&server.base_url(), Token::new("t"), RetryPolicy::none());
+
+        let err = fetch_comments(&http, "EM-1").expect_err("must refuse a non-array body");
         let message = err.to_string();
         assert!(message.contains("EM-1"), "must name the issue: {message}");
-        assert!(
-            message.contains("500"),
-            "must name the page size: {message}"
-        );
     }
 }

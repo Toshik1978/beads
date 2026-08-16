@@ -40,8 +40,10 @@ pub const LINK_TYPES: &str = r#"[
 
 /// `GET /api/admin/projects` — the path a create resolves `EM`'s database id
 /// through. A create body addresses its project by internal id; `remote.yaml`
-/// names it by the short name a human reads off a YouTrack URL.
-pub const PROJECTS_PATH: &str = "/api/admin/projects?fields=id,name,shortName&$top=500";
+/// names it by the short name a human reads off a YouTrack URL. Paged, and
+/// carrying an explicit `&$skip=0` on its first page — the convention every
+/// paged admin read in `br remote` uses.
+pub const PROJECTS_PATH: &str = "/api/admin/projects?fields=id,name,shortName&$skip=0&$top=500";
 
 /// The reference instance's project list.
 pub const PROJECTS: &str = r#"[{"id":"0-1","name":"EasyMoney","shortName":"EM"}]"#;

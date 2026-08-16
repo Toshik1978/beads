@@ -400,7 +400,12 @@ fn route_first_push(server: &MockServer) {
             (200, r#"{"id":"3-2","idReadable":"EM-2"}"#.to_string()),
         ],
     );
-    server.on("GET", "/api/tags?fields=id,name&$top=500", 200, "[]");
+    server.on(
+        "GET",
+        "/api/tags?fields=id,name&$skip=0&$top=500",
+        200,
+        "[]",
+    );
     server.on(
         "POST",
         "/api/tags?fields=id,name",
@@ -409,7 +414,7 @@ fn route_first_push(server: &MockServer) {
     );
     server.on(
         "GET",
-        "/api/issues/EM-2/comments?fields=id,text,author(login),created&$top=500",
+        "/api/issues/EM-2/comments?fields=id,text,author(login),created&$skip=0&$top=500",
         200,
         "[]",
     );
@@ -554,7 +559,7 @@ fn e2e_a_replanned_push_does_not_blame_the_stale_plan_for_a_comment_only_the_sec
     );
     server.on(
         "GET",
-        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$top=500",
+        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$skip=0&$top=500",
         200,
         r#"[{"id":"4-1","text":"typed in the web UI","author":{"login":"kate"},"created":1000}]"#,
     );
@@ -640,7 +645,7 @@ fn e2e_a_push_writes_the_changed_fields_and_the_new_comments() {
     );
     server.on(
         "GET",
-        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$top=500",
+        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$skip=0&$top=500",
         200,
         "[]",
     );

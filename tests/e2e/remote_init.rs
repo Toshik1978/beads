@@ -35,28 +35,36 @@ fn initialised_workspace() -> BrWorkspace {
     workspace
 }
 
+/// `missing_field_prototypes` and `ensure_field_prototypes` →
+/// `list_field_prototypes` share one implementation, so they hit the same
+/// query and need only one mock.
+const FIVE_PROTOTYPES: &str = r#"[{"id":"161-11","name":"Beads ID","fieldType":{"id":"string"}},
+        {"id":"161-12","name":"Design","fieldType":{"id":"text"}},
+        {"id":"161-13","name":"Acceptance Criteria","fieldType":{"id":"text"}},
+        {"id":"161-14","name":"Notes","fieldType":{"id":"text"}},
+        {"id":"161-15","name":"Close Reason","fieldType":{"id":"text"}}]"#;
+
 /// The routes a fully-provisioned reference project answers.
+///
+/// Every paged admin read in this subsystem carries an explicit `&$skip=0`
+/// on its first page.
 fn provisioned_server() -> MockServer {
     let server = MockServer::start();
     server.on(
         "GET",
-        "/api/admin/projects?fields=id,name,shortName&$top=500",
+        "/api/admin/projects?fields=id,name,shortName&$skip=0&$top=500",
         200,
         r#"[{"id":"0-1","name":"EasyMoney","shortName":"EM"}]"#,
     );
     server.on(
         "GET",
-        "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$top=500",
+        "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$skip=0&$top=500",
         200,
-        r#"[{"id":"161-11","name":"Beads ID","fieldType":{"id":"string"}},
-            {"id":"161-12","name":"Design","fieldType":{"id":"text"}},
-            {"id":"161-13","name":"Acceptance Criteria","fieldType":{"id":"text"}},
-            {"id":"161-14","name":"Notes","fieldType":{"id":"text"}},
-            {"id":"161-15","name":"Close Reason","fieldType":{"id":"text"}}]"#,
+        FIVE_PROTOTYPES,
     );
     server.on(
         "GET",
-        "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$top=200",
+        "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$skip=0&$top=200",
         200,
         r#"[{"id":"189-8","field":{"name":"Type"},"defaultValues":[{"name":"Task"}]},
             {"id":"189-9","field":{"name":"State"},"defaultValues":[{"name":"Open"}]},
@@ -69,7 +77,7 @@ fn provisioned_server() -> MockServer {
     );
     server.on(
         "GET",
-        "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500",
+        "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=0&$top=500",
         200,
         r#"[{"id":"161-1","name":"Type","instances":[
                 {"id":"189-8","project":{"shortName":"EM"},"bundle":{"id":"163-1","name":"Types"}}]},
@@ -84,7 +92,7 @@ fn provisioned_server() -> MockServer {
 fn bundle_fields_route(server: &MockServer, body: &str) {
     server.on(
         "GET",
-        "/api/admin/projects/0-1/customFields?fields=id,$type,canBeEmpty,field(id,name),bundle(id,name,$type,values(id,name,ordinal,color(id,background,foreground),isResolved))&$top=100",
+        "/api/admin/projects/0-1/customFields?fields=id,$type,canBeEmpty,field(id,name),bundle(id,name,$type,values(id,name,ordinal,color(id,background,foreground),isResolved))&$skip=0&$top=100",
         200,
         body,
     );
@@ -505,7 +513,7 @@ fn e2e_remote_init_never_prints_the_token_when_a_request_is_rejected() {
     // live credential in hand.
     server.on(
         "GET",
-        "/api/admin/projects?fields=id,name,shortName&$top=500",
+        "/api/admin/projects?fields=id,name,shortName&$skip=0&$top=500",
         401,
         r#"{"error":"Unauthorized","error_description":"Token is invalid or expired"}"#,
     );

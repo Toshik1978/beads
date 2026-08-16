@@ -376,6 +376,13 @@ pub fn pair(storage: &mut SqliteStorage, bead_id: &str, remote_id: &str) -> Resu
 /// A create body addresses its project by database id; `remote.yaml` names it
 /// by short name, because that is what a human reads off a YouTrack URL.
 ///
+/// Delegates to `admin::resolve_project_by_short_name` rather than carrying
+/// its own read of `/api/admin/projects`: the two were previously separate,
+/// and the copy here stayed on a single unpaginated `$top=500` request after
+/// the other was paged, so a project past the first page resolved for
+/// `init` and refused every writing verb. Sharing one paged implementation
+/// closes that gap for good rather than requiring it be paged twice.
+///
 /// # Errors
 /// Returns `RemoteError::Config` when no visible project has that short name,
 /// and whatever `http` returns on transport or HTTP failure.
@@ -383,23 +390,8 @@ pub fn resolve_project_id(
     http: &HttpClient,
     cfg: &RemoteConfig,
 ) -> std::result::Result<String, RemoteError> {
-    let raw = http.get_json(
-        "/api/admin/projects?fields=id,name,shortName&$top=500",
-        "project list",
-    )?;
-    raw.as_array()
-        .into_iter()
-        .flatten()
-        .find(|project| project.get("shortName").and_then(Value::as_str) == Some(&cfg.project))
-        .and_then(|project| project.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            RemoteError::Config(format!(
-                "no project with short name '{}' is visible to this token",
-                cfg.project
-            ))
-        })
+    crate::remote::youtrack::admin::resolve_project_by_short_name(http, &cfg.project)
+        .map(|project| project.id)
 }
 
 /// A first run refused for want of `--confirm-initial`.

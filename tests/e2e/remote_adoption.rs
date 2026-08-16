@@ -357,7 +357,7 @@ fn e2e_an_adoptee_arrives_with_its_prose_labels_and_comments() {
     );
     server.on(
         "GET",
-        "/api/issues/EM-11/comments?fields=id,text,author(login),created&$top=500",
+        "/api/issues/EM-11/comments?fields=id,text,author(login),created&$skip=0&$top=500",
         200,
         r#"[{"id":"4-1","text":"a human said this","author":{"login":"kate"},"created":1000},
             {"id":"4-2","text":"[br]\nbr's own echo","author":{"login":"integration"},"created":1001},

@@ -108,9 +108,25 @@ pub struct ProjectFieldSummary {
     pub default_values: Vec<String>,
 }
 
+/// Page size for [`AdminClient::read_project_field_summaries`].
+const FIELD_SUMMARY_PAGE_SIZE: u32 = 200;
+
 impl AdminClient {
     /// Read every custom field attached to `project`, with its current
-    /// defaults.
+    /// defaults, paged.
+    ///
+    /// This hits the same `/api/admin/projects/{id}/customFields` endpoint as
+    /// `bundles::read_project_bundle_fields`, with a different `fields=`
+    /// selector, and had the same unpaginated-truncation-reads-as-absence bug
+    /// after that one was paged and this one was not — except this result
+    /// feeds a **write** decision: it becomes `attached` in `provision_fields`
+    /// (`init.rs`), so a field instance living past the first page read as
+    /// unattached and produced a redundant attach POST plus a false entry in
+    /// `report.fields_attached`, and it also feeds the defaults-alignment
+    /// read. Pages with `$skip`/`$top`, stopping on the first short page, the
+    /// same way `bundles::read_project_bundle_fields` does; carries no sort
+    /// clause for the same reason — a project's own field attachments are a
+    /// small, effectively static collection for the life of one run.
     ///
     /// # Errors
     /// Returns `RemoteError` on transport or HTTP failure.
@@ -118,14 +134,17 @@ impl AdminClient {
         &self,
         project: &ProjectRef,
     ) -> Result<Vec<ProjectFieldSummary>, RemoteError> {
-        let path = format!(
-            "/api/admin/projects/{}/customFields?fields=id,field(name),defaultValues(name)&$top=200",
-            project.id
-        );
-        let value = self.http().get_json(&path, "project field summaries")?;
-        Ok(json_array(Some(&value))
-            .iter()
-            .filter_map(|raw| {
+        let mut summaries = Vec::new();
+        let mut skip = 0_u32;
+        loop {
+            let path = format!(
+                "/api/admin/projects/{}/customFields?fields=id,field(name),defaultValues(name)&$skip={skip}&$top={FIELD_SUMMARY_PAGE_SIZE}",
+                project.id
+            );
+            let value = self.http().get_json(&path, "project field summaries")?;
+            let page = json_array(Some(&value));
+            let count = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            summaries.extend(page.iter().filter_map(|raw| {
                 let field_name = raw.get("field").map(|f| json_str(f, "name"))?;
                 if field_name.is_empty() {
                     return None;
@@ -138,8 +157,12 @@ impl AdminClient {
                         .map(|v| json_str(v, "name").to_string())
                         .collect(),
                 })
-            })
-            .collect())
+            }));
+            if count < FIELD_SUMMARY_PAGE_SIZE {
+                return Ok(summaries);
+            }
+            skip += FIELD_SUMMARY_PAGE_SIZE;
+        }
     }
 
     /// The five field prototypes, as the instance currently holds them.
@@ -148,17 +171,20 @@ impl AdminClient {
     /// before it creates it. `ensure_field_prototypes` performs the same read
     /// internally, but discards the difference.
     ///
+    /// This and `list_field_prototypes` used to be two separate queries
+    /// against the same resource — this one carried its own unpaginated
+    /// `$top=500` even after the other was paged, so a prototype living past
+    /// the first page read as missing here and over-reported
+    /// `prototypes_created`, announcing an instance-wide field creation that
+    /// would not actually happen (nothing was in fact missing; the read just
+    /// could not see it). Reusing the one paged read closes that for good
+    /// rather than requiring both call sites to be paged in step.
+    ///
     /// # Errors
     /// Returns `RemoteError` on transport or HTTP failure.
     pub fn missing_field_prototypes(&self) -> Result<Vec<String>, RemoteError> {
-        let value = self.http().get_json(
-            "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$top=500",
-            "custom field list",
-        )?;
-        let present: BTreeSet<&str> = json_array(Some(&value))
-            .iter()
-            .map(|f| json_str(f, "name"))
-            .collect();
+        let existing = self.list_field_prototypes()?;
+        let present: BTreeSet<&str> = existing.iter().map(|f| f.name.as_str()).collect();
         Ok(ALL_FIELDS
             .iter()
             .filter(|(name, _)| !present.contains(name))
@@ -957,17 +983,22 @@ mod tests {
     }
 
     /// Every route a fully-provisioned reference project answers.
+    ///
+    /// Every paged admin read in this subsystem carries an explicit
+    /// `&$skip=0` on its first page — including `missing_field_prototypes`
+    /// and `ensure_field_prototypes` → `list_field_prototypes`, which share
+    /// one implementation and so need only one mock apiece rather than two.
     fn provisioned_server() -> MockServer {
         let server = MockServer::start();
         server.on(
             "GET",
-            "/api/admin/projects?fields=id,name,shortName&$top=500",
+            "/api/admin/projects?fields=id,name,shortName&$skip=0&$top=500",
             200,
             r#"[{"id":"0-1","name":"EasyMoney","shortName":"EM"}]"#,
         );
         server.on(
             "GET",
-            "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$top=500",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$skip=0&$top=500",
             200,
             &serde_json::json!([
                 {"id":"161-11","name":"Beads ID","fieldType":{"id":"string"}},
@@ -980,7 +1011,7 @@ mod tests {
         );
         server.on(
             "GET",
-            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$top=200",
+            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$skip=0&$top=200",
             200,
             &serde_json::json!([
                 {"id":"189-8","field":{"name":"Type"},"defaultValues":[{"name":"Task"}]},
@@ -996,7 +1027,7 @@ mod tests {
         );
         server.on(
             "GET",
-            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=0&$top=500",
             200,
             &serde_json::json!([
                 {"id":"161-1","name":"Type","instances":[
@@ -1014,7 +1045,7 @@ mod tests {
     fn bundle_fields_route(server: &MockServer, body: &str) {
         server.on(
             "GET",
-            "/api/admin/projects/0-1/customFields?fields=id,$type,canBeEmpty,field(id,name),bundle(id,name,$type,values(id,name,ordinal,color(id,background,foreground),isResolved))&$top=100",
+            "/api/admin/projects/0-1/customFields?fields=id,$type,canBeEmpty,field(id,name),bundle(id,name,$type,values(id,name,ordinal,color(id,background,foreground),isResolved))&$skip=0&$top=100",
             200,
             body,
         );
@@ -1165,7 +1196,7 @@ mod tests {
         // Two projects use the Types bundle.
         server.on(
             "GET",
-            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=0&$top=500",
             200,
             &serde_json::json!([
                 {"id":"161-1","name":"Type","instances":[
@@ -1217,8 +1248,7 @@ mod tests {
         );
     }
 
-    const BUNDLE_LIST_PATH: &str =
-        "/api/admin/customFieldSettings/bundles/enum?fields=id,name,values(id,name)&$top=500";
+    const BUNDLE_LIST_PATH: &str = "/api/admin/customFieldSettings/bundles/enum?fields=id,name,values(id,name)&$skip=0&$top=500";
 
     /// A server whose `Types` bundle is shared with `OTHER`, on an empty
     /// project, with every route the clone path walks.
@@ -1226,7 +1256,7 @@ mod tests {
         let server = provisioned_server();
         server.on(
             "GET",
-            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=0&$top=500",
             200,
             &serde_json::json!([
                 {"id":"161-1","name":"Type","instances":[
@@ -1438,7 +1468,7 @@ mod tests {
         // The scan says a field of OTHER already points at 163-9.
         server.on(
             "GET",
-            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=0&$top=500",
             200,
             &serde_json::json!([
                 {"id":"161-1","name":"Type","instances":[
@@ -1522,7 +1552,7 @@ mod tests {
         let server = provisioned_server();
         server.on(
             "GET",
-            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=0&$top=500",
             403,
             r#"{"error":"Forbidden"}"#,
         );
@@ -1564,7 +1594,7 @@ mod tests {
         let server = provisioned_server();
         server.on(
             "GET",
-            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$top=500",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,instances(id,project(shortName),bundle(id,name))&$skip=0&$top=500",
             200,
             &serde_json::json!([
                 {"id":"161-2","name":"State","instances":[
@@ -1658,7 +1688,7 @@ mod tests {
         let server = provisioned_server();
         server.on(
             "GET",
-            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$top=200",
+            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$skip=0&$top=200",
             200,
             &serde_json::json!([
                 {"id":"189-8","field":{"name":"Type"},"defaultValues":[{"name":"Bug"}]},
@@ -1723,7 +1753,7 @@ mod tests {
         let server = provisioned_server();
         server.on(
             "GET",
-            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$top=200",
+            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$skip=0&$top=200",
             200,
             &serde_json::json!([
                 {"id":"189-8","field":{"name":"Type"},"defaultValues":[{"name":"Bug"}]},
@@ -1763,13 +1793,13 @@ mod tests {
         let server = provisioned_server();
         server.on(
             "GET",
-            "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$top=500",
+            "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$skip=0&$top=500",
             200,
             "[]",
         );
         server.on(
             "GET",
-            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$top=200",
+            "/api/admin/projects/0-1/customFields?fields=id,field(name),defaultValues(name)&$skip=0&$top=200",
             200,
             &serde_json::json!([
                 {"id":"189-8","field":{"name":"Type"},"defaultValues":[{"name":"Bug"}]},

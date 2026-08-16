@@ -160,8 +160,22 @@ const DELETED_KEY: &str = "__deleted__";
 const PROJECT_FIELDS_PATH_FIELDS: &str = "id,$type,canBeEmpty,field(id,name),\
 bundle(id,name,$type,values(id,name,ordinal,color(id,background,foreground),isResolved))";
 
+/// Page size for [`AdminClient::read_project_bundle_fields`].
+const PROJECT_FIELDS_PAGE_SIZE: u32 = 100;
+
 impl AdminClient {
-    /// Read the project's bundle-backed fields and their bundles.
+    /// Read the project's bundle-backed fields and their bundles, paged.
+    ///
+    /// A project with more than `PROJECT_FIELDS_PAGE_SIZE` custom fields
+    /// attached is unusual but not impossible — `br` itself adds five on
+    /// `init` — and an unpaginated read has the same failure shape every
+    /// other site in this module was fixed for: a field instance past the
+    /// first page reads as though the project simply does not have that
+    /// field, silently skipping whatever `init`/`plan_missing` would have
+    /// done with it. Pages with `$skip`/`$top`, stopping on the first short
+    /// page; carries no sort clause because a project's own field
+    /// attachments are a small, effectively static collection for the life
+    /// of one run, unlike the issue list `fetch::fetch_snapshot` pages.
     ///
     /// # Errors
     /// Returns `RemoteError` on transport or HTTP failure.
@@ -169,15 +183,22 @@ impl AdminClient {
         &self,
         project: &ProjectRef,
     ) -> Result<Vec<ProjectFieldBundle>, RemoteError> {
-        let path = format!(
-            "/api/admin/projects/{}/customFields?fields={PROJECT_FIELDS_PATH_FIELDS}&$top=100",
-            project.id
-        );
-        let value = self.http().get_json(&path, "project custom fields")?;
-        Ok(json_array(Some(&value))
-            .iter()
-            .filter_map(parse_project_field_bundle)
-            .collect())
+        let mut fields = Vec::new();
+        let mut skip = 0_u32;
+        loop {
+            let path = format!(
+                "/api/admin/projects/{}/customFields?fields={PROJECT_FIELDS_PATH_FIELDS}&$skip={skip}&$top={PROJECT_FIELDS_PAGE_SIZE}",
+                project.id
+            );
+            let value = self.http().get_json(&path, "project custom fields")?;
+            let page = json_array(Some(&value));
+            let count = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            fields.extend(page.iter().filter_map(parse_project_field_bundle));
+            if count < PROJECT_FIELDS_PAGE_SIZE {
+                return Ok(fields);
+            }
+            skip += PROJECT_FIELDS_PAGE_SIZE;
+        }
     }
 
     /// POST each missing value to `bundle`.
@@ -434,7 +455,7 @@ deleted_state: "Won't fix"
     #[test]
     fn only_enum_and_state_bundles_are_read_back() {
         let server = MockServer::start();
-        let path = "/api/admin/projects/0-1/customFields?fields=id,$type,canBeEmpty,field(id,name),bundle(id,name,$type,values(id,name,ordinal,color(id,background,foreground),isResolved))&$top=100";
+        let path = "/api/admin/projects/0-1/customFields?fields=id,$type,canBeEmpty,field(id,name),bundle(id,name,$type,values(id,name,ordinal,color(id,background,foreground),isResolved))&$skip=0&$top=100";
         server.on(
             "GET",
             path,
@@ -479,6 +500,61 @@ deleted_state: "Won't fix"
         assert_eq!(fields[1].bundle.values[0].is_resolved, Some(true));
         assert!(fields[0].bundle.values[0].color.is_object());
         assert_eq!(fields[0].instance_id, "189-8");
+    }
+
+    #[test]
+    fn read_project_bundle_fields_pages_past_the_first_hundred() {
+        // The original bug: this read asked for `$top=100` with no `$skip`,
+        // so a field instance past the first page read as though the
+        // project simply did not have that field. This pins that the read
+        // itself now pages, and that the first page's URL carries an
+        // explicit `&$skip=0`.
+        let server = MockServer::start();
+        let path_fields = "id,$type,canBeEmpty,field(id,name),\
+bundle(id,name,$type,values(id,name,ordinal,color(id,background,foreground),isResolved))";
+        let first_page: Vec<_> = (0..100)
+            .map(|n| {
+                serde_json::json!({"id": format!("189-{n}"), "field": {"id": format!("161-{n}"), "name": format!("Custom {n}")}})
+            })
+            .collect();
+        server.on(
+            "GET",
+            &format!("/api/admin/projects/0-1/customFields?fields={path_fields}&$skip=0&$top=100"),
+            200,
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on(
+            "GET",
+            &format!(
+                "/api/admin/projects/0-1/customFields?fields={path_fields}&$skip=100&$top=100"
+            ),
+            200,
+            &serde_json::json!([
+                {"id":"189-999","field":{"id":"161-2","name":"State"},
+                 "bundle":{"id":"165-0","name":"States","$type":"StateBundle","values":[
+                     {"id":"166-7","name":"Fixed","ordinal":7,"isResolved":true}]}}
+            ])
+            .to_string(),
+        );
+
+        let admin = AdminClient::new(HttpClient::new(
+            &server.base_url(),
+            Token::new("t"),
+            RetryPolicy::none(),
+        ));
+        let project = ProjectRef {
+            id: "0-1".into(),
+            short_name: "EM".into(),
+            name: "EasyMoney".into(),
+        };
+        let fields = admin
+            .read_project_bundle_fields(&project)
+            .expect("read must page past the boundary");
+
+        assert!(
+            fields.iter().any(|f| f.instance_id == "189-999"),
+            "a field instance beyond the first page must be visible: {fields:?}"
+        );
     }
 
     #[test]

@@ -220,7 +220,7 @@ fn e2e_a_web_ui_comment_arrives_authored_by_the_integration_user() {
     );
     server.on(
         "GET",
-        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$top=500",
+        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$skip=0&$top=500",
         200,
         r#"[{"id":"4-1","text":"typed in the web UI","author":{"login":"kate"},"created":1000}]"#,
     );
@@ -277,7 +277,7 @@ fn e2e_a_bare_push_names_the_comment_it_left_for_pull() {
     );
     server.on(
         "GET",
-        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$top=500",
+        "/api/issues/EM-1/comments?fields=id,text,author(login),created&$skip=0&$top=500",
         200,
         r#"[{"id":"4-1","text":"typed in the web UI","author":{"login":"kate"},"created":1000}]"#,
     );

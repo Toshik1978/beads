@@ -33,10 +33,16 @@ pub const ALL_FIELDS: [(&str, &str); 5] = [
     ("Close Reason", "text"),
 ];
 
-const FIELD_LIST_PATH: &str =
-    "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$top=500";
+const FIELD_LIST_FIELDS: &str = "id,name,fieldType(id)";
 const FIELD_CREATE_PATH: &str =
     "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)";
+
+/// Page size for the field-prototype enumeration. The prototype list has no
+/// name-query affordance the way `/api/admin/projects` and `/api/tags` do —
+/// verified against the YouTrack REST API docs, which document only
+/// `fields`/`$top`/`$skip` for this resource — so this pages rather than
+/// switching to a targeted lookup.
+const FIELD_LIST_PAGE_SIZE: u32 = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectRef {
@@ -77,6 +83,64 @@ pub(crate) fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
         .unwrap_or_default()
 }
 
+/// Page size for [`resolve_project_by_short_name`].
+const RESOLVE_PROJECT_PAGE_SIZE: u32 = 500;
+
+/// Find the project by its short name, paged.
+///
+/// A free function rather than a method so `execute::resolve_project_id` —
+/// which addresses a create body's project by database id, needs no other
+/// part of `AdminClient`, and holds only a borrowed `HttpClient` rather than
+/// owning one — can share it instead of carrying its own unpaginated copy of
+/// the same read. [`AdminClient::resolve_project`] is a thin wrapper over
+/// this for callers that already have a client.
+///
+/// `/api/admin/projects` does accept a `query=` name search (verified against
+/// the YouTrack REST API docs), the same affordance `/api/tags` offers
+/// `tags::fetch_tag_by_name`, and it would cost one request instead of a
+/// sweep on a large instance. It is not used here: `query=` on this resource
+/// matches against both `name` and `shortName` substrings, so it is
+/// recoverable only by the same post-filter the tag lookup already needs —
+/// but this read is called exactly once per run (unlike the tag recovery
+/// path, which exists specifically because enumeration had already failed
+/// once), so the case for paying a search endpoint's looser matching is
+/// weaker here. Pages instead, the same way `fetch::fetch_snapshot` does,
+/// stopping on the first short page. Unlike that fetch, this carries no sort
+/// clause: an admin project list is a small, effectively static collection
+/// for the life of one run, not a set of issues someone else is editing
+/// concurrently, so there is no tail this instance's own writes could shift
+/// between pages.
+///
+/// # Errors
+/// Returns `RemoteError::Config` when no project carries that short name.
+pub(crate) fn resolve_project_by_short_name(
+    http: &HttpClient,
+    short_name: &str,
+) -> Result<ProjectRef, RemoteError> {
+    let mut skip = 0_u32;
+    loop {
+        let path = format!(
+            "/api/admin/projects?fields=id,name,shortName&$skip={skip}&$top={RESOLVE_PROJECT_PAGE_SIZE}"
+        );
+        let value = http.get_json(&path, "project list")?;
+        let page = json_array(Some(&value));
+        if let Some(found) = page.iter().find(|p| json_str(p, "shortName") == short_name) {
+            return Ok(ProjectRef {
+                id: json_str(found, "id").to_string(),
+                short_name: short_name.to_string(),
+                name: json_str(found, "name").to_string(),
+            });
+        }
+        let count = u32::try_from(page.len()).unwrap_or(u32::MAX);
+        if count < RESOLVE_PROJECT_PAGE_SIZE {
+            return Err(RemoteError::Config(format!(
+                "no project with short name '{short_name}' is visible to this token"
+            )));
+        }
+        skip += RESOLVE_PROJECT_PAGE_SIZE;
+    }
+}
+
 impl AdminClient {
     #[must_use]
     pub fn new(http: HttpClient) -> Self {
@@ -110,28 +174,12 @@ impl AdminClient {
         self.count_poll_base_delay
     }
 
-    /// Find the project by its short name.
+    /// Find the project by its short name, paged.
     ///
     /// # Errors
     /// Returns `RemoteError::Config` when no project carries that short name.
     pub fn resolve_project(&self, short_name: &str) -> Result<ProjectRef, RemoteError> {
-        let value = self.http.get_json(
-            "/api/admin/projects?fields=id,name,shortName&$top=500",
-            "project list",
-        )?;
-        json_array(Some(&value))
-            .iter()
-            .find(|p| json_str(p, "shortName") == short_name)
-            .map(|p| ProjectRef {
-                id: json_str(p, "id").to_string(),
-                short_name: short_name.to_string(),
-                name: json_str(p, "name").to_string(),
-            })
-            .ok_or_else(|| {
-                RemoteError::Config(format!(
-                    "no project with short name '{short_name}' is visible to this token"
-                ))
-            })
+        resolve_project_by_short_name(&self.http, short_name)
     }
 
     /// Ensure all five prototypes exist, creating only the missing ones.
@@ -168,20 +216,52 @@ impl AdminClient {
             .collect())
     }
 
-    fn list_field_prototypes(&self) -> Result<Vec<FieldRef>, RemoteError> {
-        let value = self.http.get_json(FIELD_LIST_PATH, "custom field list")?;
-        Ok(json_array(Some(&value))
-            .iter()
-            .map(|f| FieldRef {
-                id: json_str(f, "id").to_string(),
-                name: json_str(f, "name").to_string(),
-                field_type: f
-                    .get("fieldType")
-                    .map(|t| json_str(t, "id"))
-                    .unwrap_or_default()
-                    .to_string(),
-            })
-            .collect())
+    /// Every custom field prototype the instance defines, paged.
+    ///
+    /// An unpaginated `$top=500` read here reads its own truncation as
+    /// absence: a prototype past the first page would look missing, and
+    /// `ensure_field_prototypes` would try to create a duplicate that then
+    /// 409s as `must-be-unique` — the same failure shape `tags::TagCache`
+    /// had. This loops on `$skip`/`$top` for the same reason `fetch_all_tags`
+    /// does, stopping on the first short page; it carries no sort clause for
+    /// the same reason `resolve_project_by_short_name` does not — the
+    /// prototype list is a small, effectively static collection for the life
+    /// of one run.
+    ///
+    /// `pub(crate)` rather than private: `init::missing_field_prototypes` is
+    /// the same read under a different return type — the names present, not
+    /// the `FieldRef`s themselves — and shares this rather than carrying its
+    /// own unpaginated copy.
+    ///
+    /// # Errors
+    /// Returns `RemoteError` on transport or HTTP failure.
+    pub(crate) fn list_field_prototypes(&self) -> Result<Vec<FieldRef>, RemoteError> {
+        let mut fields = Vec::new();
+        let mut skip = 0_u32;
+        loop {
+            let path = format!(
+                "/api/admin/customFieldSettings/customFields?fields={FIELD_LIST_FIELDS}\
+&$skip={skip}&$top={FIELD_LIST_PAGE_SIZE}"
+            );
+            let value = self.http.get_json(&path, "custom field list")?;
+            let page = json_array(Some(&value));
+            let count = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            fields.extend(page.iter().map(|f| {
+                FieldRef {
+                    id: json_str(f, "id").to_string(),
+                    name: json_str(f, "name").to_string(),
+                    field_type: f
+                        .get("fieldType")
+                        .map(|t| json_str(t, "id"))
+                        .unwrap_or_default()
+                        .to_string(),
+                }
+            }));
+            if count < FIELD_LIST_PAGE_SIZE {
+                return Ok(fields);
+            }
+            skip += FIELD_LIST_PAGE_SIZE;
+        }
     }
 
     /// Attach every provisioned field to `project`.
@@ -231,7 +311,13 @@ mod tests {
     use test_support::youtrack_fixtures::MUST_BE_UNIQUE;
 
     const FIELDS_PATH: &str =
-        "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$top=500";
+        "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$skip=0&$top=500";
+
+    fn fields_page_path(skip: u32) -> String {
+        format!(
+            "/api/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)&$skip={skip}&$top=500"
+        )
+    }
 
     fn client(server: &MockServer) -> AdminClient {
         AdminClient::new(HttpClient::new(
@@ -411,11 +497,56 @@ mod tests {
     }
 
     #[test]
+    fn field_prototype_listing_pages_past_the_first_five_hundred() {
+        // The original bug: `list_field_prototypes` asked for `$top=500` with
+        // no `$skip`, so a prototype past the first page was invisible and
+        // `ensure_field_prototypes` would try to create a duplicate that then
+        // 409s forever. This pins that the listing itself now pages.
+        let server = MockServer::start();
+        let first_page: Vec<_> = (0..500)
+            .map(|n| {
+                serde_json::json!({"id": format!("161-{n}"), "name": format!("Field {n}"),
+                    "fieldType": {"id": "string"}})
+            })
+            .collect();
+        server.on(
+            "GET",
+            &fields_page_path(0),
+            200,
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on(
+            "GET",
+            &fields_page_path(500),
+            200,
+            r#"[{"id":"161-11","name":"Beads ID","fieldType":{"id":"string"}},
+                {"id":"161-12","name":"Design","fieldType":{"id":"text"}},
+                {"id":"161-13","name":"Acceptance Criteria","fieldType":{"id":"text"}},
+                {"id":"161-14","name":"Notes","fieldType":{"id":"text"}},
+                {"id":"161-15","name":"Close Reason","fieldType":{"id":"text"}}]"#,
+        );
+
+        let admin = client(&server);
+        let fields = admin.ensure_field_prototypes().expect("prototypes");
+
+        assert_eq!(
+            fields.len(),
+            5,
+            "every provisioned prototype must be visible, even on the second page"
+        );
+        assert!(
+            server.write_requests().is_empty(),
+            "a prototype the paginated listing actually found must not be re-created: {:?}",
+            server.write_requests()
+        );
+    }
+
+    #[test]
     fn a_project_is_resolved_by_short_name_and_a_missing_one_is_named() {
         let server = MockServer::start();
         server.on(
             "GET",
-            "/api/admin/projects?fields=id,name,shortName&$top=500",
+            "/api/admin/projects?fields=id,name,shortName&$skip=0&$top=500",
             200,
             r#"[{"id":"0-0","name":"Sandbox","shortName":"SB"},
                 {"id":"0-1","name":"EasyMoney","shortName":"EM"}]"#,
@@ -434,5 +565,41 @@ mod tests {
 
         let err = admin.resolve_project("NOPE").expect_err("must fail");
         assert!(err.to_string().contains("NOPE"), "{err}");
+    }
+
+    #[test]
+    fn resolve_project_pages_past_the_first_five_hundred() {
+        // The original bug: `resolve_project` asked for `$top=500` with no
+        // `$skip`, so a project past the first page could never be resolved
+        // no matter how it was spelled. This pins that it now pages, and that
+        // the first page's URL carries an explicit `&$skip=0` — the
+        // convention every paged admin read in this subsystem uses, so a
+        // paginated and an unpaginated read of the same resource are never
+        // silently indistinguishable on the wire.
+        let server = MockServer::start();
+        let first_page: Vec<_> = (0..500)
+            .map(|n| {
+                serde_json::json!({"id": format!("0-{n}"), "name": format!("Project {n}"),
+                    "shortName": format!("P{n}")})
+            })
+            .collect();
+        server.on(
+            "GET",
+            "/api/admin/projects?fields=id,name,shortName&$skip=0&$top=500",
+            200,
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on(
+            "GET",
+            "/api/admin/projects?fields=id,name,shortName&$skip=500&$top=500",
+            200,
+            r#"[{"id":"0-999","name":"Arrived Late","shortName":"LATE"}]"#,
+        );
+
+        let admin = client(&server);
+        let project = admin
+            .resolve_project("LATE")
+            .expect("a project beyond the first page must still resolve");
+        assert_eq!(project.id, "0-999");
     }
 }

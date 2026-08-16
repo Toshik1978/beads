@@ -29,6 +29,9 @@ const COUNT_POLL_ATTEMPTS: u32 = 6;
 /// care about the *verdict* avoid paying for six real sleeps.
 pub(crate) const COUNT_POLL_BASE_DELAY: Duration = Duration::from_millis(200);
 
+/// Page size for [`AdminClient::list_bundles`].
+const LIST_BUNDLES_PAGE_SIZE: u32 = 500;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emptiness {
     Empty,
@@ -111,30 +114,48 @@ impl AdminClient {
         })
     }
 
-    /// Every bundle of `kind` on the instance, with its values by name.
+    /// Every bundle of `kind` on the instance, with its values by name, paged.
     ///
     /// Used by `init` to notice a bundle it created on an earlier run that
     /// died before it could re-point the project at it. YouTrack permits
     /// duplicate bundle names, so without this read a re-run would create a
-    /// second identically-named copy and the first would be orphaned for good.
+    /// second identically-named copy and the first would be orphaned for
+    /// good — and an unpaginated `$top=500` read has exactly that failure
+    /// mode: a clone living past the first page reads as absent, so the
+    /// orphan leak this read exists to close would come right back on any
+    /// instance with more than 500 bundles of one kind.
+    ///
+    /// There is no by-name query to switch to instead — the YouTrack REST API
+    /// documents only `fields`/`$top`/`$skip` for this resource, unlike
+    /// `/api/tags` or `/api/admin/projects` — so this loops on `$skip`/`$top`
+    /// the same way `fetch::fetch_snapshot` does, stopping on the first short
+    /// page; it carries no sort clause because the instance's bundles are a
+    /// small, effectively static collection for the life of one run.
     ///
     /// # Errors
     /// Returns `RemoteError` on transport or HTTP failure.
     pub fn list_bundles(&self, kind: BundleKind) -> Result<Vec<BundleRef>, RemoteError> {
-        let path = format!(
-            "/api/admin/customFieldSettings/bundles/{}?fields=id,name,values(id,name)&$top=500",
-            kind.segment()
-        );
-        let value = self.http().get_json(&path, "bundle list")?;
-        Ok(crate::remote::youtrack::admin::json_array(Some(&value))
-            .iter()
-            .map(|raw| BundleRef {
+        let mut bundles = Vec::new();
+        let mut skip = 0_u32;
+        loop {
+            let path = format!(
+                "/api/admin/customFieldSettings/bundles/{}?fields=id,name,values(id,name)&$skip={skip}&$top={LIST_BUNDLES_PAGE_SIZE}",
+                kind.segment()
+            );
+            let value = self.http().get_json(&path, "bundle list")?;
+            let page = crate::remote::youtrack::admin::json_array(Some(&value));
+            let count = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            bundles.extend(page.iter().map(|raw| BundleRef {
                 id: json_str(raw, "id").to_string(),
                 name: json_str(raw, "name").to_string(),
                 kind,
                 values: crate::remote::youtrack::bundles::parse_bundle_values(raw.get("values")),
-            })
-            .collect())
+            }));
+            if count < LIST_BUNDLES_PAGE_SIZE {
+                return Ok(bundles);
+            }
+            skip += LIST_BUNDLES_PAGE_SIZE;
+        }
     }
 
     /// Re-read a bundle's values, so a freshly cloned bundle's own element ids
@@ -299,6 +320,42 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn list_bundles_pages_past_the_first_five_hundred() {
+        // The original bug: `list_bundles` asked for `$top=500` with no
+        // `$skip`, so a bundle living past the first page read as absent —
+        // and since `init` uses this read specifically to notice a bundle it
+        // already cloned on an earlier, interrupted run, that meant the
+        // orphan-leak bug it exists to close would come back on any instance
+        // with more than 500 bundles of one kind. This pins that the listing
+        // itself now pages, and that the first page's URL carries an
+        // explicit `&$skip=0`.
+        let server = MockServer::start();
+        let first_page: Vec<_> = (0..500)
+            .map(|n| serde_json::json!({"id": format!("165-{n}"), "name": format!("Bundle {n}")}))
+            .collect();
+        server.on(
+            "GET",
+            "/api/admin/customFieldSettings/bundles/state?fields=id,name,values(id,name)&$skip=0&$top=500",
+            200,
+            &serde_json::Value::Array(first_page).to_string(),
+        );
+        server.on(
+            "GET",
+            "/api/admin/customFieldSettings/bundles/state?fields=id,name,values(id,name)&$skip=500&$top=500",
+            200,
+            r#"[{"id":"165-999","name":"EasyMoney: States","values":[]}]"#,
+        );
+
+        let bundles = admin(&server)
+            .list_bundles(BundleKind::State)
+            .expect("list must page past the boundary");
+        assert!(
+            bundles.iter().any(|b| b.id == "165-999"),
+            "a bundle beyond the first page must be visible: {bundles:?}"
+        );
     }
 
     #[test]
