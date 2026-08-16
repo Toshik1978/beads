@@ -12,6 +12,18 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Read/write timeout applied to every accepted connection by `MockServer::start`.
+///
+/// The server only ever exchanges a handful of in-memory bytes over loopback,
+/// so there is no legitimate reason a real request should take anywhere close
+/// to this long, even on a loaded CI machine. It exists purely as a backstop
+/// against a malformed or partial request from a buggy client wedging the
+/// (single-threaded) accept loop: without it, a stuck read blocks every later
+/// request to the same `MockServer` until nextest's slow-timeout kills the
+/// whole test process several minutes later with no indication of the cause.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One request as the server saw it.
 #[derive(Debug, Clone)]
@@ -43,9 +55,20 @@ pub struct MockServer {
 }
 
 impl MockServer {
-    /// Bind `127.0.0.1:0` and serve until dropped.
+    /// Bind `127.0.0.1:0` and serve until dropped, with the default
+    /// per-connection read/write timeout (see [`DEFAULT_TIMEOUT`]).
     #[must_use]
     pub fn start() -> Self {
+        Self::start_with_timeout(DEFAULT_TIMEOUT)
+    }
+
+    /// Same as [`MockServer::start`], but with a caller-chosen read/write
+    /// timeout on each accepted connection. Tests that want to prove the
+    /// timeout actually fires — and that the accept loop recovers afterward
+    /// — use a short one here; everything else should use `start`, which
+    /// keeps the generous default.
+    #[must_use]
+    pub fn start_with_timeout(timeout: Duration) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let state = Arc::new(Mutex::new(State::default()));
@@ -59,7 +82,7 @@ impl MockServer {
                     break;
                 }
                 match stream {
-                    Ok(stream) => handle_connection(stream, &thread_state),
+                    Ok(stream) => handle_connection(stream, &thread_state, timeout),
                     Err(_) => break,
                 }
             }
@@ -135,12 +158,48 @@ impl Drop for MockServer {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
+/// Whether an I/O error is a timeout from `set_read_timeout`/`set_write_timeout`
+/// elapsing, rather than a normal connection error (reset, EOF, ...).
+///
+/// The two kinds below are what the standard library documents as possible
+/// here: `TimedOut` on most platforms, `WouldBlock` on some.
+fn is_timeout(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
+/// Print a loud, greppable diagnostic when a connection is abandoned because
+/// a read or write timed out. A test that hangs teaches nothing; this is what
+/// turns that hang into a message naming the cause instead.
+fn report_timeout(direction: &str, timeout: Duration) {
+    eprintln!(
+        "mock server: timed out {direction} after {timeout:?} — \
+         the mock server timed out reading a request"
+    );
+}
+
+fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<State>>, timeout: Duration) {
+    if let Err(err) = stream.set_read_timeout(Some(timeout)) {
+        eprintln!("mock server: failed to set read timeout: {err}");
+    }
+    if let Err(err) = stream.set_write_timeout(Some(timeout)) {
+        eprintln!("mock server: failed to set write timeout: {err}");
+    }
+
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
 
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() || request_line.trim().is_empty() {
-        return;
+    match reader.read_line(&mut request_line) {
+        Err(err) => {
+            if is_timeout(&err) {
+                report_timeout("reading the request line", timeout);
+            }
+            return;
+        }
+        Ok(_) if request_line.trim().is_empty() => return,
+        Ok(_) => {}
     }
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
@@ -150,8 +209,15 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
     let mut auth = None;
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-            break;
+        match reader.read_line(&mut line) {
+            Err(err) => {
+                if is_timeout(&err) {
+                    report_timeout("reading request headers", timeout);
+                }
+                return;
+            }
+            Ok(_) if line.trim().is_empty() => break,
+            Ok(_) => {}
         }
         let lower = line.to_ascii_lowercase();
         if let Some(value) = lower.strip_prefix("content-length:") {
@@ -162,7 +228,12 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
     }
 
     let mut body = vec![0_u8; content_length];
-    if content_length > 0 && reader.read_exact(&mut body).is_err() {
+    if content_length > 0
+        && let Err(err) = reader.read_exact(&mut body)
+    {
+        if is_timeout(&err) {
+            report_timeout("reading the request body", timeout);
+        }
         return;
     }
     let body = String::from_utf8_lossy(&body).to_string();
@@ -214,7 +285,12 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
          Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         payload.len()
     );
-    let _ = stream.write_all(response.as_bytes());
+    if let Err(err) = stream.write_all(response.as_bytes()) {
+        if is_timeout(&err) {
+            eprintln!("mock server: timed out writing a response after {timeout:?}");
+        }
+        return;
+    }
     let _ = stream.flush();
 }
 
@@ -440,5 +516,39 @@ mod tests {
             3,
             "all three attempts are recorded"
         );
+    }
+
+    #[test]
+    fn a_stalled_read_times_out_and_the_server_recovers_for_the_next_request() {
+        // A short timeout keeps this test fast; the generous default used by
+        // `MockServer::start` stays untouched. This is what the fix is for:
+        // without a read timeout, the write below would leave the
+        // single-threaded accept loop stuck forever inside `handle_connection`,
+        // and the `raw_request` after it would hang waiting for a connection
+        // the server never gets around to accepting.
+        let server = MockServer::start_with_timeout(Duration::from_millis(50));
+        server.on("GET", "/api/ok", 200, r#"{"ok":true}"#);
+
+        let addr = server.base_url().trim_start_matches("http://").to_string();
+        let mut stalled = TcpStream::connect(&addr).expect("connect");
+        // A request line with no terminating CRLF: the server is left
+        // waiting for bytes that never arrive. The socket is kept open (not
+        // dropped) so this cannot be mistaken for a clean EOF either.
+        stalled
+            .write_all(b"GET /api/never-finishes")
+            .expect("write partial request");
+
+        // Comfortably longer than the server's read timeout, so the stalled
+        // connection has definitely been abandoned and the accept loop is
+        // back to waiting for the next one.
+        std::thread::sleep(Duration::from_millis(200));
+
+        let response = raw_request(&server.base_url(), "GET", "/api/ok", "");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "server must still answer after the stalled connection times out, got: {response}"
+        );
+
+        drop(stalled);
     }
 }
