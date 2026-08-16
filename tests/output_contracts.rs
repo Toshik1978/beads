@@ -699,6 +699,8 @@ mod history_diff_output;
 mod json_output;
 #[path = "output_contracts/jsonl_format.rs"]
 mod jsonl_format;
+#[path = "output_contracts/remote_status_json.rs"]
+mod remote_status_json;
 
 // ============================================================================
 // Tests for Golden Text Snapshot System

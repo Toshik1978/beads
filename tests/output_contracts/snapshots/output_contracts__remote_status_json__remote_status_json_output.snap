@@ -1,0 +1,46 @@
+---
+source: tests/output_contracts/remote_status_json.rs
+expression: json
+---
+{
+  "project": "EM",
+  "plan": {
+    "field_changes": [
+      {
+        "bead_id": "em-golden-paired",
+        "remote_id": "EM-1",
+        "changes": [
+          {
+            "field": "title",
+            "direction": "push",
+            "local": "Golden paired issue (local)",
+            "remote": "Golden paired issue (remote)"
+          }
+        ]
+      }
+    ],
+    "link_changes": [],
+    "creates": [
+      "em-golden-create"
+    ],
+    "adoptions": [
+      {
+        "remote_id": "EM-2",
+        "summary": "Golden adoption candidate",
+        "beads_id": null
+      }
+    ],
+    "refused_adoptions": [],
+    "dangling": [],
+    "out_of_scope": [],
+    "comment_changes": [],
+    "unmapped_local": [],
+    "tombstoned": [],
+    "unmirrored_links": [],
+    "notes": [
+      "note: comments are compared only where the local and remote comment counts differ, so an edit to a comment that has already crossed is not detected."
+    ]
+  },
+  "reads": 2,
+  "writes": 0
+}

@@ -1216,17 +1216,17 @@ br config edit
 ### remote
 
 Mirror this workspace into an external tracker. The CLI surface is
-backend-neutral; the only backend today is YouTrack.
+backend-neutral; the only backend today is YouTrack. All five verbs work:
+`init` provisions the remote project, `status` reports what a run would do
+without writing anything, and `push`/`pull`/`sync` execute it. `br remote` is
+the **only** `br` command that touches the network — nothing else in the CLI
+opens a socket, and the mirror is reconciled only when one of these five
+verbs is actually run, never as a side effect of `list`, `create`, or any
+other command.
 
 ```bash
 br remote <COMMAND>
 ```
-
-Configuration lives in `.beads/remote.yaml` — the backend, the instance URL,
-the project short name, and total, injective maps from every beads
-`issue_type`, `status` and priority onto the remote's own vocabulary. The
-credential is read from the `BR_YOUTRACK_TOKEN` environment variable and from
-nowhere else, so no file `br` writes can carry it.
 
 | Subcommand | Description |
 |------------|-------------|
@@ -1234,12 +1234,145 @@ nowhere else, so no file `br` writes can carry it.
 | `status` | Report what a push or pull would do, writing nothing |
 | `push` | Push local changes to the remote tracker |
 | `pull` | Pull remote changes into this workspace |
-| `sync` | Push, then pull |
+| `sync` | Pull, then push |
 
-Only `init` is implemented today; the other four are declared so the whole
-surface lands in one place.
+**Configuration — `.beads/remote.yaml`**
 
-**`br remote init`**
+| Key | Meaning |
+|-----|---------|
+| `backend` | Must be `youtrack`; it is the only backend today |
+| `url` | The instance's base URL |
+| `project` | The project's short name, e.g. `EM` — also the `idReadable` prefix that scopes pairing |
+| `status_map` | Every beads status except `tombstone` → a YouTrack state name |
+| `type_map` | Every beads issue type → a YouTrack type name |
+| `priority_map` | Every beads priority (`0`–`4`) → a YouTrack priority name |
+| `deleted_state` | The state a locally-deleted issue is moved to on the remote — `br remote` never deletes a remote issue |
+| `page_size` | Issues fetched per page, `1`–`1000` (default `100`) |
+
+`status_map`, `type_map` and `priority_map` must each be **total** over their
+built-in vocabulary — every value beads can hold must appear as a key — and
+**injective** — no two keys may map to the same remote value. Both matter for
+the same reason: a value with nowhere to go can be neither pushed nor
+recognised coming back, and two beads values collapsed onto one remote value
+are indistinguishable from full coverage the moment `init` computes a set
+difference or a fetch reverses the map — the failure is silent, not a parse
+error. `tombstone` is deliberately absent from `status_map`: the tombstone
+rule owns that transition (see below), and mapping it would make a
+forwarding pointer read as an ordinary status change.
+
+The credential is read from the `BR_YOUTRACK_TOKEN` environment variable and
+from nowhere else, so no file `br` writes — not config, not logs, not
+`--dry-run` output — can carry it.
+
+Reference config:
+```yaml
+backend: youtrack
+url: https://example.youtrack.cloud
+project: EM
+status_map:
+  open: Open
+  in_progress: In Progress
+  blocked: Blocked
+  deferred: Deferred
+  draft: Draft
+  pinned: Pinned
+  closed: Fixed
+type_map:
+  task: Task
+  bug: Bug
+  feature: Feature
+  epic: Epic
+  chore: Chore
+  docs: Docs
+  question: Question
+priority_map:
+  0: Show-stopper
+  1: Critical
+  2: Major
+  3: Normal
+  4: Minor
+deleted_state: "Won't fix"
+page_size: 100
+```
+
+**What gets mirrored, and which side wins**
+
+`init` provisions five custom fields on the YouTrack project: `Beads ID`
+(`string`) and `Design`, `Acceptance Criteria`, `Notes`, `Close Reason`
+(`text`). `Beads ID` is a human-legible affordance written best-effort on
+every create; it also has one narrow correctness role — `push`/`pull` read it
+back to recognise an issue whose create succeeded but whose response was
+lost, so a crash never mints a duplicate — but it plays no part in ordinary
+pairing. Pairing identity is single-sided and lives entirely in the bead's
+own `external_ref` field, which holds the remote `idReadable`.
+
+Beads is authoritative for every field except three, which the remote is
+allowed to win: **`State`, `Priority`, and comments**. `State` and `Priority`
+resolve by timestamp — the remote wins only when its `updated` is *strictly*
+newer than the bead's own `updated_at`; a tie goes to beads. Every other
+field — title, description, type, the four prose fields, labels, and any
+link — is local-wins unconditionally. In particular, a link a human draws in
+the YouTrack UI between two issues that are *both already paired* is deleted
+on the next push if beads does not also know about that link; that is the
+local-wins contract working as intended, not a bug.
+
+Hierarchy mirrors as a `Subtask` link, `blocks` as a `Depend` link, and
+`related`/`relates-to` as a `Relates` link. Every other dependency type
+(`waits-for`, `duplicates`, `conditional-blocks`, `discovered-from`,
+`replies-to`, `supersedes`, `caused-by`, and any custom type) has no
+YouTrack link-type equivalent and is never mirrored; `br remote status` lists
+these under "unmirrored relations" so a `br dep list` row with no
+corresponding link change is explained rather than silently dropped.
+
+**`br remote` never deletes a remote issue.** No code path in this codebase
+issues an HTTP `DELETE` against an issue. A local `br delete` instead moves
+the mirrored issue to `deleted_state` and leaves a comment saying so.
+
+**Adoption.** An issue created directly in the web UI, claimed by no bead, is
+imported **whole, once** on the next `pull` or `sync` — the one direction in
+which a remote edit outranks the local record — and from then on it is an
+ordinary mirrored bead. A `Type`, `State` or `Priority` with no beads-side map
+entry is *refused*, not defaulted, and named individually (with the config
+key that would cover it) in `br remote status`'s output; refusing one
+adoptee does not stop the rest of the run, and an adoptee whose parent is
+refused, or is itself deferred, is deferred rather than created flat under
+no parent. A mirrored issue (beads → YouTrack) reads as created *today* by
+the token's owner, because `created` and `reporter` are read-only on
+YouTrack's `Issue` entity and `br` never attempts to set them; an adopted
+issue (YouTrack → beads) reads locally as created *at adoption time*, not at
+its original web-UI creation time, for the same reason on beads' own side.
+
+**`push` refuses a first run without `--confirm-initial`.** A first run — one
+where no bead in the workspace is yet paired with an issue in the configured
+project — would create an issue for every unpaired bead, and because
+`br remote` never deletes a remote issue, running that against the wrong
+project leaves every one of them to be cleaned up by hand. **`br remote pull`
+carries no such gate** — it adopts freely, and adopting even a single issue
+writes a pairing that satisfies the gate for the *next* push. A `pull` run
+against a misconfigured project therefore does not just import the wrong
+issues; it also quietly disarms the safety net the following `push` would
+otherwise rely on. Check `project` and `url` in `remote.yaml` before a first
+`pull` as carefully as before a first `push`.
+
+**Comment sync has known edges.** Comments are matched by exact body text —
+there is no shared identity between a bead comment and a YouTrack comment for
+either side to key on instead. Two consequences follow: editing an
+already-mirrored comment on either side does not update its counterpart, it
+appends a duplicate on the next sync, because the edited body no longer
+matches the original it was being suppressed against; and a second local
+comment whose text is identical to one already pushed is never pushed at
+all, indistinguishable as it is from an echo of the first. Both are
+documented in `src/remote/comments.rs` and tracked as a follow-up
+(`bds-4r2.17`) rather than fixed here.
+
+**`--dry-run`** is available on `init`, `push`, `pull` and `sync`, and
+reports the plan without writing anything — with one exception. On a project
+whose bundle turns out to be shared, `init --dry-run` still issues one
+`POST /api/issuesGetter/count`: YouTrack takes that query in a request body,
+so a *read* of the issue count has no GET form, and a dry run needs the
+answer to know which branch (clone vs. refuse) a real run would take.
+
+**`init`**
 
 | Option | Description |
 |--------|-------------|
@@ -1258,38 +1391,101 @@ deliberate:
 
 - **Custom field prototypes are instance-wide.** Creating `Design`,
   `Acceptance Criteria`, `Notes`, `Close Reason` and `Beads ID` makes them
-  appear in every project's administration UI. There is no per-project field
-  namespace to use instead. `init` names each one before it creates it.
+  appear in every project's administration UI, not just this one's — there is
+  no per-project field namespace to use instead. `init` names each one before
+  it creates it.
 - **The project's `Type`/`State`/`Priority` defaults are rewritten** to the
-  beads defaults (`task` / `open` / P2, through the configured maps). Stock
-  YouTrack adopts a new issue as `Bug` / `Submitted` / `Normal`, which reads
-  back as a deferred bug at P3 — wrong on all three axes. `init` prints each
-  change as `old → new` and skips any that already matches;
-  `--keep-project-defaults` turns the whole step off.
+  beads defaults (`task` / `open` / P2, through the configured maps — `Task`
+  / `Open` / `Major` on the reference config above). Stock YouTrack adopts a
+  new issue as `Bug` / `Submitted` / `Normal`, which reads back as a deferred
+  bug at P3 — wrong on all three axes, for every issue a human types into the
+  web UI. `init` prints each change as `old → new` and skips any field that
+  already matches; `--keep-project-defaults` turns the whole step off for
+  anyone who wants their own defaults kept.
 
-Values are added to a bundle only when that bundle is *provably* private —
-one request returns every `(field, project)` pair using every bundle, and a
-bundle whose only user is this project's field is safe. A shared bundle on an
-empty project is copied, the project's field re-pointed at the copy, and the
-copy filled; a shared bundle on a project that already holds issues is refused
-with both ways forward named. A sharedness scan the token cannot complete
-refuses too, rather than assuming privacy.
+Before writing to a bundle at all, `init` scans which projects use it: values
+are added only when a bundle is *provably* private — one request returns
+every `(field, project)` pair using every bundle, and a bundle whose only
+user is this project's field is safe. A shared bundle on an empty project is
+copied, the project's field re-pointed at the copy, and the copy filled; a
+shared bundle on a project that already holds issues is refused with both
+ways forward named. A sharedness scan the token cannot complete refuses too,
+rather than assuming privacy. `--allow-shared-bundle` writes to the shared
+bundle directly instead, which changes what every other project using it
+sees.
 
 A project that already matches the maps issues **zero write requests**, so
 `init` is safe to re-run.
+
+**`status`**
+
+Fetches both sides and prints the plan without writing anything: creates,
+field changes (with the winning direction marked), link changes, comment
+counts pending in each direction, adoption candidates, refused adoptions,
+dangling local refs, out-of-scope beads, unmapped local values, tombstoned
+pairs and unmirrored relations — each section is printed only when it has
+content. `--json` emits `{"project", "plan", "reads", "writes"}`; `writes` is
+always `0`, which a consumer can assert without parsing prose.
+
+**`push`**
+
+| Option | Description |
+|--------|-------------|
+| `--confirm-initial` | Allow a first run — see above |
+| `--dry-run` | Report what would change without writing anything |
+
+Refuses, in order, all before any write: a local vocabulary gap, a
+plan-level unmapped value naming the offending bead, the first-run gate, then
+the dry-run check. A field a remote edit won (`[YouTrack wins]` in the plan)
+is left for `pull` to apply — a bare `push` reports it but does not act on
+it.
+
+**`pull`**
+
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Report what would change without writing anything |
+
+Applies the `State`/`Priority` changes the remote won, imports comments, and
+adopts every unpaired remote issue — in parentage order, so an adoptee whose
+parent is adopted in the same run is minted as a proper child rather than
+created flat and reparented afterward. No first-run gate — see above.
+
+**`sync`**
+
+| Option | Description |
+|--------|-------------|
+| `--confirm-initial` | Allow a first run — see `push` |
+| `--dry-run` | Report what would change without writing anything |
+
+`pull`, then `push`, each reconciling afresh from a fresh fetch — pull runs
+first so an issue adopted this run is already a bead by the time push
+computes its link diff, rather than looking unpaired and having its links
+seen as unexplained remote additions.
 
 **Examples:**
 ```bash
 export BR_YOUTRACK_TOKEN=perm-…
 
-# See what would change, writing nothing
+# See what init would change, writing nothing
 br remote init --dry-run
 
-# Provision for real
+# Provision the remote project for real
 br remote init
 
 # Leave the web UI's adoption defaults as they are
 br remote init --keep-project-defaults
+
+# See what a push or pull would do
+br remote status
+
+# First push into a freshly provisioned project
+br remote push --confirm-initial
+
+# Ordinary runs after that
+br remote push
+br remote pull
+br remote sync
 ```
 
 ---

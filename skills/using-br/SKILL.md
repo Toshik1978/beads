@@ -4,7 +4,7 @@ description: >-
   Use when working inside a directory that has a `.beads/` workspace (or when
   asked to initialize one), and the task involves tracking, creating,
   querying, updating, or closing issues with the `br` CLI. Covers the full
-  27-command surface, the `--json` agent output mode, the
+  28-command surface, the `--json` agent output mode, the
   auto-flush/auto-import sync model, and the claim-work-close loop. Load this
   before shelling out to `br` for the first time in a session.
 ---
@@ -108,7 +108,7 @@ All 28 top-level commands. Flags, subcommands, and exit codes are in
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |
-| `remote` | Mirror this workspace into an external tracker (only `remote init` works today; `status`, `push`, `pull` and `sync` are declared but not implemented) |
+| `remote` | Mirror this workspace into an external tracker: `init` provisions the project, `status` reports without writing, `push`/`pull`/`sync` execute it (`--dry-run` on all four; `push`/`sync` need `--confirm-initial` on a first run). The only `br` command that touches the network — see `CLI_REFERENCE.md` and `AGENT_INTEGRATION.md` for the field/asymmetry details |
 | `stats` | Show project statistics |
 | `info` | Show diagnostic metadata about the workspace |
 | `version` | Show version information |

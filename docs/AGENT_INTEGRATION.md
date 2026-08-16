@@ -111,6 +111,56 @@ project. An agent operating across multiple repositories should not assume
 every ID it sees resolves against the current directory's workspace; see
 "Cross-Project Routing" in `CLI_REFERENCE.md` for the resolution rules.
 
+## Mirroring into an external tracker (`br remote`)
+
+`br remote` is the **only** `br` command that performs network access.
+Nothing else in the CLI opens a socket — `br list` in a loop, or any other
+query or mutating command, costs nothing external, however often it runs. The
+mirror is reconciled only when `br remote status`/`push`/`pull`/`sync` is run
+directly, never as a side effect of anything else.
+
+The full flag/config/JSON reference is the `remote` section of
+`CLI_REFERENCE.md`; this section covers what an agent driving `br remote`
+specifically needs to not be surprised by.
+
+- **`br remote init` changes things outside the current project.** It creates
+  five custom field prototypes **instance-wide** — they show up in every
+  project's administration UI, not just this one's — and it **rewrites the
+  project's `Type`/`State`/`Priority` defaults** so a new issue typed into the
+  web UI adopts as an open task at P2 instead of a deferred bug at P3. Both
+  are deliberate and both are visible to people who never run `br`.
+  `--keep-project-defaults` opts out of the second.
+- **Beads is authoritative except for `State`, `Priority`, and comments.**
+  The remote wins `State`/`Priority` only when its `updated` timestamp is
+  strictly newer than the bead's; everything else — including a link a human
+  draws in the YouTrack UI between two already-paired issues — is
+  local-wins, and is overwritten or removed on the next push. That is
+  intended, not a bug.
+- **An issue created in the web UI is adopted whole, once**, on the next
+  `pull`/`sync`, and is an ordinary mirrored bead from then on. A `Type`,
+  `State` or `Priority` value with no beads-side mapping is refused by name
+  rather than defaulted, and shows up in `br remote status`.
+- **`br remote pull` has no first-run gate, unlike `push`.** `push` refuses a
+  first run (no bead paired with the configured project yet) unless
+  `--confirm-initial` is passed, because `br remote` has no code path that
+  deletes a remote issue — a first run against the wrong project would leave
+  every created issue to be cleaned up by hand. `pull` adopts freely with no
+  such check, and adopting even one issue pairs a bead, which satisfies the
+  gate for the *next* push. A `pull` against a misconfigured project can
+  therefore silently disarm the safety net a following `push` would
+  otherwise have had.
+- **Comment sync is content-matched, not identity-matched**, so it has two
+  known edges: editing an already-mirrored comment on either side appends a
+  duplicate on the next sync rather than updating it, and a second local
+  comment with text identical to one already pushed is never pushed. Neither
+  is fixed today (tracked as `bds-4r2.17`).
+- **`br remote` never deletes a remote issue.** A local `br delete` moves the
+  mirror to the configured `deleted_state` and leaves a comment; nothing in
+  the codebase issues an HTTP `DELETE` against an issue.
+- Dependency types with no YouTrack link-type equivalent (`waits-for`,
+  `duplicates`, and others) are never mirrored, and are listed under
+  "unmirrored relations" in `br remote status` rather than silently dropped.
+
 ## Command index
 
 All 28 top-level commands, for orientation. Full flags, subcommands, and
@@ -140,7 +190,7 @@ All 28 top-level commands, for orientation. Full flags, subcommands, and
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |
-| `remote` | Mirror this workspace into an external tracker: `init` provisions the remote project, `status` reports what a run would do and writes nothing, and `push`/`pull`/`sync` execute it (each takes `--dry-run`; `push` and `sync` refuse a first run without `--confirm-initial`) |
+| `remote` | Mirror this workspace into an external tracker: `init` provisions the remote project, `status` reports what a run would do and writes nothing, and `push`/`pull`/`sync` execute it (each takes `--dry-run`; `push` and `sync` refuse a first run without `--confirm-initial`) — see "Mirroring into an external tracker" below |
 | `stats` | Show project statistics |
 | `info` | Show diagnostic metadata about the workspace |
 | `version` | Show version information |
