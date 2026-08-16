@@ -37,6 +37,84 @@ pub mod update;
 pub mod version;
 pub mod vocabulary;
 
+/// Describe a routed fan-out that failed partway through, in terms of which
+/// targets were written (bds-j1m, bds-3x6).
+///
+/// Every route-aware command opens, mutates and finalizes one workspace before
+/// it opens the next, so once an earlier route has committed there is nothing
+/// to roll back — each route is a separate database and a separate
+/// transaction. The only honest response is to say what landed.
+///
+/// `route_targets` holds each route's issue IDs **as the caller supplied
+/// them**, grouped per route in execution order. That is deliberately not the
+/// resolved IDs: a route that never ran was never opened, so its inputs were
+/// never resolved, and reporting canonical IDs for the routes that ran beside
+/// raw inputs for the ones that did not would make one field mean two things.
+///
+/// `attempted_route_has_mutated[i]` says whether route `i` actually wrote
+/// anything, so its length is the number of routes attempted and its last
+/// entry belongs to the route that failed. A route that succeeded without
+/// writing — every issue already closed, every detach a no-op — is reported as
+/// untouched, not as written: `applied` means "this landed and cannot be
+/// undone", and a route that did nothing has nothing to undo.
+///
+/// The failing route's own targets are reported as possibly-partly-written
+/// when it had already committed something, and as untouched when it had not —
+/// the distinction a caller needs to decide what to re-run.
+///
+/// When no earlier route wrote anything, the cause is returned unchanged.
+/// Nothing partial happened across routes, and wrapping a plain failure in a
+/// partial-application error would tell the caller to inspect damage that does
+/// not exist. That deliberately leaves the single-route case reporting exactly
+/// what it reported before, matching the unrouted path — and it means an
+/// intra-route half-write is not reported here either, matching what the
+/// unrouted path does with the same failure.
+pub(crate) fn partial_route_failure(
+    route_targets: &[Vec<String>],
+    attempted_route_has_mutated: &[bool],
+    error: BeadsError,
+) -> BeadsError {
+    debug_assert!(
+        !attempted_route_has_mutated.is_empty()
+            && attempted_route_has_mutated.len() <= route_targets.len(),
+        "a route must have been attempted, and no more routes attempted than exist"
+    );
+    let failed_index = attempted_route_has_mutated.len() - 1;
+
+    let mut applied = Vec::new();
+    let mut not_applied = Vec::new();
+    for (targets, has_mutated) in route_targets
+        .iter()
+        .zip(attempted_route_has_mutated)
+        .take(failed_index)
+    {
+        if *has_mutated {
+            applied.extend(targets.iter().cloned());
+        } else {
+            not_applied.extend(targets.iter().cloned());
+        }
+    }
+    if applied.is_empty() {
+        return error;
+    }
+
+    let failed_route_targets = route_targets[failed_index].clone();
+    let uncertain = if attempted_route_has_mutated[failed_index] {
+        failed_route_targets
+    } else {
+        not_applied.extend(failed_route_targets);
+        Vec::new()
+    };
+    not_applied.extend(route_targets[failed_index + 1..].concat());
+
+    BeadsError::PartiallyApplied(Box::new(crate::error::PartialApplication {
+        applied,
+        uncertain,
+        not_applied,
+        source: error,
+    }))
+}
+
 /// Report a post-mutation auto-flush failure without corrupting command stdout.
 ///
 /// The data mutation has already succeeded by the time this is called. The
@@ -652,8 +730,9 @@ pub fn apply_date_range_filters(
 mod tests {
     use super::{
         acquire_routed_workspace_write_lock, finalize_batched_blocked_cache_refresh,
-        preserve_blocked_cache_on_error, rebuild_blocked_cache_after_partial_mutation,
-        retry_mutation_with_jsonl_recovery, should_attempt_mutation_jsonl_recovery,
+        partial_route_failure, preserve_blocked_cache_on_error,
+        rebuild_blocked_cache_after_partial_mutation, retry_mutation_with_jsonl_recovery,
+        should_attempt_mutation_jsonl_recovery,
     };
     use crate::config::{CliOverrides, OpenStorageResult, open_storage_with_cli};
     use crate::error::BeadsError;
@@ -665,6 +744,120 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    /// Three routes; the first writes, the second fails before writing
+    /// anything. The first route's targets are written and unrecoverable, the
+    /// second and third are untouched.
+    #[test]
+    fn partial_route_failure_reports_untouched_routes_when_the_failure_wrote_nothing() {
+        let routes = vec![
+            vec!["bd-1".to_string(), "bd-2".to_string()],
+            vec!["bd-3".to_string()],
+            vec!["bd-4".to_string()],
+        ];
+
+        let error = partial_route_failure(
+            &routes,
+            &[true, false],
+            BeadsError::validation("if-status", "guard rejected"),
+        );
+
+        let BeadsError::PartiallyApplied(partial) = error else {
+            panic!("expected a partial-application error, got: {error}");
+        };
+        assert_eq!(
+            partial.applied,
+            vec!["bd-1".to_string(), "bd-2".to_string()]
+        );
+        assert!(partial.uncertain.is_empty());
+        assert_eq!(
+            partial.not_applied,
+            vec!["bd-3".to_string(), "bd-4".to_string()]
+        );
+    }
+
+    /// Same shape, except the failing route had already committed something.
+    /// Its own targets move out of "untouched" and into "uncertain" — a route
+    /// is atomic in its primary write but not across the follow-up steps.
+    #[test]
+    fn partial_route_failure_reports_a_half_written_route_as_uncertain() {
+        let routes = vec![
+            vec!["bd-1".to_string()],
+            vec!["bd-2".to_string(), "bd-3".to_string()],
+            vec!["bd-4".to_string()],
+        ];
+
+        let error = partial_route_failure(
+            &routes,
+            &[true, true],
+            BeadsError::validation("label", "no table"),
+        );
+
+        let BeadsError::PartiallyApplied(partial) = error else {
+            panic!("expected a partial-application error, got: {error}");
+        };
+        assert_eq!(partial.applied, vec!["bd-1".to_string()]);
+        assert_eq!(
+            partial.uncertain,
+            vec!["bd-2".to_string(), "bd-3".to_string()]
+        );
+        assert_eq!(partial.not_applied, vec!["bd-4".to_string()]);
+    }
+
+    /// A route that succeeded without writing anything — every issue already
+    /// closed, every detach a no-op — is untouched, not applied. Reporting it
+    /// as written would send the caller looking for damage that is not there,
+    /// and would misreport what a re-run is safe to include.
+    #[test]
+    fn partial_route_failure_does_not_call_a_no_op_route_applied() {
+        let routes = vec![
+            vec!["bd-1".to_string()],
+            vec!["bd-2".to_string()],
+            vec!["bd-3".to_string()],
+        ];
+
+        let error = partial_route_failure(
+            &routes,
+            &[false, true, false],
+            BeadsError::validation("ids", "not found"),
+        );
+
+        let BeadsError::PartiallyApplied(partial) = error else {
+            panic!("expected a partial-application error, got: {error}");
+        };
+        assert_eq!(partial.applied, vec!["bd-2".to_string()]);
+        assert!(partial.uncertain.is_empty());
+        assert_eq!(
+            partial.not_applied,
+            vec!["bd-1".to_string(), "bd-3".to_string()],
+            "the no-op first route belongs with the untouched routes"
+        );
+    }
+
+    /// Nothing written anywhere is not a partial application, even when a
+    /// later route is the one that failed: the cause is returned untouched
+    /// rather than dressed up as damage the caller now has to inspect.
+    #[test]
+    fn partial_route_failure_passes_the_cause_through_when_no_route_wrote_anything() {
+        let routes = vec![
+            vec!["bd-1".to_string()],
+            vec!["bd-2".to_string()],
+            vec!["bd-3".to_string()],
+        ];
+
+        for attempted in [vec![true], vec![false, true], vec![false, false]] {
+            let error = partial_route_failure(
+                &routes,
+                &attempted,
+                BeadsError::validation("if-status", "guard rejected"),
+            );
+
+            assert!(
+                matches!(error, BeadsError::Validation { .. }),
+                "expected the cause unchanged for {attempted:?}, got: {error}"
+            );
+        }
+    }
 
     fn storage_ctx_with_exported_issue() -> (TempDir, OpenStorageResult) {
         let temp = TempDir::new().expect("tempdir");

@@ -6,8 +6,8 @@
 use crate::cli::DeleteArgs;
 use crate::cli::commands::{
     RoutedWorkspaceWriteLock, acquire_routed_workspace_write_lock,
-    auto_import_storage_ctx_if_stale, report_auto_flush_failure, resolve_issue_ids,
-    retry_mutation_with_jsonl_recovery,
+    auto_import_storage_ctx_if_stale, partial_route_failure, report_auto_flush_failure,
+    resolve_issue_ids, retry_mutation_with_jsonl_recovery,
 };
 use crate::config;
 use crate::error::{BeadsError, Result};
@@ -464,6 +464,12 @@ fn execute_routed(
     let normalized_local_beads_dir =
         dunce::canonicalize(local_beads_dir).unwrap_or_else(|_| local_beads_dir.to_path_buf());
     let mut prepared_routes = Vec::with_capacity(routed_batches.len());
+    // Every route's targets, captured before the loop consumes the batches: on
+    // failure the report has to name the routes that never ran too (bds-3x6).
+    let route_targets = routed_batches
+        .iter()
+        .map(|batch| batch.issue_inputs.clone())
+        .collect::<Vec<_>>();
 
     for batch in routed_batches {
         let normalized_batch_beads_dir =
@@ -541,8 +547,24 @@ fn execute_routed(
     }
 
     let mut result = DeleteResult::new();
+    // Each route commits before the next is opened, so a later route's failure
+    // cannot undo an earlier one. Report what landed rather than surfacing a
+    // cause that names only the target that failed.
+    let mut attempted_route_mutations = Vec::with_capacity(route_targets.len());
     for route in &prepared_routes {
-        let batch_result = apply_delete_route(args, route, ctx)?;
+        let mut route_has_mutated = false;
+        let route_result = apply_delete_route(args, route, ctx, &mut route_has_mutated);
+        attempted_route_mutations.push(route_has_mutated);
+        let batch_result = match route_result {
+            Ok(batch_result) => batch_result,
+            Err(error) => {
+                return Err(partial_route_failure(
+                    &route_targets,
+                    &attempted_route_mutations,
+                    error,
+                ));
+            }
+        };
         merge_delete_result(&mut result, batch_result);
     }
     finalize_delete_result(&mut result);
@@ -627,10 +649,19 @@ fn prepare_delete_route(
     })
 }
 
+/// Delete one route's batch.
+///
+/// `route_has_mutated` is an out-parameter rather than a local because the
+/// caller needs it on the error path: when a routed fan-out fails mid-flight,
+/// whether this route had already written anything is what separates
+/// "untouched" from "possibly partly written" in the report (bds-3x6). It is
+/// set as each write commits, so it is meaningful even when this function
+/// returns `Err`.
 fn apply_delete_route(
     args: &DeleteArgs,
     route: &PreparedDeleteRoute,
     ctx: &OutputContext,
+    route_has_mutated: &mut bool,
 ) -> Result<DeleteResult> {
     let mut storage_ctx = config::open_storage_with_cli(&route.beads_dir, &route.route_cli)?;
     auto_import_storage_ctx_if_stale(&mut storage_ctx, &route.route_cli)?;
@@ -638,18 +669,17 @@ fn apply_delete_route(
     let actor = config::resolve_actor(&config_layer);
 
     let mut result = DeleteResult::new();
-    let mut batch_has_mutated = false;
     for id in &route.final_delete_ids {
         let deps_removed = retry_mutation_with_jsonl_recovery(
             &mut storage_ctx,
-            !batch_has_mutated,
+            !*route_has_mutated,
             "delete remove dependencies",
             Some(id.as_str()),
             |storage| storage.remove_all_dependencies(id),
         )?;
         result.dependencies_removed += deps_removed;
         if deps_removed > 0 {
-            batch_has_mutated = true;
+            *route_has_mutated = true;
         }
     }
 
@@ -662,7 +692,7 @@ fn apply_delete_route(
             result.labels_removed += storage_ctx.storage.get_labels(id)?.len();
             retry_mutation_with_jsonl_recovery(
                 &mut storage_ctx,
-                !batch_has_mutated,
+                !*route_has_mutated,
                 "delete purge",
                 Some(id.as_str()),
                 |storage| storage.purge_issue(id),
@@ -670,13 +700,13 @@ fn apply_delete_route(
         } else {
             retry_mutation_with_jsonl_recovery(
                 &mut storage_ctx,
-                !batch_has_mutated,
+                !*route_has_mutated,
                 "delete tombstone",
                 Some(id.as_str()),
                 |storage| storage.delete_issue(id, &actor, &args.reason, None),
             )?;
         }
-        batch_has_mutated = true;
+        *route_has_mutated = true;
         result.deleted.push(id.clone());
     }
     result.deleted_count = result.deleted.len();

@@ -3620,6 +3620,10 @@ fn e2e_routing_detach_external_issue_via_main_workspace() {
 /// version of this property is pinned by
 /// `detach::tests::execute_marks_the_blocked_cache_stale_when_a_later_id_in_the_batch_fails`;
 /// this is the same property across a workspace boundary.
+///
+/// What the earlier workspace's commit is *reported* as is a separate
+/// property, pinned by
+/// `e2e_routing_detach_partial_application_names_the_detached_target` (bds-3x6).
 #[test]
 #[allow(clippy::too_many_lines)]
 fn e2e_routing_detach_failure_in_second_workspace_preserves_earlier_committed_workspace() {
@@ -3744,4 +3748,240 @@ fn e2e_routing_detach_failure_in_second_workspace_preserves_earlier_committed_wo
         local_epic_after[0]["status"].as_str().is_some(),
         "local epic must still be readable"
     );
+}
+
+/// The same contract as `br update`, on `br close` (bds-3x6). The failure mode
+/// differs: `close` resolves each route's IDs inside that route, so an ID that
+/// does not exist in the *second* workspace is not caught until the first
+/// workspace has already committed its closes.
+#[test]
+fn e2e_routing_close_partial_application_names_the_closed_target() {
+    let _log = common::test_log("e2e_routing_close_partial_application_names_the_closed_target");
+
+    let main_workspace = BrWorkspace::new();
+    let external_workspace = BrWorkspace::new();
+
+    init_workspace(&main_workspace, "init_close_partial_main");
+    init_workspace(&external_workspace, "init_close_partial_external");
+    configure_external_route(&main_workspace, &external_workspace);
+
+    let local_id = create_issue_and_get_id(
+        &main_workspace,
+        "Local close target",
+        "create_local_close_target",
+    );
+
+    // Local route first, then a routed ID that does not exist in the external
+    // workspace. Routes are grouped in first-seen order, so the local close
+    // commits before the external route is even opened.
+    let close = run_br(
+        &main_workspace,
+        ["close", &local_id, "ext-nosuch", "--json"],
+        "close_partial_application",
+    );
+    assert!(
+        !close.status.success(),
+        "the unresolvable external ID has to fail the command: {}",
+        close.stdout
+    );
+
+    assert_eq!(
+        show_issue_json(&main_workspace, &local_id, "show_local_after_close_split")[0]["status"]
+            .as_str(),
+        Some("closed"),
+        "the local route committed before the external route was opened"
+    );
+
+    let documents: Vec<Value> = serde_json::Deserializer::from_str(&close.stdout)
+        .into_iter::<Value>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| {
+            panic!("parse stdout as a JSON stream ({error}): {}", close.stdout)
+        });
+    let failure = documents
+        .iter()
+        .find(|value| value.get("error").is_some())
+        .unwrap_or_else(|| panic!("no error document: {}", close.stdout));
+
+    assert_eq!(
+        failure["error"]["code"].as_str(),
+        Some("PARTIALLY_APPLIED"),
+        "{}",
+        close.stdout
+    );
+    assert_eq!(
+        failure["error"]["context"]["applied"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec![local_id.as_str()]),
+        "{}",
+        close.stdout
+    );
+    assert_eq!(
+        failure["error"]["context"]["not_applied"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec!["ext-nosuch"]),
+        "the external route failed while resolving, before writing anything: {}",
+        close.stdout
+    );
+    assert_eq!(close.status.code(), Some(3), "{}", close.stdout);
+}
+
+/// A route that succeeds without writing anything is not a partial
+/// application. Closing an already-closed issue skips it, so when the second
+/// route then fails there is no damage to report and the cause is surfaced
+/// unchanged — the distinction `partial_route_failure` tracks per route rather
+/// than assuming every earlier route wrote.
+#[test]
+fn e2e_routing_close_does_not_claim_a_no_op_route_was_applied() {
+    let _log = common::test_log("e2e_routing_close_does_not_claim_a_no_op_route_was_applied");
+
+    let main_workspace = BrWorkspace::new();
+    let external_workspace = BrWorkspace::new();
+
+    init_workspace(&main_workspace, "init_close_noop_main");
+    init_workspace(&external_workspace, "init_close_noop_external");
+    configure_external_route(&main_workspace, &external_workspace);
+
+    let local_id = create_issue_and_get_id(
+        &main_workspace,
+        "Already closed",
+        "create_local_noop_target",
+    );
+    let first_close = run_br(
+        &main_workspace,
+        ["close", &local_id],
+        "close_local_noop_target_first",
+    );
+    assert!(
+        first_close.status.success(),
+        "first close failed: {}",
+        first_close.stderr
+    );
+
+    let close = run_br(
+        &main_workspace,
+        ["close", &local_id, "ext-nosuch", "--json"],
+        "close_noop_then_failure",
+    );
+    assert!(
+        !close.status.success(),
+        "the unresolvable external ID still has to fail the command: {}",
+        close.stdout
+    );
+
+    let documents: Vec<Value> = serde_json::Deserializer::from_str(&close.stdout)
+        .into_iter::<Value>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| {
+            panic!("parse stdout as a JSON stream ({error}): {}", close.stdout)
+        });
+    let failure = documents
+        .iter()
+        .find(|value| value.get("error").is_some())
+        .unwrap_or_else(|| panic!("no error document: {}", close.stdout));
+
+    assert_ne!(
+        failure["error"]["code"].as_str(),
+        Some("PARTIALLY_APPLIED"),
+        "the local route skipped an already-closed issue and wrote nothing, so \
+         nothing was partially applied: {}",
+        close.stdout
+    );
+}
+
+/// `br reopen` shares `close`'s shape: resolution happens per route, so the
+/// first route's reopen commits before the second route is opened.
+#[test]
+fn e2e_routing_reopen_partial_application_names_the_reopened_target() {
+    let _log = common::test_log("e2e_routing_reopen_partial_application_names_the_reopened_target");
+
+    let main_workspace = BrWorkspace::new();
+    let external_workspace = BrWorkspace::new();
+
+    init_workspace(&main_workspace, "init_reopen_partial_main");
+    init_workspace(&external_workspace, "init_reopen_partial_external");
+    configure_external_route(&main_workspace, &external_workspace);
+
+    let local_id = create_issue_and_get_id(
+        &main_workspace,
+        "Local reopen target",
+        "create_local_reopen_target",
+    );
+    let close = run_br(
+        &main_workspace,
+        ["close", &local_id],
+        "close_local_reopen_target",
+    );
+    assert!(close.status.success(), "close failed: {}", close.stderr);
+
+    let reopen = run_br(
+        &main_workspace,
+        ["reopen", &local_id, "ext-nosuch"],
+        "reopen_partial_application",
+    );
+    assert!(
+        !reopen.status.success(),
+        "the unresolvable external ID has to fail the command: {}",
+        reopen.stderr
+    );
+    assert_eq!(
+        show_issue_json(&main_workspace, &local_id, "show_local_after_reopen_split")[0]["status"]
+            .as_str(),
+        Some("open"),
+        "the local route committed before the external route was opened"
+    );
+    assert!(
+        reopen.stderr.contains(&local_id),
+        "the failure must name the target it already wrote: {}",
+        reopen.stderr
+    );
+    assert_eq!(reopen.status.code(), Some(3), "{}", reopen.stderr);
+}
+
+/// `br detach` too. Its per-route mutation flag is the one that also drives the
+/// blocked-cache refresh: a detach that finds no parent writes nothing.
+#[test]
+fn e2e_routing_detach_partial_application_names_the_detached_target() {
+    let _log = common::test_log("e2e_routing_detach_partial_application_names_the_detached_target");
+
+    let main_workspace = BrWorkspace::new();
+    let external_workspace = BrWorkspace::new();
+
+    init_workspace(&main_workspace, "init_detach_partial_main");
+    init_workspace(&external_workspace, "init_detach_partial_external");
+    configure_external_route(&main_workspace, &external_workspace);
+
+    let parent_id = create_issue_and_get_id(&main_workspace, "Parent", "create_detach_parent");
+    let create_child = run_br(
+        &main_workspace,
+        ["create", "Child", "--parent", &parent_id, "--json"],
+        "create_detach_child",
+    );
+    assert!(
+        create_child.status.success(),
+        "child create failed: {}",
+        create_child.stderr
+    );
+    let child: Value =
+        serde_json::from_str(&extract_json_payload(&create_child.stdout)).expect("child json");
+    let child_id = child["id"].as_str().expect("child id").to_string();
+
+    let detach = run_br(
+        &main_workspace,
+        ["detach", &child_id, "ext-nosuch"],
+        "detach_partial_application",
+    );
+    assert!(
+        !detach.status.success(),
+        "the unresolvable external ID has to fail the command: {}",
+        detach.stderr
+    );
+    assert!(
+        detach.stderr.contains(&child_id),
+        "the failure must name the target it already detached: {}",
+        detach.stderr
+    );
+    assert_eq!(detach.status.code(), Some(3), "{}", detach.stderr);
 }

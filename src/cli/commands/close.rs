@@ -4,7 +4,7 @@ use super::create::read_text_argument_file;
 use crate::cli::CloseArgs as CliCloseArgs;
 use crate::cli::commands::{
     acquire_routed_workspace_write_lock, auto_import_storage_ctx_if_stale,
-    finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error,
+    finalize_batched_blocked_cache_refresh, partial_route_failure, preserve_blocked_cache_on_error,
     report_auto_flush_failure, resolve_issue_id, resolve_issue_ids,
     update_issues_atomically_with_recovery,
 };
@@ -430,6 +430,14 @@ pub fn execute_with_args(
         let normalized_local_beads_dir =
             dunce::canonicalize(&beads_dir).unwrap_or_else(|_| beads_dir.clone());
         let mut routed_outcomes = Vec::new();
+        // Every route's targets, captured before the loop starts: on failure
+        // the report has to name the routes that never ran too (bds-3x6).
+        let route_targets = routed_batches
+            .iter()
+            .map(|batch| batch.issue_inputs.clone())
+            .collect::<Vec<_>>();
+
+        let mut attempted_route_mutations = Vec::with_capacity(route_targets.len());
 
         for batch in routed_batches {
             let mut batch_args = args.clone();
@@ -444,13 +452,29 @@ pub fn execute_with_args(
                 None
             };
 
-            let execution = execute_route(
+            // Each route commits before the next is opened, so a later route's
+            // failure cannot undo an earlier one. Report what landed rather
+            // than surfacing a cause that names only the target that failed.
+            let mut route_has_mutated = false;
+            let route_result = execute_route(
                 &batch_args,
                 &batch_cli,
                 ctx,
                 &batch.beads_dir,
                 batch.is_external,
-            )?;
+                &mut route_has_mutated,
+            );
+            attempted_route_mutations.push(route_has_mutated);
+            let execution = match route_result {
+                Ok(execution) => execution,
+                Err(error) => {
+                    return Err(partial_route_failure(
+                        &route_targets,
+                        &attempted_route_mutations,
+                        error,
+                    ));
+                }
+            };
             let CloseExecution {
                 unblocked,
                 ordered_outcomes,
@@ -476,7 +500,17 @@ pub fn execute_with_args(
     } else {
         let mut local_args = args.clone();
         local_args.ids = target_inputs;
-        let execution = execute_route(&local_args, cli, ctx, &beads_dir, false)?;
+        // A single route has nothing to be partial *across*, so its mutation
+        // flag is discarded and the cause propagates unchanged.
+        let mut route_has_mutated = false;
+        let execution = execute_route(
+            &local_args,
+            cli,
+            ctx,
+            &beads_dir,
+            false,
+            &mut route_has_mutated,
+        )?;
         closed_issues = execution.closed;
         skipped_issues = execution.skipped;
         unblocked_issues = execution.unblocked;
@@ -590,12 +624,21 @@ fn summarize_skip_reasons(skipped: &[SkippedIssue]) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
+/// Close one route's batch.
+///
+/// `route_has_mutated` is an out-parameter rather than a local because the
+/// caller needs it on the error path: when a routed fan-out fails mid-flight,
+/// whether this route had already written anything is what separates
+/// "untouched" from "possibly partly written" in the report (bds-3x6). It is
+/// set as the batch commits, so it is meaningful even when this function
+/// returns `Err`.
 fn execute_route(
     args: &CloseArgs,
     cli: &config::CliOverrides,
     ctx: &OutputContext,
     beads_dir: &Path,
     auto_flush_external: bool,
+    route_has_mutated: &mut bool,
 ) -> Result<CloseExecution> {
     let _routed_write_lock =
         acquire_routed_workspace_write_lock(beads_dir, auto_flush_external, cli.lock_timeout)?;
@@ -878,6 +921,7 @@ fn execute_route(
         preserve_blocked_cache_on_error(&mut storage_ctx.storage, false, "close", update_result)?;
         capacity_warnings = storage_ctx.storage.take_capacity_warnings();
         cache_dirty = true;
+        *route_has_mutated = true;
     }
 
     for (outcome_index, id, issue, now, close_reason) in planned_closes {
@@ -1608,8 +1652,16 @@ mod tests {
             ],
             ..CloseArgs::default()
         };
-        let execution = execute_route(&args, &CliOverrides::default(), &ctx, &beads_dir, false)
-            .expect("mixed close batch");
+        let mut route_has_mutated = false;
+        let execution = execute_route(
+            &args,
+            &CliOverrides::default(),
+            &ctx,
+            &beads_dir,
+            false,
+            &mut route_has_mutated,
+        )
+        .expect("mixed close batch");
 
         assert!(matches!(
             &execution.ordered_outcomes[0],

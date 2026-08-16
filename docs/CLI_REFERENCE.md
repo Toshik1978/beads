@@ -117,28 +117,40 @@ Safety boundaries:
 - Cross-project dependency status checks use explicit IDs such as
   `external:api:api-123` plus config keys like `external_projects.api=../api`.
 
-**A routed `update` is not atomic across routes, and says so.** Each route is a
-separate database and a separate transaction, so once one route has committed
-nothing can undo it. A guard that is only checked at commit time — `--if-status`
-is the one that reaches this — can therefore reject a later route after an
-earlier one has already been written.
+**A routed fan-out is not atomic across routes, and says so.** Each route is a
+separate database and a separate transaction, and every route-aware command
+opens, mutates and finalizes one workspace before it opens the next — so once a
+route has committed, nothing can undo it. A later route can still fail: because
+its IDs do not resolve there, because a workflow or capacity rule rejects it, or
+because a commit-time guard such as `update --if-status` does not hold.
 
-When that happens `br update` exits **3** with error code `PARTIALLY_APPLIED`
+When that happens the command exits **3** with error code `PARTIALLY_APPLIED`
 instead of surfacing the bare cause, whose message would name only the target
-that failed and read as though the whole command had been refused. Its `context`
-splits every target three ways:
+that failed and read as though the whole command had been refused. This applies
+to `update`, `close`, `reopen`, `delete`, `label add`/`remove`, and `detach`;
+`show` is read-only and `comments`/`dep`/`rename` act on a single route.
+
+Its `context` splits every target three ways:
 
 | Field | Meaning |
 | --- | --- |
-| `applied` | Written. The route committed in full and cannot be rolled back. |
-| `uncertain` | The failing route's targets, when it had already committed something. A route is atomic in its field update but not across the label and re-parent steps that follow, so these may be partly updated. |
-| `not_applied` | Untouched — the route was never reached, or it failed before writing anything. |
+| `applied` | Written. That route committed and cannot be rolled back. A route that succeeded without writing anything — every issue already closed, every detach a no-op — is *not* listed here. |
+| `uncertain` | The failing route's targets, when it had already written something before failing. A route is atomic in its primary write but not across the follow-up steps (labels, re-parenting, per-ID deletes), so these may be partly updated. |
+| `not_applied` | Untouched — the route was never reached, it failed before writing anything, or it ran and changed nothing. |
+
+Targets are listed **as you supplied them**, not canonicalised: a route that was
+never reached was never opened, so its IDs were never resolved, and one field
+cannot mean two things.
 
 `context.cause_code` carries the code the failure would have had on its own
-(`PRECONDITION_FAILED` for a rejected `--if-status`), so a caller can still
-branch on *why* the fan-out stopped after branching on the fact that it stopped
-halfway. `retryable` is `false`: re-running the same command would now trip the
-guard on the targets that already moved. Re-run against `not_applied` instead.
+(`PRECONDITION_FAILED` for a rejected `--if-status`, `ISSUE_NOT_FOUND` for an ID
+that does not exist in the target workspace), so a caller can still branch on
+*why* the fan-out stopped after branching on the fact that it stopped halfway.
+`retryable` is `false`: re-running the same command can trip on the targets that
+already moved. Re-run against `not_applied` instead.
+
+Nothing partial is reported when no route wrote anything — the cause is
+surfaced unchanged, exactly as an unrouted command would surface it.
 
 ---
 
@@ -478,7 +490,8 @@ their own transactions and cannot be guarded atomically, so `br update <id>
 "Nothing is written" holds within one workspace. A multi-target update whose IDs
 [route](#cross-project-routing) to different workspaces commits each route in
 turn, so a guard rejecting a later route cannot undo an earlier one; that case
-exits 3 with `PARTIALLY_APPLIED` and names which targets landed.
+exits 3 with `PARTIALLY_APPLIED` and names which targets landed. The same
+applies to every other route-aware fan-out.
 
 ---
 
@@ -705,8 +718,8 @@ workflow:
 - Routed commands transact each repository independently. There is no
   distributed transaction across repositories, so an earlier route may already
   be committed if a later route fails and cross-repository atomicity is
-  intentionally not claimed. `update` reports that case rather than leaving it
-  to be inferred; see `PARTIALLY_APPLIED` under
+  intentionally not claimed. Every route-aware fan-out reports that case rather
+  than leaving it to be inferred; see `PARTIALLY_APPLIED` under
   [Cross-Project Routing](#cross-project-routing).
 - Omitting `workflow.capacity` preserves existing behavior exactly.
 - The current enforcement layer has fixed `repository` scope and `all`

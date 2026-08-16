@@ -33,7 +33,7 @@
 use crate::cli::DetachArgs;
 use crate::cli::commands::{
     acquire_routed_workspace_write_lock, auto_import_storage_ctx_if_stale,
-    finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error,
+    finalize_batched_blocked_cache_refresh, partial_route_failure, preserve_blocked_cache_on_error,
     report_auto_flush_failure, resolve_issue_ids,
 };
 use crate::config;
@@ -82,15 +82,26 @@ pub fn execute(
     // Detach follows the same routing shape as `reopen`/`close`/`update`: each
     // route is opened, mutated and fully flushed (JSONL debt + blocked cache)
     // before the next route is even opened. A failure in a later route's
-    // `execute_route` therefore propagates via `?` without touching what an
-    // earlier, already-finalized route committed -- there is nothing left to
-    // roll back there, and nothing else in this repo's routed commands rolls
-    // an earlier workspace back either. See `execute_route` for the mid-batch
-    // (single-workspace) staleness handling this relies on per route.
+    // `execute_route` therefore cannot touch what an earlier, already-finalized
+    // route committed -- there is nothing left to roll back there, and nothing
+    // else in this repo's routed commands rolls an earlier workspace back
+    // either. What the failure does do is report it: `partial_route_failure`
+    // names the targets that landed instead of letting a cause that mentions
+    // only the failing ID imply that nothing happened (bds-3x6). See
+    // `execute_route` for the mid-batch (single-workspace) staleness handling
+    // this relies on per route.
     let outcomes = if routed_batches.iter().any(|batch| batch.is_external) {
         let normalized_local_beads_dir =
             dunce::canonicalize(&beads_dir).unwrap_or_else(|_| beads_dir.clone());
         let mut routed_outcomes = Vec::new();
+        // Every route's targets, captured before the loop starts: on failure
+        // the report has to name the routes that never ran too.
+        let route_targets = routed_batches
+            .iter()
+            .map(|batch| batch.issue_inputs.clone())
+            .collect::<Vec<_>>();
+
+        let mut attempted_route_mutations = Vec::with_capacity(route_targets.len());
 
         for batch in routed_batches {
             let mut batch_args = args.clone();
@@ -105,19 +116,35 @@ pub fn execute(
                 None
             };
 
-            let batch_outcomes = execute_route(
+            let mut route_has_mutated = false;
+            let route_result = execute_route(
                 &batch_args,
                 &batch_cli,
                 ctx,
                 &batch.beads_dir,
                 batch.is_external,
-            )?;
+                &mut route_has_mutated,
+            );
+            attempted_route_mutations.push(route_has_mutated);
+            let batch_outcomes = match route_result {
+                Ok(outcomes) => outcomes,
+                Err(error) => {
+                    return Err(partial_route_failure(
+                        &route_targets,
+                        &attempted_route_mutations,
+                        error,
+                    ));
+                }
+            };
             routed_outcomes.push((batch.issue_inputs.clone(), batch_outcomes));
         }
 
         reorder_routed_items_by_requested_inputs(&args.ids, routed_outcomes, "detach routing")?
     } else {
-        execute_route(args, cli, ctx, &beads_dir, false)?
+        // A single route has nothing to be partial *across*, so its mutation
+        // flag is discarded and the cause propagates unchanged.
+        let mut route_has_mutated = false;
+        execute_route(args, cli, ctx, &beads_dir, false, &mut route_has_mutated)?
     };
 
     if let Some(last) = outcomes.last() {
@@ -175,12 +202,21 @@ pub fn execute(
 /// 3. `detach_one`'s tombstone guard (`ensure_issue_mutable`) is untouched --
 ///    routing only changes which storage is opened, not what each ID goes
 ///    through once it is resolved.
+/// Detach one route's batch.
+///
+/// `route_has_mutated` is an out-parameter rather than a local because the
+/// caller needs it on the error path: when a routed fan-out fails mid-flight,
+/// whether this route had already written anything is what separates
+/// "untouched" from "possibly partly written" in the report (bds-3x6). It
+/// tracks the same thing `cache_dirty` does — a detach that found no parent
+/// writes nothing — so it is meaningful even when this function returns `Err`.
 fn execute_route(
     args: &DetachArgs,
     cli: &config::CliOverrides,
     ctx: &OutputContext,
     beads_dir: &Path,
     auto_flush_external: bool,
+    route_has_mutated: &mut bool,
 ) -> Result<Vec<DetachOutcome>> {
     let _routed_write_lock =
         acquire_routed_workspace_write_lock(beads_dir, auto_flush_external, cli.lock_timeout)?;
@@ -226,6 +262,7 @@ fn execute_route(
         };
         if outcome.action != "no_parent" {
             cache_dirty = true;
+            *route_has_mutated = true;
         }
         outcomes.push(outcome);
     }

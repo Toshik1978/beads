@@ -3,7 +3,7 @@
 use crate::cli::ReopenArgs;
 use crate::cli::commands::{
     acquire_routed_workspace_write_lock, auto_import_storage_ctx_if_stale,
-    finalize_batched_blocked_cache_refresh, preserve_blocked_cache_on_error,
+    finalize_batched_blocked_cache_refresh, partial_route_failure, preserve_blocked_cache_on_error,
     report_auto_flush_failure, resolve_issue_ids, update_issues_atomically_with_recovery,
 };
 use crate::config;
@@ -91,6 +91,14 @@ pub fn execute(
         let normalized_local_beads_dir =
             dunce::canonicalize(&beads_dir).unwrap_or_else(|_| beads_dir.clone());
         let mut routed_outcomes = Vec::new();
+        // Every route's targets, captured before the loop starts: on failure
+        // the report has to name the routes that never ran too (bds-3x6).
+        let route_targets = routed_batches
+            .iter()
+            .map(|batch| batch.issue_inputs.clone())
+            .collect::<Vec<_>>();
+
+        let mut attempted_route_mutations = Vec::with_capacity(route_targets.len());
 
         for batch in routed_batches {
             let mut batch_args = args.clone();
@@ -105,13 +113,29 @@ pub fn execute(
                 None
             };
 
-            let result = execute_route(
+            // Each route commits before the next is opened, so a later route's
+            // failure cannot undo an earlier one. Report what landed rather
+            // than surfacing a cause that names only the target that failed.
+            let mut route_has_mutated = false;
+            let route_result = execute_route(
                 &batch_args,
                 &batch_cli,
                 ctx,
                 &batch.beads_dir,
                 batch.is_external,
-            )?;
+                &mut route_has_mutated,
+            );
+            attempted_route_mutations.push(route_has_mutated);
+            let result = match route_result {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(partial_route_failure(
+                        &route_targets,
+                        &attempted_route_mutations,
+                        error,
+                    ));
+                }
+            };
             routed_outcomes.push((batch.issue_inputs.clone(), result.ordered_outcomes));
             capacity_warnings.extend(result.warnings);
         }
@@ -130,7 +154,17 @@ pub fn execute(
     } else {
         let mut local_args = args.clone();
         local_args.ids = target_inputs;
-        let result = execute_route(&local_args, cli, ctx, &beads_dir, false)?;
+        // A single route has nothing to be partial *across*, so its mutation
+        // flag is discarded and the cause propagates unchanged.
+        let mut route_has_mutated = false;
+        let result = execute_route(
+            &local_args,
+            cli,
+            ctx,
+            &beads_dir,
+            false,
+            &mut route_has_mutated,
+        )?;
         reopened_issues = result.reopened;
         skipped_issues = result.skipped;
         capacity_warnings = result.warnings;
@@ -196,12 +230,21 @@ pub fn execute(
 }
 
 #[allow(clippy::too_many_lines)]
+/// Reopen one route's batch.
+///
+/// `route_has_mutated` is an out-parameter rather than a local because the
+/// caller needs it on the error path: when a routed fan-out fails mid-flight,
+/// whether this route had already written anything is what separates
+/// "untouched" from "possibly partly written" in the report (bds-3x6). It is
+/// set as the batch commits, so it is meaningful even when this function
+/// returns `Err`.
 fn execute_route(
     args: &ReopenArgs,
     cli: &config::CliOverrides,
     ctx: &OutputContext,
     beads_dir: &Path,
     auto_flush_external: bool,
+    route_has_mutated: &mut bool,
 ) -> Result<ReopenResult> {
     let _routed_write_lock =
         acquire_routed_workspace_write_lock(beads_dir, auto_flush_external, cli.lock_timeout)?;
@@ -299,6 +342,7 @@ fn execute_route(
         preserve_blocked_cache_on_error(&mut storage_ctx.storage, false, "reopen", update_result)?;
         capacity_warnings = storage_ctx.storage.take_capacity_warnings();
         cache_dirty = true;
+        *route_has_mutated = true;
     }
 
     for (outcome_index, id, issue) in planned_reopens {

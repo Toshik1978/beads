@@ -191,7 +191,7 @@ pub enum BeadsError {
     PartiallyCompleted { reason: String },
 
     /// A command fanned out across routed workspaces failed after at least one
-    /// route had already committed (bds-j1m).
+    /// route had already committed (bds-j1m, bds-3x6).
     ///
     /// Distinct from [`Self::PartiallyCompleted`], which reports a batch the
     /// caller explicitly asked to continue past failures. This one is not
@@ -228,24 +228,25 @@ pub enum BeadsError {
     },
 }
 
-/// Which targets a fan-out command wrote before it failed (bds-j1m).
+/// Which targets a fan-out command wrote before it failed (bds-j1m, bds-3x6).
 ///
 /// The three buckets are deliberately not two: a route that failed *after* its
-/// field update committed but *before* its label or re-parent work finished is
-/// neither cleanly applied nor cleanly untouched, and collapsing it into either
-/// bucket would state something the command cannot know.
+/// primary write committed but *before* its follow-up work finished — labels,
+/// re-parenting, per-ID deletes — is neither cleanly applied nor cleanly
+/// untouched, and collapsing it into either bucket would state something the
+/// command cannot know.
 #[derive(Debug)]
 pub struct PartialApplication {
     /// Targets whose route committed in full before the failure. These are
     /// written and cannot be rolled back.
     pub applied: Vec<String>,
     /// Targets in the route that failed after it had already written
-    /// something. A route is atomic in its field update but not across the
-    /// label and re-parent steps that follow it, so these may be partly
-    /// updated.
+    /// something. A route is atomic in its primary write but not across the
+    /// follow-up steps, so these may be partly updated.
     pub uncertain: Vec<String>,
-    /// Targets whose route was never reached, or whose route failed before
-    /// writing anything. These are untouched.
+    /// Targets whose route was never reached, whose route failed before
+    /// writing anything, or whose route ran and changed nothing. These are
+    /// untouched.
     pub not_applied: Vec<String>,
     /// The failure that stopped the fan-out.
     pub source: BeadsError,
@@ -398,7 +399,7 @@ impl BeadsError {
                 "Part of the batch succeeded. Fix the reported items and re-run; the ones that already succeeded will be reported as already closed and will not be redone.",
             ),
             Self::PartiallyApplied(_) => Some(
-                "Do not re-run the same command: the targets listed as written have already moved, so a guard such as --if-status will now reject them too. Re-run against the remaining targets only.",
+                "Do not re-run the same command: the targets listed as written have already moved, so a guard or a skip rule can reject them the second time. Re-run against the targets reported as not written.",
             ),
             Self::PreconditionFailed { .. } => Some(
                 "Nothing was written. Re-read the issue with `br show` and decide whether to retry against the value it holds now.",

@@ -4,8 +4,8 @@
 
 use super::{
     RoutedWorkspaceWriteLock, acquire_routed_workspace_write_lock,
-    auto_import_storage_ctx_if_stale, cli_for_routed_workspace, report_auto_flush_failure,
-    resolve_issue_id, retry_mutation_with_jsonl_recovery,
+    auto_import_storage_ctx_if_stale, cli_for_routed_workspace, partial_route_failure,
+    report_auto_flush_failure, resolve_issue_id, retry_mutation_with_jsonl_recovery,
 };
 use crate::cli::{LabelAddArgs, LabelCommands, LabelListArgs, LabelRemoveArgs, LabelRenameArgs};
 use crate::config;
@@ -211,10 +211,33 @@ fn execute_routed_label_add(
     validate_label(&label)?;
     let prepared_routes = prepare_label_routes(&issue_inputs, cli, beads_dir)?;
     let mut routed_results = Vec::new();
+    // Every route's targets, captured before the loop consumes the prepared
+    // routes: on failure the report has to name the routes that never ran too
+    // (bds-3x6).
+    let route_targets = prepared_routes
+        .iter()
+        .map(|route| route.issue_inputs.clone())
+        .collect::<Vec<_>>();
 
+    // Each route commits before the next is opened, so a later route's failure
+    // cannot undo an earlier one. Report what landed rather than surfacing a
+    // cause that names only the target that failed.
+    let mut attempted_route_mutations = Vec::with_capacity(route_targets.len());
     for mut prepared_route in prepared_routes {
         let batch_inputs = prepared_route.issue_inputs.clone();
-        let batch_results = label_add(&mut prepared_route, &label, ctx)?;
+        let mut route_has_mutated = false;
+        let route_result = label_add(&mut prepared_route, &label, ctx, &mut route_has_mutated);
+        attempted_route_mutations.push(route_has_mutated);
+        let batch_results = match route_result {
+            Ok(results) => results,
+            Err(error) => {
+                return Err(partial_route_failure(
+                    &route_targets,
+                    &attempted_route_mutations,
+                    error,
+                ));
+            }
+        };
         routed_results.push((batch_inputs, batch_results));
     }
 
@@ -230,20 +253,28 @@ fn execute_routed_label_add(
     Ok(())
 }
 
+/// Apply the label add to one route's issues.
+///
+/// `route_has_mutated` is an out-parameter rather than a local because the
+/// caller needs it on the error path: when a routed fan-out fails mid-flight,
+/// whether this route had already written anything is what separates
+/// "untouched" from "possibly partly written" in the report (bds-3x6). It is
+/// set only when a write actually changed a row, so it is meaningful even when
+/// this function returns `Err`.
 fn label_add(
     prepared_route: &mut PreparedLabelRoute,
     label: &str,
     ctx: &OutputContext,
+    route_has_mutated: &mut bool,
 ) -> Result<Vec<LabelActionResult>> {
     let mut results = Vec::new();
-    let mut route_has_mutated = false;
 
     for issue_id in &prepared_route.resolved_ids {
         info!(issue_id = %issue_id, label = %label, "Adding label");
 
         let added = retry_mutation_with_jsonl_recovery(
             &mut prepared_route.storage_ctx,
-            !route_has_mutated,
+            !*route_has_mutated,
             "label add",
             Some(issue_id.as_str()),
             |storage| storage.add_label(issue_id, label),
@@ -253,7 +284,7 @@ fn label_add(
 
         if added {
             info!(issue_id = %issue_id, label = %label, "Label added");
-            route_has_mutated = true;
+            *route_has_mutated = true;
         }
 
         results.push(LabelActionResult {
@@ -288,10 +319,33 @@ fn execute_routed_label_remove(
     validate_label(&label)?;
     let prepared_routes = prepare_label_routes(&issue_inputs, cli, beads_dir)?;
     let mut routed_results = Vec::new();
+    // Every route's targets, captured before the loop consumes the prepared
+    // routes: on failure the report has to name the routes that never ran too
+    // (bds-3x6).
+    let route_targets = prepared_routes
+        .iter()
+        .map(|route| route.issue_inputs.clone())
+        .collect::<Vec<_>>();
 
+    // Each route commits before the next is opened, so a later route's failure
+    // cannot undo an earlier one. Report what landed rather than surfacing a
+    // cause that names only the target that failed.
+    let mut attempted_route_mutations = Vec::with_capacity(route_targets.len());
     for mut prepared_route in prepared_routes {
         let batch_inputs = prepared_route.issue_inputs.clone();
-        let batch_results = label_remove(&mut prepared_route, &label, ctx)?;
+        let mut route_has_mutated = false;
+        let route_result = label_remove(&mut prepared_route, &label, ctx, &mut route_has_mutated);
+        attempted_route_mutations.push(route_has_mutated);
+        let batch_results = match route_result {
+            Ok(results) => results,
+            Err(error) => {
+                return Err(partial_route_failure(
+                    &route_targets,
+                    &attempted_route_mutations,
+                    error,
+                ));
+            }
+        };
         routed_results.push((batch_inputs, batch_results));
     }
 
@@ -307,26 +361,34 @@ fn execute_routed_label_remove(
     Ok(())
 }
 
+/// Apply the label remove to one route's issues.
+///
+/// `route_has_mutated` is an out-parameter rather than a local because the
+/// caller needs it on the error path: when a routed fan-out fails mid-flight,
+/// whether this route had already written anything is what separates
+/// "untouched" from "possibly partly written" in the report (bds-3x6). It is
+/// set only when a write actually changed a row, so it is meaningful even when
+/// this function returns `Err`.
 fn label_remove(
     prepared_route: &mut PreparedLabelRoute,
     label: &str,
     ctx: &OutputContext,
+    route_has_mutated: &mut bool,
 ) -> Result<Vec<LabelActionResult>> {
     let mut results = Vec::new();
-    let mut route_has_mutated = false;
 
     for issue_id in &prepared_route.resolved_ids {
         info!(issue_id = %issue_id, label = %label, "Removing label");
 
         let removed = retry_mutation_with_jsonl_recovery(
             &mut prepared_route.storage_ctx,
-            !route_has_mutated,
+            !*route_has_mutated,
             "label remove",
             Some(issue_id.as_str()),
             |storage| storage.remove_label(issue_id, label),
         )?;
         if removed {
-            route_has_mutated = true;
+            *route_has_mutated = true;
         }
 
         results.push(LabelActionResult {

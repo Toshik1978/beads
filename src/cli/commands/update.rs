@@ -4,12 +4,13 @@ use super::create::read_text_argument_file;
 use super::{
     RoutedWorkspaceWriteLock, acquire_routed_workspace_write_lock,
     auto_import_storage_ctx_if_stale, finalize_batched_blocked_cache_refresh,
-    preserve_blocked_cache_on_error, report_auto_flush_failure, resolve_issue_id,
-    resolve_issue_ids, retry_mutation_with_jsonl_recovery, update_issues_atomically_with_recovery,
+    partial_route_failure, preserve_blocked_cache_on_error, report_auto_flush_failure,
+    resolve_issue_id, resolve_issue_ids, retry_mutation_with_jsonl_recovery,
+    update_issues_atomically_with_recovery,
 };
 use crate::cli::UpdateArgs;
 use crate::config;
-use crate::error::{BeadsError, PartialApplication, Result};
+use crate::error::{BeadsError, Result};
 use crate::format::{format_status_label, format_type_label, sanitize_terminal_inline};
 use crate::model::{Issue, IssueType, Priority, Status};
 use crate::output::OutputContext;
@@ -228,11 +229,14 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
             // Captured before the loop consumes `prepared_routes`, because the
             // error path below needs every route's targets — including those of
             // routes that never got to run.
-            let route_resolved_ids = prepared_routes
+            let route_targets = prepared_routes
                 .iter()
-                .map(|(_, route)| route.resolved_ids.clone())
+                .map(|(issue_inputs, _)| issue_inputs.clone())
                 .collect::<Vec<_>>();
-            let all_resolved_ids = route_resolved_ids.concat();
+            let all_resolved_ids = prepared_routes
+                .iter()
+                .flat_map(|(_, route)| route.resolved_ids.iter().cloned())
+                .collect::<Vec<_>>();
             validate_multi_issue_external_ref_update(
                 args.external_ref.as_deref(),
                 &all_resolved_ids,
@@ -252,23 +256,24 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
             //
             // Since the write cannot be undone, the failure is reported
             // instead: `partial_route_failure` replaces the bare cause with an
-            // error naming which targets landed (bds-j1m).
-            for (route_index, (issue_inputs, prepared_route)) in
-                prepared_routes.into_iter().enumerate()
-            {
+            // error naming which targets landed (bds-j1m). The same helper is
+            // wired into every other route-aware fan-out (bds-3x6).
+            let mut attempted_route_mutations = Vec::with_capacity(route_targets.len());
+            for (issue_inputs, prepared_route) in prepared_routes {
                 let mut route_has_mutated = false;
-                let route_output =
-                    match execute_prepared_route(prepared_route, ctx, &mut route_has_mutated) {
-                        Ok(output) => output,
-                        Err(error) => {
-                            return Err(partial_route_failure(
-                                &route_resolved_ids,
-                                route_index,
-                                route_has_mutated,
-                                error,
-                            ));
-                        }
-                    };
+                let route_result =
+                    execute_prepared_route(prepared_route, ctx, &mut route_has_mutated);
+                attempted_route_mutations.push(route_has_mutated);
+                let route_output = match route_result {
+                    Ok(output) => output,
+                    Err(error) => {
+                        return Err(partial_route_failure(
+                            &route_targets,
+                            &attempted_route_mutations,
+                            error,
+                        ));
+                    }
+                };
 
                 routed_capacity_warnings.extend(route_output.capacity_warnings);
 
@@ -365,47 +370,6 @@ pub fn execute(args: &UpdateArgs, cli: &config::CliOverrides, ctx: &OutputContex
     }
 
     Ok(())
-}
-
-/// Describe a fan-out that failed partway through, in terms of which targets
-/// were written (bds-j1m).
-///
-/// Routes commit independently, so once an earlier route has landed there is
-/// nothing to roll back and the only honest response is to say so. The failing
-/// route's own targets are reported as possibly-partly-written when it had
-/// already committed something, and as untouched when it had not — the
-/// distinction a caller needs to decide what to re-run.
-///
-/// When no earlier route committed, the cause is returned unchanged. Nothing
-/// partial happened across routes, and wrapping a plain failure in a
-/// partial-application error would tell the caller to inspect damage that does
-/// not exist. That deliberately leaves the single-route case reporting exactly
-/// what it reported before, matching the unrouted path.
-fn partial_route_failure(
-    route_resolved_ids: &[Vec<String>],
-    failed_index: usize,
-    failed_route_has_mutated: bool,
-    error: BeadsError,
-) -> BeadsError {
-    let applied = route_resolved_ids[..failed_index].concat();
-    if applied.is_empty() {
-        return error;
-    }
-
-    let failed_route_ids = route_resolved_ids[failed_index].clone();
-    let (uncertain, mut not_applied) = if failed_route_has_mutated {
-        (failed_route_ids, Vec::new())
-    } else {
-        (Vec::new(), failed_route_ids)
-    };
-    not_applied.extend(route_resolved_ids[failed_index + 1..].concat());
-
-    BeadsError::PartiallyApplied(Box::new(PartialApplication {
-        applied,
-        uncertain,
-        not_applied,
-        source: error,
-    }))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1456,91 +1420,6 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
     use tracing::info;
-
-    /// Three routes; the second fails before writing anything. The first
-    /// route's targets are written and unrecoverable, the second and third
-    /// are untouched.
-    #[test]
-    fn partial_route_failure_reports_untouched_routes_when_the_failure_wrote_nothing() {
-        init_test_logging();
-        let routes = vec![
-            vec!["bd-1".to_string(), "bd-2".to_string()],
-            vec!["bd-3".to_string()],
-            vec!["bd-4".to_string()],
-        ];
-
-        let error = partial_route_failure(
-            &routes,
-            1,
-            false,
-            BeadsError::validation("if-status", "guard rejected"),
-        );
-
-        let BeadsError::PartiallyApplied(partial) = error else {
-            panic!("expected a partial-application error, got: {error}");
-        };
-        assert_eq!(
-            partial.applied,
-            vec!["bd-1".to_string(), "bd-2".to_string()]
-        );
-        assert!(partial.uncertain.is_empty());
-        assert_eq!(
-            partial.not_applied,
-            vec!["bd-3".to_string(), "bd-4".to_string()]
-        );
-    }
-
-    /// Same shape, except the failing route had already committed something.
-    /// Its own targets move out of "untouched" and into "uncertain" — a route
-    /// is atomic in its field update but not across the label and re-parent
-    /// steps that follow.
-    #[test]
-    fn partial_route_failure_reports_a_half_written_route_as_uncertain() {
-        init_test_logging();
-        let routes = vec![
-            vec!["bd-1".to_string()],
-            vec!["bd-2".to_string(), "bd-3".to_string()],
-            vec!["bd-4".to_string()],
-        ];
-
-        let error = partial_route_failure(
-            &routes,
-            1,
-            true,
-            BeadsError::validation("label", "no table"),
-        );
-
-        let BeadsError::PartiallyApplied(partial) = error else {
-            panic!("expected a partial-application error, got: {error}");
-        };
-        assert_eq!(partial.applied, vec!["bd-1".to_string()]);
-        assert_eq!(
-            partial.uncertain,
-            vec!["bd-2".to_string(), "bd-3".to_string()]
-        );
-        assert_eq!(partial.not_applied, vec!["bd-4".to_string()]);
-    }
-
-    /// The first route failing is not a partial application: nothing landed,
-    /// so the cause is returned untouched rather than dressed up as damage the
-    /// caller now has to inspect.
-    #[test]
-    fn partial_route_failure_passes_the_cause_through_when_no_route_committed() {
-        init_test_logging();
-        let routes = vec![vec!["bd-1".to_string()], vec!["bd-2".to_string()]];
-
-        let error = partial_route_failure(
-            &routes,
-            0,
-            true,
-            BeadsError::validation("if-status", "guard rejected"),
-        );
-
-        assert!(
-            matches!(error, BeadsError::Validation { .. }),
-            "expected the cause unchanged, got: {error}"
-        );
-    }
 
     #[test]
     fn test_optional_string_field_with_value() {
