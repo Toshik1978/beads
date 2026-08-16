@@ -177,6 +177,7 @@ fn parse_issue(
         labels: labels_from_tags(raw),
         links: parse_links(raw, types),
         fields,
+        raw_custom_fields: raw.get("customFields").cloned().unwrap_or(Value::Null),
     })
 }
 

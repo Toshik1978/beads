@@ -38,6 +38,35 @@ pub struct FieldSet {
     pub beads_id: bool,
 }
 
+/// A remote bundle value with no beads preimage, before it becomes prose.
+///
+/// [`reverse_fields`] flattens this into a `RemoteError::Config` message,
+/// which is what every existing caller wants. Adoption wants the parts —
+/// it reports the issue, the field, the offending value and the map to
+/// extend as four separate strings — so the structured form is produced
+/// first and the message is derived from it. One definition, two shapes:
+/// see [`reverse_fields_structured`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmappedValue {
+    /// The YouTrack field name, e.g. `Type`.
+    pub field: String,
+    /// The value that has no preimage, e.g. `User Story`.
+    pub value: String,
+    /// The `remote.yaml` key that would cover it, e.g. `type_map`.
+    pub config_key: String,
+}
+
+impl UnmappedValue {
+    /// The pull-direction refusal, as one sentence.
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!(
+            "issue {} '{}' has no beads mapping; add an entry to {} in remote.yaml",
+            self.field, self.value, self.config_key
+        )
+    }
+}
+
 /// A bead's fields as read back from a YouTrack issue body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteIssueFields {
@@ -219,6 +248,34 @@ pub fn issue_update_body(
 /// present but unmapped is a hard error, distinct from an absent value,
 /// which resolves to the beads default.
 pub fn reverse_fields(cfg: &RemoteConfig, raw: &Value) -> Result<RemoteIssueFields, RemoteError> {
+    reverse_fields_structured(cfg, raw).map_err(|unmapped| RemoteError::Config(unmapped.message()))
+}
+
+/// [`reverse_fields`], with the refusal still in parts.
+///
+/// Adoption reports the issue, the field, the value and the map key
+/// separately, and re-parsing them back out of a formatted sentence would
+/// make the message format load-bearing. This is the same resolution with
+/// the refusal left structured; `reverse_fields` is the flattening wrapper.
+///
+/// **`raw` is not always a whole fetched issue.**
+/// [`crate::remote::adopt::classify_adoption`] rebuilds it from the three
+/// keys read below — `summary`, `description` and `customFields` — because a
+/// parsed `RemoteIssue` no longer holds the body it came from. Reading a
+/// *fourth* top-level key here would silently resolve to `None` on that path
+/// with nothing failing, so add the key to that reconstruction in the same
+/// change. `adoption_resolves_the_same_fields_as_the_whole_body` is the test
+/// that notices.
+///
+/// # Errors
+/// Returns [`UnmappedValue`] when a bundle field (`Type`/`State`/`Priority`)
+/// carries a value with no preimage in `cfg`'s maps — a value present but
+/// unmapped is a hard error, distinct from an absent value, which resolves to
+/// the beads default.
+pub fn reverse_fields_structured(
+    cfg: &RemoteConfig,
+    raw: &Value,
+) -> Result<RemoteIssueFields, UnmappedValue> {
     Ok(RemoteIssueFields {
         title: raw
             .get("summary")
@@ -250,41 +307,43 @@ fn bundle_value_name<'a>(raw: &'a Value, field_name: &str) -> Option<&'a str> {
         .as_str()
 }
 
-fn reverse_type(cfg: &RemoteConfig, raw: &Value) -> Result<IssueType, RemoteError> {
+fn reverse_type(cfg: &RemoteConfig, raw: &Value) -> Result<IssueType, UnmappedValue> {
     match bundle_value_name(raw, "Type") {
         None => Ok(IssueType::default()),
         Some(name) => cfg
             .reverse_type(name)
             .and_then(IssueType::known_value)
-            .ok_or_else(|| unmapped_remote_error("Type", name, "type_map")),
+            .ok_or_else(|| unmapped_remote_value("Type", name, "type_map")),
     }
 }
 
-fn reverse_status(cfg: &RemoteConfig, raw: &Value) -> Result<Status, RemoteError> {
+fn reverse_status(cfg: &RemoteConfig, raw: &Value) -> Result<Status, UnmappedValue> {
     match bundle_value_name(raw, "State") {
         None => Ok(Status::default()),
         Some(name) => cfg
             .reverse_status(name)
             .and_then(Status::known_value)
-            .ok_or_else(|| unmapped_remote_error("State", name, "status_map")),
+            .ok_or_else(|| unmapped_remote_value("State", name, "status_map")),
     }
 }
 
-fn reverse_priority(cfg: &RemoteConfig, raw: &Value) -> Result<Priority, RemoteError> {
+fn reverse_priority(cfg: &RemoteConfig, raw: &Value) -> Result<Priority, UnmappedValue> {
     match bundle_value_name(raw, "Priority") {
         None => Ok(Priority::default()),
         Some(name) => cfg
             .reverse_priority(name)
             .map(|value| Priority(i32::from(value)))
-            .ok_or_else(|| unmapped_remote_error("Priority", name, "priority_map")),
+            .ok_or_else(|| unmapped_remote_value("Priority", name, "priority_map")),
     }
 }
 
 /// A remote value with no beads preimage — the pull-direction refusal.
-fn unmapped_remote_error(field: &str, value: &str, map_key: &str) -> RemoteError {
-    RemoteError::Config(format!(
-        "issue {field} '{value}' has no beads mapping; add an entry to {map_key} in remote.yaml"
-    ))
+fn unmapped_remote_value(field: &str, value: &str, map_key: &str) -> UnmappedValue {
+    UnmappedValue {
+        field: field.to_string(),
+        value: value.to_string(),
+        config_key: map_key.to_string(),
+    }
 }
 
 /// A bead value with no remote preimage — the push-direction refusal.

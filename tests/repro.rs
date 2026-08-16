@@ -52,6 +52,8 @@ mod mergereport_determinism;
 mod parent_blocking;
 #[path = "repro/pinned_blocker.rs"]
 mod pinned_blocker;
+#[path = "repro/remote_adoption_link_deletion.rs"]
+mod remote_adoption_link_deletion;
 #[path = "repro/reparent_orphans_old_epic.rs"]
 mod reparent_orphans_old_epic;
 #[path = "repro/source_repo_path_leak.rs"]

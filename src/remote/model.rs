@@ -8,6 +8,7 @@
 use crate::remote::youtrack::links::RemoteLink;
 use crate::remote::youtrack::mapping::RemoteIssueFields;
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 
 /// A remote issue br could not read, and why.
 ///
@@ -50,6 +51,16 @@ pub struct RemoteIssue {
     pub labels: Vec<String>,
     pub links: Vec<RemoteLink>,
     pub fields: RemoteIssueFields,
+    /// The `customFields` array exactly as fetched.
+    ///
+    /// `fields` above is the resolved reading of it, and everything that
+    /// diffs or pushes uses that. This is retained for the one caller that
+    /// has to resolve it *again* rather than trust a resolution someone else
+    /// performed: [`crate::remote::adopt::classify_adoption`], which must
+    /// decide for itself whether every value has a beads preimage before it
+    /// creates a bead from them, because adopting-with-a-default silently
+    /// destroys the classification on the next push.
+    pub raw_custom_fields: Value,
 }
 
 impl RemoteIssue {
@@ -79,6 +90,7 @@ impl RemoteIssue {
                 close_reason: None,
                 beads_id: None,
             },
+            raw_custom_fields: Value::Null,
         }
     }
 }

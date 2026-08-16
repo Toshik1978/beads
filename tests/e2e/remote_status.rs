@@ -10,36 +10,17 @@
 
 use crate::common;
 
-use beads::remote::youtrack::fetch::ISSUE_FIELDS;
 use common::cli::{BrWorkspace, run_br_with_env};
 use common::mock_http::MockServer;
+// The wire format — the sort clause included, because paging over an
+// unordered collection is not a partition — is pinned once in test-support
+// rather than copied into each of the four files that assert against it.
+use common::youtrack_fixtures::{LINK_TYPES, LINK_TYPES_PATH, issues_path};
 
 const TOKEN: [(&str, &str); 1] = [("BR_YOUTRACK_TOKEN", "t")];
 
-const LINK_TYPES_PATH: &str =
-    "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed&$top=100";
-
-const LINK_TYPES: &str = r#"[
-    {"id":"173-0","name":"Relates","sourceToTarget":"relates to","directed":false},
-    {"id":"173-1","name":"Depend","sourceToTarget":"is required for","targetToSource":"depends on","directed":true},
-    {"id":"173-3","name":"Subtask","sourceToTarget":"parent for","targetToSource":"subtask of","directed":true}
-]"#;
-
 fn write_remote_config(workspace: &BrWorkspace, base_url: &str) {
-    let template = include_str!("../fixtures/remote_em.yaml");
-    let yaml = template.replace("https://example.invalid", base_url);
-    let path = workspace.root.join(".beads").join("remote.yaml");
-    std::fs::write(&path, yaml).expect("write remote.yaml");
-}
-
-/// The wire format, spelled out rather than imported: paging over an
-/// unordered collection is not a partition, so the sort clause is part of the
-/// contract and an e2e is the right place to pin it literally.
-fn issues_path(skip: u32) -> String {
-    format!(
-        "/api/issues?query=project:%20EM%20sort%20by:%20created%20asc\
-         &fields={ISSUE_FIELDS}&$skip={skip}&$top=100"
-    )
+    common::youtrack_fixtures::write_remote_config(&workspace.root.join(".beads"), base_url);
 }
 
 /// One mirrored issue whose every field already matches the bead below.

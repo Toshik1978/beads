@@ -16,6 +16,7 @@ pub mod fixtures;
 pub mod harness;
 pub mod mock_http;
 pub mod ordering;
+pub mod remote_harness;
 pub mod report_indexer;
 pub mod scenarios;
 pub mod youtrack_fixtures;

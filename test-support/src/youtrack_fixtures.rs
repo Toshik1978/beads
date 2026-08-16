@@ -22,3 +22,51 @@ pub const COUNT_PENDING: &str = r#"{"count":-1,"$type":"IssueCountResponse"}"#;
 
 /// The same endpoint once it has settled.
 pub const COUNT_SETTLED: &str = r#"{"count":0,"$type":"IssueCountResponse"}"#;
+
+/// `GET /api/issueLinkTypes` — the path `LinkTypes::resolve` requests.
+pub const LINK_TYPES_PATH: &str =
+    "/api/issueLinkTypes?fields=id,name,sourceToTarget,targetToSource,directed&$top=100";
+
+/// The reference instance's link types, ids included.
+///
+/// Ids are instance-local and must never appear in `src/`, which is why they
+/// live here. `Duplicate` is deliberately absent: br resolves exactly three
+/// types by name and ignores everything else.
+pub const LINK_TYPES: &str = r#"[
+    {"id":"173-0","name":"Relates","sourceToTarget":"relates to","directed":false},
+    {"id":"173-1","name":"Depend","sourceToTarget":"is required for","targetToSource":"depends on","directed":true},
+    {"id":"173-3","name":"Subtask","sourceToTarget":"parent for","targetToSource":"subtask of","directed":true}
+]"#;
+
+/// One page of the reconciliation fetch for project `EM`, at `page_size: 100`
+/// — the settings in `tests/fixtures/remote_em.yaml`.
+///
+/// The sort clause is part of the contract, not an implementation detail:
+/// `$skip`/`$top` over an unordered collection is not a partition, and
+/// YouTrack orders by `updated` unless told otherwise, so an issue touched
+/// mid-fetch would be seen twice or missed. It is spelled out literally here
+/// — and only here — so that four test files cannot drift from each other
+/// while all four claim to pin it. Only `ISSUE_FIELDS` is imported, because a
+/// selector copied by hand is a selector that goes stale silently.
+#[must_use]
+pub fn issues_path(skip: u32) -> String {
+    use beads::remote::youtrack::fetch::ISSUE_FIELDS;
+    format!(
+        "/api/issues?query=project:%20EM%20sort%20by:%20created%20asc\
+         &fields={ISSUE_FIELDS}&$skip={skip}&$top=100"
+    )
+}
+
+/// Write `tests/fixtures/remote_em.yaml` into `beads_dir`, pointed at the
+/// loopback mock instead of the unresolvable host the tracked copy names.
+///
+/// # Panics
+/// Panics if the file cannot be written — a test cannot proceed without it.
+pub fn write_remote_config(beads_dir: &std::path::Path, base_url: &str) {
+    let template = include_str!("../../tests/fixtures/remote_em.yaml");
+    std::fs::write(
+        beads_dir.join("remote.yaml"),
+        template.replace("https://example.invalid", base_url),
+    )
+    .expect("write remote.yaml");
+}
