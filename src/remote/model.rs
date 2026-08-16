@@ -3,7 +3,9 @@
 //! Everything above the backend seam — pairing, the value diff, the link
 //! differ, the printed plan — reads this type and never a raw
 //! `serde_json::Value`. The one backend (`crate::remote::youtrack`) is
-//! responsible for producing it; see `youtrack::fetch::fetch_all_issues`.
+//! responsible for producing it; see `youtrack::fetch::fetch_snapshot`, which
+//! is the only fetch there is — a refusal is collected and reported rather
+//! than aborting the run.
 
 use crate::remote::youtrack::links::RemoteLink;
 use crate::remote::youtrack::mapping::RemoteIssueFields;

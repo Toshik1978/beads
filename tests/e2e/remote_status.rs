@@ -91,6 +91,21 @@ fn e2e_remote_status_on_a_reconciled_workspace_issues_zero_writes() {
         "a reconciled workspace has no work: {}",
         run.stdout
     );
+
+    // The comment count gate, asserted as behaviour rather than as an integer
+    // comparison. `comment_counts_agree` is a plain `==`, and a unit test of it
+    // would still pass with the gate deleted — the gate is the *caller* that
+    // skips the fetch. This is what a deleted gate costs: one comment request
+    // per mirrored issue, on every run, to learn nothing.
+    let comment_reads: Vec<_> = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path.contains("/comments"))
+        .collect();
+    assert!(
+        comment_reads.is_empty(),
+        "a pair whose comment counts agree must cost zero requests: {comment_reads:?}"
+    );
 }
 
 #[test]

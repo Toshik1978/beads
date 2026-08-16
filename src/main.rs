@@ -679,6 +679,25 @@ const fn is_mutating_command(cmd: &Commands) -> bool {
             command,
             beads::cli::EpicCommands::CloseEligible(args) if !args.dry_run
         ),
+        // `br remote` is not one answer. `init` provisions the *remote*
+        // project and writes nothing local; `status` reports and writes
+        // nothing at all. The other three all write local issues:
+        // `pull` applies returnable fields, adopts issues and imports
+        // comments, `sync` is `pull` then `push`, and `push` — despite the
+        // name — persists `external_ref` on every bead it creates an issue
+        // for, which is the single ordering the resumable first run rests on
+        // (`src/remote/execute.rs`). A push that skipped the flush would
+        // leave `issues.jsonl` behind the database for every pairing it just
+        // made. As with `rename` above, `--dry-run` writes nothing but is not
+        // consulted here: the classification happens before the args are
+        // read, and a needless flush on a dry run is cheaper than a missed one
+        // on a real run.
+        Commands::Remote { command } => matches!(
+            command,
+            beads::cli::RemoteCommands::Push(_)
+                | beads::cli::RemoteCommands::Pull(_)
+                | beads::cli::RemoteCommands::Sync(_)
+        ),
         _ => false,
     }
 }

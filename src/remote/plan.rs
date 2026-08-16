@@ -17,12 +17,20 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-/// Printed whenever a plan is rendered, until comment reconciliation lands.
+/// Printed when a plan has **no** comment work, and only then.
 ///
-/// Without it `render` says "nothing to do" for a workspace whose comments
-/// differ, which is not a hedge — it is wrong.
-const COMMENTS_NOT_RECONCILED: &str = "note: comments are not reconciled yet, so a comment difference is neither \
-     counted nor shown above.";
+/// It used to say comments were not reconciled at all, unconditionally, which
+/// was true when nothing reconciled them. Now that something does, saying it
+/// on a plan that carries comment changes would be a plain lie — and the
+/// caveat that survives is a narrower and more useful one. Comment
+/// reconciliation is gated on the two sides' comment *counts* differing
+/// (`comments::comment_counts_agree`), because inspecting every pair would
+/// cost one request per mirrored issue per run to learn nothing. A comment
+/// edited in place on either side leaves the counts equal, so it is never
+/// looked at; that is the limitation this note exists to state, and it is the
+/// one a reader of "nothing to do" needs to know about.
+const COMMENT_COUNT_GATE: &str = "note: comments are compared only where the local and remote comment counts \
+     differ, so an edit to a comment that has already crossed is not detected.";
 
 /// One paired issue's differing fields.
 #[derive(Debug, Clone, Serialize)]
@@ -41,10 +49,21 @@ pub struct IssueLinkPlan {
 }
 
 /// A remote issue no bead claims — an adoption candidate.
+///
+/// `beads_id` is the issue's own `Beads ID` field, and it is what tells a
+/// genuine web-UI adoption apart from **a create this mirror already made and
+/// then lost the answer to**. `issue_create_body` stamps the bead id into that
+/// field on every create, so an issue that was created and whose response
+/// never arrived comes back naming the bead it belongs to. Pairing it is a
+/// local repair; adopting it would mint a *second* bead for one issue, and
+/// creating it again would mint a second issue for one bead. See
+/// [`crate::remote::execute::orphaned_creates`].
 #[derive(Debug, Clone, Serialize)]
 pub struct Adoption {
     pub remote_id: String,
     pub summary: String,
+    /// The issue's `Beads ID` field, when it carries one.
+    pub beads_id: Option<String>,
 }
 
 /// A remote issue br cannot read, and therefore will not adopt.
@@ -114,6 +133,24 @@ pub struct CommentPlan {
     pub remote_id: String,
     pub direction: Direction,
     pub count: usize,
+}
+
+/// One paired issue's comment reconciliation, **already computed**.
+///
+/// [`build_plan`] is pure and issues no request, and every one of its tests
+/// depends on that. Deciding what to do about comments needs the comments
+/// themselves, which needs a socket — so the fetch happens in the caller
+/// (`crate::remote::execute::fetch_comment_work`) and arrives here as data.
+/// The plan reduces it to counts for printing; the executor keeps the texts
+/// and writes them. One fetch, two consumers.
+#[derive(Debug, Clone, Default)]
+pub struct CommentWork {
+    pub bead_id: String,
+    pub remote_id: String,
+    /// Comment texts to post, `[br]` marker line included.
+    pub to_push: Vec<String>,
+    /// Remote comments to import as bead comments.
+    pub to_pull: Vec<crate::remote::comments::RemoteComment>,
 }
 
 /// Everything a run would do.
@@ -371,12 +408,17 @@ fn one_line(value: &str) -> String {
 ///
 /// `types` reaches the link differ, which selects a remote link by the same
 /// `{linkID}` an executor would write through.
+///
+/// `comments` is the comment reconciliation the caller already performed — see
+/// [`CommentWork`]. Passing an empty slice is legitimate and means exactly
+/// what it says: no comment work, for a caller that did not do any.
 #[must_use]
 pub fn build_plan(
     cfg: &RemoteConfig,
     beads: &[Issue],
     snapshot: RemoteSnapshot,
     types: &LinkTypes,
+    comments: &[CommentWork],
 ) -> ReconcilePlan {
     let by_id: HashMap<&str, &Issue> = beads.iter().map(|b| (b.id.as_str(), b)).collect();
     let (links, unmirrored_links) = bead_links_index(beads);
@@ -398,9 +440,12 @@ pub fn build_plan(
         creates: pairing.unpaired_local.clone(),
         out_of_scope: pairing.out_of_scope.clone(),
         unmirrored_links,
-        notes: vec![COMMENTS_NOT_RECONCILED.to_string()],
+        comment_changes: comment_sections(comments),
         ..ReconcilePlan::default()
     };
+    if plan.comment_changes.is_empty() {
+        plan.notes.push(COMMENT_COUNT_GATE.to_string());
+    }
 
     for pair in &pairing.paired {
         let Some(bead) = by_id.get(pair.bead_id.as_str()) else {
@@ -442,6 +487,7 @@ pub fn build_plan(
         .map(|issue| Adoption {
             remote_id: issue.id_readable.clone(),
             summary: issue.summary.clone(),
+            beads_id: issue.fields.beads_id.clone(),
         })
         .collect();
 
@@ -480,6 +526,31 @@ pub fn build_plan(
     let ignored: HashSet<&str> = pairing.out_of_scope.iter().map(String::as_str).collect();
     plan.unmapped_local = unmapped_local(cfg, beads, &ignored);
     plan
+}
+
+/// Reduce the caller's comment reconciliation to the plan's printable form.
+///
+/// One entry per direction per issue, and none at all for an issue with
+/// nothing to move — a `0 comment(s) [push]` line is noise, and it would also
+/// make `is_empty` report outstanding work where there is none.
+fn comment_sections(comments: &[CommentWork]) -> Vec<CommentPlan> {
+    let mut sections = Vec::new();
+    for work in comments {
+        for (direction, count) in [
+            (Direction::Push, work.to_push.len()),
+            (Direction::Pull, work.to_pull.len()),
+        ] {
+            if count > 0 {
+                sections.push(CommentPlan {
+                    bead_id: work.bead_id.clone(),
+                    remote_id: work.remote_id.clone(),
+                    direction,
+                    count,
+                });
+            }
+        }
+    }
+    sections
 }
 
 /// Local values no map covers. A push would refuse on each of these, so
@@ -659,6 +730,7 @@ mod tests {
             &beads,
             snapshot(vec![mirror("EM-1", "t")]),
             &types(),
+            &[],
         );
         assert!(plan.is_empty(), "{plan:?}");
         assert!(plan.render().contains("nothing to do"), "{}", plan.render());
@@ -671,6 +743,7 @@ mod tests {
             adoptions: vec![Adoption {
                 remote_id: "EM-7".into(),
                 summary: "unclaimed".into(),
+                beads_id: None,
             }],
             refused_adoptions: vec![RefusedAdoption {
                 remote_id: "EM-8".into(),
@@ -733,7 +806,7 @@ mod tests {
         remote.updated = at(2_000);
         remote.fields.status = Status::Closed;
 
-        let plan = build_plan(&config(), &[bead], snapshot(vec![remote]), &types());
+        let plan = build_plan(&config(), &[bead], snapshot(vec![remote]), &types(), &[]);
         let text = plan.render();
         assert!(
             text.contains("YouTrack wins"),
@@ -754,6 +827,7 @@ mod tests {
             &[parent, child],
             snapshot(vec![mirror("EM-1", "t"), mirror("EM-2", "t")]),
             &types(),
+            &[],
         );
 
         assert_eq!(plan.link_changes.len(), 1, "{:?}", plan.link_changes);
@@ -773,6 +847,7 @@ mod tests {
             &[left, right],
             snapshot(vec![mirror("EM-1", "t"), mirror("EM-2", "t")]),
             &types(),
+            &[],
         );
 
         assert_eq!(
@@ -792,6 +867,7 @@ mod tests {
             &[spiky],
             snapshot(vec![mirror("EM-1", "t")]),
             &types(),
+            &[],
         );
         assert_eq!(plan.unmapped_local.len(), 1);
         assert_eq!(plan.unmapped_local[0].value, "spike");
@@ -803,7 +879,7 @@ mod tests {
         // positive.
         let mut spiky = bead("bds-1", Some("JIRA-9"));
         spiky.issue_type = crate::model::IssueType::Custom("spike".into());
-        let plan = build_plan(&config(), &[spiky], snapshot(vec![]), &types());
+        let plan = build_plan(&config(), &[spiky], snapshot(vec![]), &types(), &[]);
         assert_eq!(plan.out_of_scope, ["bds-1"]);
         assert!(plan.unmapped_local.is_empty(), "{:?}", plan.unmapped_local);
     }
@@ -820,7 +896,7 @@ mod tests {
                     .into(),
             }],
         };
-        let plan = build_plan(&config(), &beads, snapshot, &types());
+        let plan = build_plan(&config(), &beads, snapshot, &types(), &[]);
 
         assert_eq!(plan.refused_adoptions.len(), 1);
         assert!(
@@ -844,6 +920,7 @@ mod tests {
             &[deleted],
             snapshot(vec![mirror("EM-1", "original")]),
             &types(),
+            &[],
         );
 
         assert!(
@@ -873,6 +950,7 @@ mod tests {
             &[waiting, bead("bds-2", Some("EM-2"))],
             snapshot(vec![mirror("EM-1", "t"), mirror("EM-2", "t")]),
             &types(),
+            &[],
         );
 
         assert_eq!(plan.unmirrored_links.len(), 1);
@@ -891,16 +969,74 @@ mod tests {
     }
 
     #[test]
-    fn every_plan_says_comments_are_not_reconciled_yet() {
-        // Without the note, "nothing to do" is a false statement about a
-        // workspace whose comments differ.
-        let plan = build_plan(&config(), &[], snapshot(vec![]), &types());
+    fn a_plan_with_comment_work_never_claims_comments_are_unreconciled() {
+        // The inverse of the note this replaced. That note said, on every
+        // plan, that comments were not reconciled at all; leaving it in place
+        // once they are would be a lie the suite actively protected. A plan
+        // that carries comment changes must say nothing of the kind.
+        let comments = vec![CommentWork {
+            bead_id: "bds-1".into(),
+            remote_id: "EM-1".into(),
+            to_push: vec!["[br]\nfrom beads".into()],
+            to_pull: vec![crate::remote::comments::RemoteComment::for_test(
+                "7-2",
+                "typed in the web UI",
+                "kate",
+            )],
+        }];
+        let beads = vec![bead("bds-1", Some("EM-1"))];
+        let plan = build_plan(
+            &config(),
+            &beads,
+            snapshot(vec![mirror("EM-1", "t")]),
+            &types(),
+            &comments,
+        );
+
+        assert!(!plan.is_empty(), "comment work is outstanding work");
+        assert_eq!(plan.comment_changes.len(), 2, "{:?}", plan.comment_changes);
+        let text = plan.render();
+        assert!(
+            !text.contains("not reconciled"),
+            "the retired caveat must not survive alongside real comment work: {text}"
+        );
+        assert!(text.contains("1 comment(s) [push]"), "{text}");
+        assert!(text.contains("1 comment(s) [YouTrack wins]"), "{text}");
+    }
+
+    #[test]
+    fn a_plan_with_no_comment_work_still_names_the_count_gate() {
+        // "nothing to do" is only true up to the gate: two sides whose comment
+        // counts agree are never inspected, so an in-place edit is invisible.
+        let plan = build_plan(&config(), &[], snapshot(vec![]), &types(), &[]);
         assert!(plan.is_empty());
         let text = plan.render();
         assert!(
-            text.contains("comments are not reconciled yet"),
-            "the caveat must survive into the rendering: {text}"
+            text.contains("comment counts"),
+            "the caveat that survives must reach the rendering: {text}"
         );
         assert!(text.contains("everything br reconciles today"), "{text}");
+    }
+
+    #[test]
+    fn an_issue_with_nothing_to_move_produces_no_comment_section() {
+        // A `0 comment(s)` line is noise, and it would also make `is_empty`
+        // report outstanding work where there is none.
+        let comments = vec![CommentWork {
+            bead_id: "bds-1".into(),
+            remote_id: "EM-1".into(),
+            to_push: Vec::new(),
+            to_pull: Vec::new(),
+        }];
+        let beads = vec![bead("bds-1", Some("EM-1"))];
+        let plan = build_plan(
+            &config(),
+            &beads,
+            snapshot(vec![mirror("EM-1", "t")]),
+            &types(),
+            &comments,
+        );
+        assert!(plan.comment_changes.is_empty());
+        assert!(plan.is_empty());
     }
 }

@@ -511,10 +511,25 @@ fn mint_bead_id(
 /// `add_dependency` reports an existing row as `Ok(false)` rather than
 /// failing.
 ///
-/// A `Subtask` link is still read from the child end only. Its `OUTWARD`
-/// half means an adoptee has become the parent of an *already-paired* bead,
-/// which is a reparent of an existing bead rather than an import, and belongs
-/// to whatever executes reparenting.
+/// **A `Subtask` link is read from both ends too, and for the same reason.**
+/// Its `OUTWARD` half means an adoptee has become the *parent* of an
+/// already-paired bead — someone dragged an existing issue under a new one in
+/// the web UI. That is not a case this can decline: the differ is local-wins,
+/// so the already-paired bead reports no parent, and the next push removes the
+/// link the human just made. The identical bug the `INWARD` half exists to
+/// prevent, in the other direction.
+///
+/// What it does about it is deliberately narrow. It writes the `parent-child`
+/// dependency row and **nothing else** — it does not rename the child bead to
+/// sit under its new parent's id. A rename is a tombstone, `former_ids` churn
+/// and a forwarding pointer, permanently, and inflicting that on an existing
+/// bead because somebody rearranged a board is exactly what
+/// [`topological_order`]'s deferral was written to avoid for new ones. The
+/// result is a bead whose id no longer describes its parentage, which beads
+/// already tolerates (`br dep add … parent-child` produces the same shape) and
+/// which a human can resolve with `br reparent` if they want the id to match.
+/// The alternative was letting the mirror delete an inbound edit, and that is
+/// not a trade.
 ///
 /// # Errors
 /// Returns whatever storage returns on a dependency write.
@@ -556,14 +571,20 @@ pub fn import_links<S: BuildHasher>(
                 (LinkKind::Depend, false) => {
                     storage.add_dependency(bead_id, other_bead, "blocks", YOUTRACK_AUTHOR)?;
                 }
+                // "parent for": this issue is the linked one's parent. The
+                // linked bead already exists, so this writes the row and does
+                // not rename it — see the doc comment.
+                (LinkKind::Subtask, false) => {
+                    storage.add_dependency(other_bead, bead_id, "parent-child", YOUTRACK_AUTHOR)?;
+                }
                 // Undirected, and the differ builds the local set
                 // symmetrically, so one row is enough.
                 (LinkKind::Relates, true) => {
                     storage.add_dependency(bead_id, other_bead, "related", YOUTRACK_AUTHOR)?;
                 }
-                // `Subtask` OUTWARD is a reparent of a paired bead, not an
-                // import; `Relates` has no non-mirrored direction to reach.
-                (LinkKind::Subtask | LinkKind::Relates, false) => {}
+                // `Relates` has no non-mirrored direction to reach: YouTrack
+                // reports it as `BOTH` on both ends.
+                (LinkKind::Relates, false) => {}
             }
         }
     }

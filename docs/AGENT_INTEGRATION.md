@@ -140,7 +140,7 @@ All 28 top-level commands, for orientation. Full flags, subcommands, and
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
 | `config` | Configuration management |
-| `remote` | Mirror this workspace into an external tracker (only `remote init` works today; `status`, `push`, `pull` and `sync` are declared but not implemented) |
+| `remote` | Mirror this workspace into an external tracker: `init` provisions the remote project, `status` reports what a run would do and writes nothing, and `push`/`pull`/`sync` execute it (each takes `--dry-run`; `push` and `sync` refuse a first run without `--confirm-initial`) |
 | `stats` | Show project statistics |
 | `info` | Show diagnostic metadata about the workspace |
 | `version` | Show version information |

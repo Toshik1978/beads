@@ -1589,10 +1589,13 @@ pub struct DepCyclesArgs {
 
 /// `br remote` — mirroring this workspace into an external tracker.
 ///
-/// The whole surface is declared here in one place even though only `init`
-/// executes today: the four commands below land in `bds-4r2.4` and `.8`, and a
-/// CLI that grows a subcommand at a time reads as four unrelated additions in
-/// the history rather than one feature.
+/// The whole surface was declared here in one place before any of it ran, so
+/// that a CLI growing a subcommand at a time would not read as five unrelated
+/// additions in the history rather than one feature. All five execute now.
+///
+/// `status` is the only read-only one. `sync` is `pull` then `push`, in that
+/// order — see `crate::cli::commands::remote` for why the order is not a
+/// preference.
 #[derive(Subcommand, Debug)]
 pub enum RemoteCommands {
     /// Provision the remote project so this workspace can mirror into it
@@ -1639,6 +1642,15 @@ pub struct RemotePushArgs {
     /// Report what would change without writing anything
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Allow a first run — one where no bead is paired with this project yet
+    ///
+    /// br has no code path that deletes a YouTrack issue, so a first run
+    /// against the wrong project leaves every issue it created to be deleted
+    /// by hand. Without this flag such a run prints what it would create and
+    /// exits non-zero, writing nothing.
+    #[arg(long)]
+    pub confirm_initial: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1653,6 +1665,13 @@ pub struct RemoteSyncArgs {
     /// Report what would change without writing anything
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Allow a first run — one where no bead is paired with this project yet
+    ///
+    /// `sync` is `pull` then `push`, and its push half is gated exactly as
+    /// `br remote push` is. See that command's `--confirm-initial`.
+    #[arg(long)]
+    pub confirm_initial: bool,
 }
 
 #[derive(Subcommand, Debug)]

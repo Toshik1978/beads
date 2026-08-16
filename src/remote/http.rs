@@ -205,8 +205,15 @@ impl HttpClient {
     /// (e.g. `"3-24"`), not its `idReadable` (e.g. `"EM-5"`) — see
     /// `youtrack::links::link_remove`'s doc comment for why.
     ///
+    /// **A 404 is success.** The caller asked for the link to be absent, and
+    /// it is. Treating it as a failure would make this call non-idempotent for
+    /// no reason: a removal that was applied and then retried — after a
+    /// dropped response, or on the next run before a fresh fetch — would fail
+    /// the run over work that had already been done. It is also what makes
+    /// `DELETE` safe to retry automatically; see [`may_retry`].
+    ///
     /// # Errors
-    /// As `get_json`.
+    /// As `get_json`, except that a 404 returns `Ok(())`.
     pub fn delete_issue_link(
         &self,
         from_readable: &str,
@@ -215,7 +222,10 @@ impl HttpClient {
     ) -> Result<(), RemoteError> {
         let path = format!("/api/issues/{from_readable}/links/{link_id}/issues/{to_internal_id}");
         self.writes.fetch_add(1, Ordering::Relaxed);
-        self.send("DELETE", &path, None, "issue link").map(|_| ())
+        match self.send("DELETE", &path, None, "issue link") {
+            Ok(_) | Err(RemoteError::Http { status: 404, .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     fn send(
@@ -230,7 +240,7 @@ impl HttpClient {
         loop {
             match self.send_once(method, &url, body, entity) {
                 Ok(value) => return Ok(value),
-                Err(err) if self.retry.should_retry(&err, attempt) => {
+                Err(err) if may_retry(method, &err) && self.retry.should_retry(&err, attempt) => {
                     std::thread::sleep(self.retry.delay_for(attempt));
                     attempt += 1;
                 }
@@ -301,6 +311,54 @@ impl HttpClient {
             Err(e) => Err(RemoteError::Transport(e.to_string())),
         }
     }
+}
+
+/// Whether a failed `method` request may be sent again automatically.
+///
+/// [`RetryPolicy::should_retry`] answers "is this status transient?"; this
+/// answers the question that must be asked first — "could sending it twice
+/// apply it twice?" — and the two are `&&`-ed together in
+/// [`HttpClient::send`].
+///
+/// - **`GET` and `DELETE` are idempotent**, so any transient status is worth
+///   another try. `DELETE` is only idempotent because
+///   [`HttpClient::delete_issue_link`] treats a 404 as success; without that,
+///   a retry after an applied removal would report failure.
+/// - **`POST` is not idempotent**, and every write this crate makes other than
+///   a link removal is a `POST`. Retrying one blindly is how a mirror
+///   duplicates an issue: the server applies the create, the response is lost
+///   to a 503, and the retry creates a second issue whose id the first attempt
+///   never learned. So a `POST` is retried on **429 and nothing else**. A 429
+///   is defined as a request the server refused *before* processing it — the
+///   rate limiter rejected it, so it cannot have been applied — which makes
+///   re-sending it exactly as safe as sending it the first time, and keeps a
+///   rate-limited push able to make progress. A 5xx carries no such promise:
+///   the server accepted the request and then failed, and it is not knowable
+///   from here whether the write landed. That one is surfaced to the caller,
+///   which is the layer that knows how to check for the write's own effect
+///   before repeating it (see `crate::remote::execute`).
+///
+/// This is the whole of the method-awareness: a caller that needs a
+/// non-idempotent write to survive a 5xx must make the write idempotent, not
+/// ask for more retries.
+///
+/// **The `POST` narrowing applies to response statuses only**, because that is
+/// the only class of failure it can reason about. A `RemoteError::Transport`
+/// never reaches the retry decision at all today —
+/// [`RemoteError::is_retryable`] is `false` for it whatever the method — and
+/// that is the right default rather than an oversight worth "fixing" here: a
+/// connect-phase failure is provably un-applied and would be perfectly safe to
+/// repeat, but `Transport` flattens *both* halves of a request into one string.
+/// A response that never arrived because the socket died after the body was
+/// sent is the same variant, and that one may well have been applied — it is
+/// exactly the case `tests/e2e/remote_resume.rs` drives. Since the two cannot
+/// be told apart from here, they are treated as the dangerous one, and the
+/// recovery in `crate::remote::execute` is what makes a repeat unnecessary.
+fn may_retry(method: &str, err: &RemoteError) -> bool {
+    if method == "POST" && matches!(err, RemoteError::Http { .. }) {
+        return matches!(err, RemoteError::Http { status: 429, .. });
+    }
+    err.is_retryable()
 }
 
 /// The request configuration and headers every method needs alike:
@@ -414,6 +472,7 @@ mod tests {
 
     use std::time::Instant;
     use test_support::mock_http::MockServer;
+    use test_support::youtrack_fixtures::LINK_DELETE_NOT_FOUND;
 
     fn client(server: &MockServer, retry: RetryPolicy) -> HttpClient {
         HttpClient::new(&server.base_url(), Token::new("test-token"), retry)
@@ -546,6 +605,143 @@ mod tests {
             "POST and DELETE both count as writes"
         );
         assert_eq!(http.read_count(), 2, "writes must not also count as reads");
+    }
+
+    const CREATE_PATH: &str = "/api/issues?fields=id,idReadable";
+
+    #[test]
+    fn a_429_then_a_200_completes_with_one_retry() {
+        // A rate-limited POST was refused before it was applied, so re-sending
+        // it is exactly as safe as sending it the first time — and a push that
+        // could not survive a 429 could not survive a busy instance.
+        let server = MockServer::start();
+        server.on_sequence(
+            "POST",
+            CREATE_PATH,
+            vec![
+                (429, r#"{"error":"rate limited"}"#.into()),
+                (200, r#"{"id":"3-1","idReadable":"EM-1"}"#.into()),
+            ],
+        );
+        let http = HttpClient::new(
+            &server.base_url(),
+            Token::new("t"),
+            RetryPolicy {
+                max_attempts: 3,
+                base_delay: Duration::from_millis(1),
+            },
+        );
+
+        let result = http.post_json(CREATE_PATH, &serde_json::json!({}), "issue");
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
+    fn persistent_429s_exhaust_the_policy_and_name_the_status() {
+        let server = MockServer::start();
+        server.on("POST", CREATE_PATH, 429, r#"{"error":"rate limited"}"#);
+        let http = HttpClient::new(
+            &server.base_url(),
+            Token::new("t"),
+            RetryPolicy {
+                max_attempts: 3,
+                base_delay: Duration::from_millis(1),
+            },
+        );
+
+        let err = http
+            .post_json(CREATE_PATH, &serde_json::json!({}), "issue")
+            .expect_err("must fail");
+
+        assert!(err.to_string().contains("429"), "{err}");
+        assert_eq!(server.requests().len(), 3, "exactly max_attempts tries");
+    }
+
+    #[test]
+    fn a_503_on_a_post_is_never_retried_automatically() {
+        // The dangerous case, and the reason `may_retry` exists: the server
+        // accepted the create and then failed, so the issue may already exist
+        // with an id this process never learned. A second POST would duplicate
+        // it silently. Idempotence is the caller's job, not the transport's.
+        let server = MockServer::start();
+        server.on(
+            "POST",
+            CREATE_PATH,
+            503,
+            r#"{"error":"Service Unavailable"}"#,
+        );
+        let http = HttpClient::new(
+            &server.base_url(),
+            Token::new("t"),
+            RetryPolicy {
+                max_attempts: 5,
+                base_delay: Duration::from_millis(1),
+            },
+        );
+
+        let err = http
+            .post_json(CREATE_PATH, &serde_json::json!({}), "issue")
+            .expect_err("must fail");
+
+        assert!(
+            matches!(err, RemoteError::Http { status: 503, .. }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "a POST that may already have applied must be surfaced, not repeated"
+        );
+    }
+
+    #[test]
+    fn a_503_on_an_idempotent_method_is_still_retried() {
+        // The counterweight: narrowing POST must not narrow GET or DELETE,
+        // which can be repeated without changing the answer.
+        let server = MockServer::start();
+        server.on("GET", "/api/issues", 503, r#"{"error":"unavailable"}"#);
+        server.on(
+            "DELETE",
+            "/api/issues/EM-5/links/173-1t/issues/3-9",
+            503,
+            r#"{"error":"unavailable"}"#,
+        );
+        let http = client(
+            &server,
+            RetryPolicy {
+                max_attempts: 3,
+                base_delay: Duration::from_millis(1),
+            },
+        );
+
+        http.get_json("/api/issues", "issue")
+            .expect_err("must fail");
+        assert_eq!(server.requests().len(), 3);
+
+        http.delete_issue_link("EM-5", "173-1t", "3-9")
+            .expect_err("must fail");
+        assert_eq!(server.requests().len(), 6, "the DELETE retried too");
+    }
+
+    #[test]
+    fn a_404_on_a_link_removal_is_success_not_failure() {
+        // The link is absent, which is what the caller asked for. Reporting a
+        // failure would make a removal that was already applied — by an
+        // earlier attempt, or by a human — fail the run.
+        let server = MockServer::start();
+        server.on(
+            "DELETE",
+            "/api/issues/EM-5/links/173-1t/issues/3-9",
+            404,
+            LINK_DELETE_NOT_FOUND,
+        );
+        let http = client(&server, RetryPolicy::none());
+
+        http.delete_issue_link("EM-5", "173-1t", "3-9")
+            .expect("an already-absent link is the desired state");
+        assert_eq!(server.requests().len(), 1, "and it is not retried");
     }
 
     #[test]

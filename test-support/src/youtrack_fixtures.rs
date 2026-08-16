@@ -38,6 +38,14 @@ pub const LINK_TYPES: &str = r#"[
     {"id":"173-3","name":"Subtask","sourceToTarget":"parent for","targetToSource":"subtask of","directed":true}
 ]"#;
 
+/// `GET /api/admin/projects` — the path a create resolves `EM`'s database id
+/// through. A create body addresses its project by internal id; `remote.yaml`
+/// names it by the short name a human reads off a YouTrack URL.
+pub const PROJECTS_PATH: &str = "/api/admin/projects?fields=id,name,shortName&$top=500";
+
+/// The reference instance's project list.
+pub const PROJECTS: &str = r#"[{"id":"0-1","name":"EasyMoney","shortName":"EM"}]"#;
+
 /// One page of the reconciliation fetch for project `EM`, at `page_size: 100`
 /// — the settings in `tests/fixtures/remote_em.yaml`.
 ///

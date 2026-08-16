@@ -240,6 +240,31 @@ pub fn issue_update_body(
     Ok(body)
 }
 
+/// The body of the one update a genuine deletion writes: `State` →
+/// `cfg.deleted_state`.
+///
+/// Deliberately not [`issue_update_body`]. `tombstone` has no `status_map`
+/// entry by design — the tombstone rule owns it, and mapping it would make a
+/// forwarding pointer look like an ordinary status change — so that function
+/// would refuse the very issue this exists for. `deleted_state` is a YouTrack
+/// state name read straight out of `remote.yaml`, not a beads status put
+/// through a map, which is why nothing here can fail.
+///
+/// `br remote` never deletes a remote issue
+/// ([`crate::remote::tombstone`]); this update plus a `[br]`-marked comment
+/// *is* the mirror's record of a deletion.
+#[must_use]
+pub fn deleted_state_body(cfg: &RemoteConfig) -> Value {
+    let mut custom_fields = Vec::new();
+    push_bundle_field(
+        &mut custom_fields,
+        "State",
+        "StateIssueCustomField",
+        &cfg.deleted_state,
+    );
+    json!({ "customFields": custom_fields })
+}
+
 /// Read every mapped field back out of a fetched YouTrack issue.
 ///
 /// # Errors

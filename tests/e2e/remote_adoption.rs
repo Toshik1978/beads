@@ -1,4 +1,4 @@
-//! Adopting a web-UI issue, end to end against the loopback mock.
+//! Adopting a web-UI issue, end to end through `br remote pull`.
 //!
 //! These claims are worth an integration test rather than a unit test because
 //! each is about what the *workspace* looks like afterwards, not about what a
@@ -21,29 +21,29 @@
 //! labels, and comments authored by the integration user — which is exactly
 //! the marker that stops the next push sending them back.
 //!
-//! **An issue that cannot be adopted is named.** A candidate whose parent is
-//! unreadable is deferred, and a deferral nobody prints is a user watching
-//! the same issue not arrive, run after run.
+//! **An issue that cannot be adopted is named, and so is the issue its refusal
+//! blocks.** A candidate whose parent is unreadable is deferred, and a
+//! deferral nobody prints is a user watching the same issue not arrive, run
+//! after run.
 //!
-//! The verbs `br remote pull`/`sync` that will drive this in production
-//! belong to a later task and are still stubs, so these tests call
-//! `common::remote_harness::adopt_everything`, which assembles the pipeline
-//! in the order the CLI will. What is under test is the library, and the mock
-//! server is what proves the claim this feature rests on: **zero writes reach
-//! the mirror during an adoption.**
+//! These tests used to drive a hand-assembled copy of the pipeline in
+//! `test-support`, because the verb was a stub. They now run the real
+//! `br remote pull` as a subprocess, which is the only way to prove the CLI
+//! assembles those calls in the right order rather than proving that a second
+//! implementation of the order agrees with the first.
+//!
+//! **The one write an adoption makes is the `Beads ID` stamp**, and the tests
+//! below pin that it is the *only* one: no issue is created, no field is
+//! written, no link is touched. That stamp is a courtesy — the bead already
+//! exists and is already paired — which is why the interruption test can kill
+//! it and still expect the run to succeed.
 
 use crate::common;
 
-use beads::remote::adopt::{
-    AdoptContext, DeferralReason, adopt_one, classify_adoption, import_comments, stamp_adoption,
-};
-use beads::remote::comments::{LocalComment, YOUTRACK_AUTHOR, fetch_comments, plan_comment_sync};
-use beads::remote::config::RemoteConfig;
-use beads::remote::youtrack::fetch::fetch_snapshot;
-use beads::remote::youtrack::links::LinkTypes;
+use beads::model::Status;
 use common::cli::{BrWorkspace, run_br_with_env};
 use common::mock_http::MockServer;
-use common::remote_harness::{AdoptionRun, adopt_everything, client, id_config, open_storage};
+use common::remote_harness::open_storage;
 use common::youtrack_fixtures::{LINK_TYPES, LINK_TYPES_PATH, issues_path, write_remote_config};
 
 const TOKEN: [(&str, &str); 1] = [("BR_YOUTRACK_TOKEN", "t")];
@@ -72,12 +72,56 @@ fn subtask_of(parent: u32) -> String {
     )
 }
 
+/// The `Beads ID` stamp an adoption posts, per issue. Routing it keeps the
+/// courtesy from failing for want of a canned response.
+fn accept_stamps(server: &MockServer, ids: &[u32]) {
+    for id in ids {
+        server.on(
+            "POST",
+            &format!("/api/issues/EM-{id}?fields=idReadable"),
+            200,
+            &format!(r#"{{"idReadable":"EM-{id}"}}"#),
+        );
+    }
+}
+
 fn beads_dir(workspace: &BrWorkspace) -> std::path::PathBuf {
     workspace.root.join(".beads")
 }
 
-fn run_adoption(workspace: &BrWorkspace, server: &MockServer) -> AdoptionRun {
-    adopt_everything(&beads_dir(workspace), &server.base_url(), "em").expect("adoption")
+fn pull(workspace: &BrWorkspace, label: &str) -> common::cli::BrRun {
+    let run = run_br_with_env(workspace, ["remote", "pull"], TOKEN, label);
+    assert!(
+        run.status.success(),
+        "pull failed: stdout={} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    run
+}
+
+/// Every write the mirror saw, which must be `Beads ID` stamps and nothing
+/// else. An adoption creates no issue, writes no field and touches no link.
+fn assert_only_stamps(server: &MockServer) {
+    let unexpected: Vec<_> = server
+        .write_requests()
+        .into_iter()
+        .filter(|request| !request.body.contains("Beads ID"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "an adoption's only remote write is the Beads ID stamp; the mirror saw {unexpected:?}"
+    );
+}
+
+/// Bead id → `external_ref`, for every bead `br list` reports.
+fn by_external_ref(workspace: &BrWorkspace, reference: &str) -> Option<String> {
+    let listed = run_br_with_env(workspace, ["--json", "list"], TOKEN, "list");
+    assert!(listed.status.success(), "list failed: {}", listed.stderr);
+    common::cli::parse_list_issues(&listed.stdout)
+        .into_iter()
+        .find(|issue| issue["external_ref"] == reference)
+        .and_then(|issue| issue["id"].as_str().map(str::to_string))
 }
 
 /// A workspace holding one bead already paired with `EM-10`.
@@ -125,25 +169,18 @@ fn e2e_a_web_ui_subtask_is_adopted_as_a_child_with_no_tombstone() {
             issue(11, "Typed in the web UI", &subtask_of(10))
         ),
     );
+    accept_stamps(&server, &[11]);
     write_remote_config(&beads_dir(&workspace), &server.base_url());
 
-    let run = run_adoption(&workspace, &server);
+    let run = pull(&workspace, "remote_pull");
 
-    assert_eq!(run.adopted.len(), 1, "only EM-11 is unpaired");
-    assert!(run.deferred.is_empty());
-    assert!(run.refused.is_empty());
-    let adopted = &run.adopted[0].bead_id;
-    assert_eq!(
-        adopted,
-        &format!("{parent_bead}.1"),
-        "the adoptee must be minted AS the parent's child, not flat then reparented"
-    );
-
+    let expected = format!("{parent_bead}.1");
     assert!(
-        server.write_requests().is_empty(),
-        "adoption is local-only; the mirror saw {:?}",
-        server.write_requests()
+        run.stdout.contains(&format!("adopted EM-11 as {expected}")),
+        "the adoptee must be minted AS the parent's child, not flat then reparented: {}",
+        run.stdout
     );
+    assert_only_stamps(&server);
 
     // The whole reason the id is minted this way: a flat id plus a reparent
     // is a rename, and a rename leaves a tombstone behind forever.
@@ -169,7 +206,7 @@ fn e2e_a_web_ui_subtask_is_adopted_as_a_child_with_no_tombstone() {
     let issues = common::cli::parse_list_issues(&listed.stdout);
     let adoptee = issues
         .iter()
-        .find(|i| i["id"] == adopted.as_str())
+        .find(|i| i["id"] == expected.as_str())
         .unwrap_or_else(|| panic!("adopted bead missing from list: {}", listed.stdout));
     assert_eq!(adoptee["external_ref"], "EM-11", "the bead is paired");
     assert_eq!(adoptee["title"], "Typed in the web UI");
@@ -196,19 +233,25 @@ fn e2e_a_three_deep_web_ui_chain_is_adopted_parent_first_in_one_run() {
             issue(10, "Mirrored parent", "")
         ),
     );
+    accept_stamps(&server, &[11, 12, 13]);
     write_remote_config(&beads_dir(&workspace), &server.base_url());
 
-    let run = run_adoption(&workspace, &server);
+    pull(&workspace, "remote_pull");
 
-    assert_eq!(run.adopted.len(), 3, "one run adopts the whole chain");
-    assert_eq!(run.id_map["EM-11"], format!("{parent_bead}.1"));
-    assert_eq!(run.id_map["EM-12"], format!("{parent_bead}.1.1"));
-    assert_eq!(run.id_map["EM-13"], format!("{parent_bead}.1.1.1"));
-    assert!(
-        server.write_requests().is_empty(),
-        "adoption is local-only; the mirror saw {:?}",
-        server.write_requests()
+    assert_eq!(
+        by_external_ref(&workspace, "EM-11"),
+        Some(format!("{parent_bead}.1"))
     );
+    assert_eq!(
+        by_external_ref(&workspace, "EM-12"),
+        Some(format!("{parent_bead}.1.1"))
+    );
+    assert_eq!(
+        by_external_ref(&workspace, "EM-13"),
+        Some(format!("{parent_bead}.1.1.1")),
+        "one run adopts the whole chain, parent-first"
+    );
+    assert_only_stamps(&server);
 }
 
 /// A refusal names its issue, and so must the deferral it causes: fixing one
@@ -240,41 +283,48 @@ fn e2e_a_refused_parent_defers_its_child_and_both_are_named() {
     );
     write_remote_config(&beads_dir(&workspace), &server.base_url());
 
-    let run = run_adoption(&workspace, &server);
+    let run = pull(&workspace, "remote_pull");
 
     assert!(
-        run.adopted.is_empty(),
-        "flattening EM-11 would cost a rename later: {:?}",
-        run.adopted
+        by_external_ref(&workspace, "EM-11").is_none(),
+        "flattening EM-11 would cost a rename later: {}",
+        run.stdout
     );
-    // EM-99 itself is refused one layer earlier than `classify_adoption`:
+
+    // EM-99 is refused one layer earlier than `classify_adoption`:
     // `fetch_snapshot` diverts an issue it cannot read into
-    // `snapshot.unmappable`, so it never reaches the pairing at all and never
-    // becomes a candidate. That refusal is reported through
-    // `plan.refused_adoptions` — see `remote_status.rs` — and
-    // `classify_adoption`'s own refusal is defence in depth against a future
-    // caller that skips that fetch, unit-tested in `remote::adopt`.
-    assert!(
-        run.refused.is_empty(),
-        "the fetch already diverted EM-99, so no candidate is left to refuse: {:?}",
-        run.refused
+    // `snapshot.unmappable`, so it never reaches the pairing and never becomes
+    // a candidate. That is the live refusal, and it is reported through the
+    // plan's `refused adoptions` section.
+    assert!(run.stdout.contains("refused adoptions"), "{}", run.stdout);
+    assert!(run.stdout.contains("User Story"), "{}", run.stdout);
+    assert!(run.stdout.contains("type_map"), "{}", run.stdout);
+    // And exactly once. Two `RefusedAdoption` types exist for the two shapes,
+    // and telling the user twice, in two wordings, to make one edit is worse
+    // than telling them once. This asserts the *outcome* and not the mechanism:
+    // `push_unreported_refusal`, which dedups them, is unreachable on this path
+    // because the fetch diverts EM-99 before `classify_adoption` ever sees it,
+    // so a single refusal here is also what "the second source never fired"
+    // looks like. The dedup itself is unit-tested; this pins that the user sees
+    // one line.
+    assert_eq!(
+        run.stdout.matches("EM-99:").count(),
+        1,
+        "one issue, one refusal: {}",
+        run.stdout
     );
 
     // What this test exists for: the *consequence* of that refusal on another
     // issue is reported too. Nothing else would ever mention EM-11.
-    assert_eq!(
-        run.deferred.len(),
-        1,
-        "a deferral nobody prints is an issue that never arrives, silently"
-    );
-    assert_eq!(run.deferred[0].id_readable, "EM-11");
-    assert_eq!(run.deferred[0].parent_id, "EM-99");
-    assert_eq!(run.deferred[0].reason, DeferralReason::ParentNotAdoptable);
-    let rendered = run.deferred[0].render();
-    assert!(rendered.contains("EM-11"), "{rendered}");
     assert!(
-        rendered.contains("EM-99"),
-        "must name the blocker: {rendered}"
+        run.stdout.contains("deferred: EM-11"),
+        "a deferral nobody prints is an issue that never arrives, silently: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("EM-99"),
+        "the deferral must name the blocker: {}",
+        run.stdout
     );
 }
 
@@ -289,17 +339,21 @@ fn e2e_an_adoptee_arrives_with_its_prose_labels_and_comments() {
         "GET",
         &issues_path(0),
         200,
-        r#"[{"id":"3-11","idReadable":"EM-11","summary":"Typed in the web UI",
-             "description":"body **markdown**","updated":1000,"commentsCount":3,
-             "tags":[{"id":"6-1","name":"mirror"},{"id":"6-2","name":"ui"}],"links":[],
-             "customFields":[
-               {"name":"Type","value":{"name":"Bug"}},
-               {"name":"State","value":{"name":"In Progress"}},
-               {"name":"Priority","value":{"name":"Critical"}},
-               {"name":"Design","value":{"text":"design para 1\n\ndesign para 2"}},
-               {"name":"Acceptance Criteria","value":{"text":"it works"}},
-               {"name":"Notes","value":{"text":"a note"}},
-               {"name":"Close Reason","value":{"text":"not yet"}}]}]"#,
+        &format!(
+            "[{},{}]",
+            issue(10, "Mirrored parent", ""),
+            r#"{"id":"3-11","idReadable":"EM-11","summary":"Typed in the web UI",
+                "description":"body **markdown**","updated":1000,"commentsCount":3,
+                "tags":[{"id":"6-1","name":"mirror"},{"id":"6-2","name":"ui"}],"links":[],
+                "customFields":[
+                  {"name":"Type","value":{"name":"Bug"}},
+                  {"name":"State","value":{"name":"In Progress"}},
+                  {"name":"Priority","value":{"name":"Critical"}},
+                  {"name":"Design","value":{"text":"design para 1\n\ndesign para 2"}},
+                  {"name":"Acceptance Criteria","value":{"text":"it works"}},
+                  {"name":"Notes","value":{"text":"a note"}},
+                  {"name":"Close Reason","value":{"text":"not yet"}}]}"#
+        ),
     );
     server.on(
         "GET",
@@ -309,30 +363,15 @@ fn e2e_an_adoptee_arrives_with_its_prose_labels_and_comments() {
             {"id":"4-2","text":"[br]\nbr's own echo","author":{"login":"integration"},"created":1001},
             {"id":"4-3","text":"and this","author":{"login":"kate"},"created":1002}]"#,
     );
+    accept_stamps(&server, &[11]);
     write_remote_config(&beads_dir(&workspace), &server.base_url());
 
-    let cfg = RemoteConfig::load(&beads_dir(&workspace)).expect("remote.yaml");
-    let http = client(&server.base_url());
-    let types = LinkTypes::resolve(&http).expect("link types");
-    let snapshot = fetch_snapshot(&http, &cfg, &types).expect("fetch");
-    let remote = snapshot
-        .issues
-        .iter()
-        .find(|i| i.id_readable == "EM-11")
-        .expect("EM-11");
-    let candidate = classify_adoption(&cfg, remote).expect("mapped");
+    pull(&workspace, "remote_pull");
 
-    let mut storage = open_storage(&beads_dir(&workspace));
-    let ctx = AdoptContext {
-        id_config: &id_config("em"),
-        actor: "youtrack",
-    };
-    let outcome = adopt_one(&mut storage, &ctx, &candidate, None).expect("adopt_one");
-    let comments = fetch_comments(&http, "EM-11").expect("comments");
-    import_comments(&mut storage, &outcome.bead_id, &comments).expect("import_comments");
-
+    let adopted = by_external_ref(&workspace, "EM-11").expect("EM-11 was adopted");
+    let storage = open_storage(&beads_dir(&workspace));
     let bead = storage
-        .get_issue(&outcome.bead_id)
+        .get_issue(&adopted)
         .expect("get_issue")
         .expect("adopted bead");
     assert_eq!(bead.description.as_deref(), Some("body **markdown**"));
@@ -348,11 +387,11 @@ fn e2e_an_adoptee_arrives_with_its_prose_labels_and_comments() {
     assert_eq!(bead.status, beads::model::Status::InProgress);
     assert_eq!(bead.priority, beads::model::Priority::HIGH);
 
-    let mut labels = storage.get_labels_for_export().expect("labels")[&outcome.bead_id].clone();
+    let mut labels = storage.get_labels_for_export().expect("labels")[&adopted].clone();
     labels.sort();
     assert_eq!(labels, ["mirror", "ui"], "tags arrive as labels");
 
-    let local = storage.get_comments(&outcome.bead_id).expect("comments");
+    let local = storage.get_comments(&adopted).expect("comments");
     assert_eq!(
         local.len(),
         2,
@@ -360,33 +399,22 @@ fn e2e_an_adoptee_arrives_with_its_prose_labels_and_comments() {
     );
     for comment in &local {
         assert_eq!(
-            comment.author, YOUTRACK_AUTHOR,
+            comment.author,
+            beads::remote::comments::YOUTRACK_AUTHOR,
             "the author is what stops the next push sending it back"
         );
     }
 
-    // The claim that author actually buys: the existing echo suppression sees
-    // these as already-remote and plans no push at all.
-    let planned = plan_comment_sync(
-        &local
-            .iter()
-            .map(|c| LocalComment {
-                author: c.author.clone(),
-                text: c.body.clone(),
-            })
-            .collect::<Vec<_>>(),
-        &comments,
-    );
-    assert!(
-        planned.to_push.is_empty(),
-        "an adopted comment must never be pushed back: {:?}",
-        planned.to_push
-    );
+    assert_only_stamps(&server);
 
+    // The claim that author actually buys, made where it matters: a second
+    // pull, seeing the same three remote comments and the two local ones,
+    // plans no push at all — so nothing goes back out.
+    let second = pull(&workspace, "remote_pull_again");
     assert!(
-        server.write_requests().is_empty(),
-        "adoption is local-only; the mirror saw {:?}",
-        server.write_requests()
+        !second.stdout.contains("comment(s) [push]"),
+        "an adopted comment must never be pushed back: {}",
+        second.stdout
     );
 }
 
@@ -407,36 +435,29 @@ fn e2e_an_interrupted_adoption_reruns_to_exactly_one_bead() {
             issue(11, "Typed in the web UI", &subtask_of(10))
         ),
     );
-    // The `Beads ID` stamp is the one write an adoption would ever attempt,
-    // and it is the write this test kills: the connection is dropped without
-    // a response, exactly as a crash or a severed link would look.
+    // The `Beads ID` stamp is the one write an adoption attempts, and it is
+    // the write this test kills: the connection is dropped without a response,
+    // exactly as a crash or a severed link would look. The run must still
+    // succeed — the bead already exists and is already paired, and rolling it
+    // back over a cosmetic field would delete correct work.
     server.on_drop("POST", "/api/issues/EM-11?fields=idReadable");
     write_remote_config(&beads_dir(&workspace), &server.base_url());
 
-    let mut run = run_adoption(&workspace, &server);
-    assert_eq!(run.adopted.len(), 1);
-
-    let http = client(&server.base_url());
-    stamp_adoption(&mut run.adopted[0], "EM-11", || {
-        http.post_json(
-            "/api/issues/EM-11?fields=idReadable",
-            &serde_json::json!({"customFields": []}),
-            "issue",
-        )
-        .map(|_| ())
-    });
+    let first = pull(&workspace, "remote_pull");
+    let adopted = by_external_ref(&workspace, "EM-11").expect("EM-11 was adopted");
     assert!(
-        run.adopted[0].stamp_failed,
-        "the stamp must be recorded as failed, not swallowed"
+        first.stderr.contains("could not stamp"),
+        "the failed stamp must be reported, not swallowed: {}",
+        first.stderr
     );
 
     // The second run sees exactly the same fetch. The bead already carries
     // EM-11, so pairing claims it and adoption is offered nothing.
-    let second = run_adoption(&workspace, &server);
+    let second = pull(&workspace, "remote_pull_again");
     assert!(
-        second.adopted.is_empty(),
-        "a bead that already carries the ref is paired, not re-adopted: {:?}",
-        second.adopted
+        !second.stdout.contains("adopted EM-11"),
+        "a bead that already carries the ref is paired, not re-adopted: {}",
+        second.stdout
     );
 
     let listed = run_br_with_env(&workspace, ["--json", "list"], TOKEN, "list");
@@ -452,7 +473,12 @@ fn e2e_an_interrupted_adoption_reruns_to_exactly_one_bead() {
         listed.stdout
     );
     assert_eq!(
-        carriers[0]["id"], run.adopted[0].bead_id,
+        carriers[0]["id"], adopted,
         "and it is the one the first run created"
+    );
+    assert_ne!(
+        carriers[0]["status"],
+        Status::Tombstone.as_str(),
+        "and it is live"
     );
 }

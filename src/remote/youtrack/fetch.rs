@@ -47,39 +47,19 @@ customFields(name,$type,value(name,text,id))";
 /// partition.
 const SORT_CLAUSE: &str = "%20sort%20by:%20created%20asc";
 
-/// Fetch every issue in the configured project, refusing on the first one br
-/// cannot read.
-///
-/// This is the strict half of the pair. Use it where acting on a partial
-/// picture is worse than stopping — `push`, `pull` and `sync`, which write.
-/// `br remote status` uses [`fetch_snapshot`] instead, because a command
-/// whose job is to report what cannot be mapped must not be disabled by it.
-///
-/// # Errors
-/// Returns whatever `http` returns on transport or HTTP failure, and
-/// `RemoteError::Config` — naming the issue — when any issue carries a bundle
-/// value with no beads preimage or an `updated` that is not a representable
-/// instant.
-pub fn fetch_all_issues(
-    http: &HttpClient,
-    cfg: &RemoteConfig,
-    types: &LinkTypes,
-) -> Result<Vec<RemoteIssue>, RemoteError> {
-    let snapshot = fetch_snapshot(http, cfg, types)?;
-    if let Some(first) = snapshot.unmappable.first() {
-        return Err(RemoteError::Config(format!(
-            "{} of {} issue(s) cannot be read with this remote.yaml; the first is {}. \
-             Run `br remote status` to list every one of them.",
-            snapshot.unmappable.len(),
-            snapshot.unmappable.len() + snapshot.issues.len(),
-            first.reason
-        )));
-    }
-    Ok(snapshot.issues)
-}
-
 /// Fetch every issue in the configured project, paged at `cfg.page_size`,
 /// collecting rather than raising the ones br cannot read.
+///
+/// **There is deliberately no strict variant.** An earlier revision had one,
+/// `fetch_all_issues`, which refused on the first issue it could not read and
+/// was documented as the fetch the writing verbs should use. Every verb uses
+/// this one instead: a single unreadable issue must not disable the commands
+/// that would tell you which issue to fix, and refusing to run is a strictly
+/// worse answer than reporting the refusal and doing the rest — which is the
+/// rule this whole feature is built on. It is also safe, and not merely
+/// tolerable: an unreadable issue never pairs, so no write path reaches it,
+/// and `build_plan` deliberately keeps the bead pointing at it out of
+/// `dangling` rather than calling it gone.
 ///
 /// The loop stops on the first short page: a page returning fewer items than
 /// were asked for is the last one, and a further request would be wasted.
@@ -262,7 +242,9 @@ mod tests {
         server.on("GET", &page_path(200, 100), 200, &page(200, 50));
 
         let http = client(&server);
-        let issues = fetch_all_issues(&http, &config(), &link_types()).expect("fetch");
+        let issues = fetch_snapshot(&http, &config(), &link_types())
+            .expect("fetch")
+            .issues;
 
         assert_eq!(issues.len(), 250);
         assert_eq!(
@@ -277,7 +259,9 @@ mod tests {
         let server = MockServer::start();
         server.on("GET", &page_path(0, 100), 200, &page(0, 1));
         let http = client(&server);
-        let issues = fetch_all_issues(&http, &config(), &link_types()).expect("fetch");
+        let issues = fetch_snapshot(&http, &config(), &link_types())
+            .expect("fetch")
+            .issues;
 
         assert_eq!(
             issues[0].updated.timestamp_millis(),
@@ -291,7 +275,9 @@ mod tests {
         let server = MockServer::start();
         server.on("GET", &page_path(0, 100), 200, &page(0, 1));
         let http = client(&server);
-        let issues = fetch_all_issues(&http, &config(), &link_types()).expect("fetch");
+        let issues = fetch_snapshot(&http, &config(), &link_types())
+            .expect("fetch")
+            .issues;
 
         assert_eq!(issues[0].fields.issue_type, crate::model::IssueType::Task);
         assert!(issues[0].fields.design.is_none());
@@ -324,7 +310,9 @@ mod tests {
         server.on("GET", &page_path(0, 100), 200, &body);
 
         let http = client(&server);
-        let issues = fetch_all_issues(&http, &config(), &link_types()).expect("fetch");
+        let issues = fetch_snapshot(&http, &config(), &link_types())
+            .expect("fetch")
+            .issues;
 
         assert_eq!(issues[0].links.len(), 1);
         assert_eq!(issues[0].links[0].issues[0].id, "3-20");
@@ -341,7 +329,7 @@ mod tests {
         // twice or missed, and neither is loud.
         let server = MockServer::start();
         server.on("GET", &page_path(0, 100), 200, &page(0, 1));
-        fetch_all_issues(&client(&server), &config(), &link_types()).expect("fetch");
+        fetch_snapshot(&client(&server), &config(), &link_types()).expect("fetch");
 
         let path = &server.requests()[0].path;
         assert!(
@@ -372,24 +360,6 @@ mod tests {
         assert!(
             reason.contains("status_map"),
             "must name the map to extend: {reason}"
-        );
-    }
-
-    #[test]
-    fn the_strict_fetch_still_refuses_an_unmappable_issue_by_name() {
-        let server = MockServer::start();
-        let mut bad = issue(9);
-        bad["customFields"][1] = serde_json::json!({"name":"State","value":{"name":"In Review"}});
-        let body = serde_json::Value::Array(vec![bad]).to_string();
-        server.on("GET", &page_path(0, 100), 200, &body);
-
-        let err =
-            fetch_all_issues(&client(&server), &config(), &link_types()).expect_err("must refuse");
-        let message = err.to_string();
-        assert!(message.contains("EM-9"), "must name the issue: {message}");
-        assert!(
-            message.contains("br remote status"),
-            "must point at the command that lists them all: {message}"
         );
     }
 

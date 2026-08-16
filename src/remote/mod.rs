@@ -8,6 +8,7 @@ pub mod comments;
 pub mod config;
 pub mod diff;
 pub mod error;
+pub mod execute;
 pub mod http;
 pub mod link_diff;
 pub mod model;

@@ -81,12 +81,18 @@ mod ready_limit;
 mod relations;
 #[path = "e2e/remote_adoption.rs"]
 mod remote_adoption;
+#[path = "e2e/remote_first_run.rs"]
+mod remote_first_run;
 #[path = "e2e/remote_init.rs"]
 mod remote_init;
 #[path = "e2e/remote_rename.rs"]
 mod remote_rename;
+#[path = "e2e/remote_resume.rs"]
+mod remote_resume;
 #[path = "e2e/remote_status.rs"]
 mod remote_status;
+#[path = "e2e/remote_verbs.rs"]
+mod remote_verbs;
 #[path = "e2e/rename.rs"]
 mod rename;
 #[path = "e2e/reparent.rs"]

@@ -31,21 +31,15 @@
 //!
 //! With `import_links` stubbed out the test fails with four deletions.
 //!
-//! The `br remote pull`/`push` verbs are still stubs (a later task owns them),
-//! so the pull half is `common::remote_harness::adopt_everything` — which
-//! assembles the same library calls those verbs will — and the push half is
-//! executed against the mock through `link_add`/`link_remove`, so the
-//! assertion is still on the wire traffic a real push would produce.
+//! Both halves are the real verbs: `br remote pull` and then `br remote push`,
+//! driven as subprocesses against the loopback mock. The assertion is on the
+//! wire traffic the push actually produced.
 
 use crate::common;
 
-use beads::remote::link_diff::{LinkChange, mirrored_direction};
-use beads::remote::plan::build_plan;
-use beads::remote::youtrack::fetch::fetch_snapshot;
-use beads::remote::youtrack::links::{LinkTypes, link_add, link_remove};
 use common::cli::{BrWorkspace, run_br_with_env};
 use common::mock_http::MockServer;
-use common::remote_harness::{adopt_everything, client, hydrated_issues, open_storage};
+use common::remote_harness::open_storage;
 use common::youtrack_fixtures::{LINK_TYPES, LINK_TYPES_PATH, issues_path, write_remote_config};
 
 const TOKEN: [(&str, &str); 1] = [("BR_YOUTRACK_TOKEN", "t")];
@@ -91,45 +85,15 @@ fn beads_dir(workspace: &BrWorkspace) -> std::path::PathBuf {
     workspace.root.join(".beads")
 }
 
-/// The push half: rebuild the plan and execute its link changes for real.
-fn push_link_changes(workspace: &BrWorkspace, server: &MockServer) {
-    let cfg =
-        beads::remote::config::RemoteConfig::load(&beads_dir(workspace)).expect("remote.yaml");
-    let http = client(&server.base_url());
-    let types = LinkTypes::resolve(&http).expect("link types");
-    let snapshot = fetch_snapshot(&http, &cfg, &types).expect("fetch");
-
-    let storage = open_storage(&beads_dir(workspace));
-    let issues = hydrated_issues(&storage);
-    let plan = build_plan(&cfg, &issues, snapshot, &types);
-
-    for issue_plan in &plan.link_changes {
-        for change in &issue_plan.changes {
-            match change {
-                LinkChange::Add {
-                    kind,
-                    target_readable,
-                } => link_add(
-                    &http,
-                    &issue_plan.remote_id,
-                    &types.link_id(*kind, mirrored_direction(*kind)),
-                    target_readable,
-                )
-                .expect("link_add"),
-                LinkChange::Remove {
-                    kind,
-                    target_internal_id,
-                    ..
-                } => link_remove(
-                    &http,
-                    &issue_plan.remote_id,
-                    &types.link_id(*kind, mirrored_direction(*kind)),
-                    target_internal_id,
-                )
-                .expect("link_remove"),
-            }
-        }
-    }
+fn run_verb(workspace: &BrWorkspace, verb: &str) -> common::cli::BrRun {
+    let run = run_br_with_env(workspace, ["remote", verb], TOKEN, verb);
+    assert!(
+        run.status.success(),
+        "br remote {verb} failed: stdout={} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    run
 }
 
 /// A workspace holding one bead paired with EM-10, and a mock that answers
@@ -184,6 +148,16 @@ fn scenario(server: &MockServer) -> BrWorkspace {
             r#"{"idReadable":"EM-0"}"#,
         );
     }
+    // The `Beads ID` stamp each adoption posts. Routing it keeps a courtesy
+    // from failing for want of a canned response.
+    for issue in ["EM-11", "EM-12"] {
+        server.on(
+            "POST",
+            &format!("/api/issues/{issue}?fields=idReadable"),
+            200,
+            &format!(r#"{{"idReadable":"{issue}"}}"#),
+        );
+    }
 
     write_remote_config(&beads_dir(&workspace), &server.base_url());
     workspace
@@ -195,10 +169,14 @@ fn adopting_a_subtask_then_pushing_does_not_delete_its_parent_link() {
     let server = MockServer::start();
     let workspace = scenario(&server);
 
-    let run = adopt_everything(&beads_dir(&workspace), &server.base_url(), "em").expect("adoption");
-    assert_eq!(run.adopted.len(), 2, "EM-11 and EM-12 are both adoptable");
+    let pulled = run_verb(&workspace, "pull");
+    assert!(
+        pulled.stdout.contains("adopted EM-11") && pulled.stdout.contains("adopted EM-12"),
+        "EM-11 and EM-12 are both adoptable: {}",
+        pulled.stdout
+    );
 
-    push_link_changes(&workspace, &server);
+    run_verb(&workspace, "push");
 
     let deletes: Vec<_> = server
         .requests()
@@ -265,4 +243,167 @@ fn adopting_a_subtask_then_pushing_does_not_delete_its_parent_link() {
             "missing imported relation {expected:?} in {edges:?}"
         );
     }
+}
+
+/// The same bug in the other direction, and the one `.10` deliberately left
+/// open: an adoptee that becomes the **parent** of an already-paired bead.
+///
+/// Someone drags an existing mirrored issue under a brand-new one in the web
+/// UI. The new issue is adopted; the link appears on it as `Subtask` OUTWARD
+/// and on the paired issue as `INWARD`. Reading only the `INWARD` half of a
+/// `Subtask` — which is what "a parent link is owned by the child" means
+/// everywhere else in this epic — imports nothing at all, because the adoptee
+/// only carries the `OUTWARD` half and nothing walks a paired issue's links.
+/// The paired bead then reports no parent, the local-wins differ sees a
+/// `Subtask` link present remotely and absent locally, and the next push
+/// deletes the link the human just made.
+///
+/// `import_links` therefore writes the `parent-child` row from that half too,
+/// and writes **only** the row: renaming the existing bead to sit under its new
+/// parent's id would leave a tombstone and `former_ids` churn behind, forever,
+/// for a board rearrangement. The bead's id no longer describes its parentage,
+/// which `br dep add … parent-child` already produces and `br reparent` can
+/// resolve on request. The alternative was letting the mirror delete an
+/// inbound edit.
+const REPARENT_ISSUES: &str = r#"[
+  {"id":"3-10","idReadable":"EM-10","summary":"Mirrored bead","updated":1000,
+   "commentsCount":0,"tags":[],
+   "links":[{"id":"173-3t","direction":"INWARD","linkType":{"id":"173-3","name":"Subtask"},
+             "issues":[{"id":"3-20","idReadable":"EM-20"}]}],
+   "customFields":[{"name":"Type","value":{"name":"Task"}},
+                   {"name":"State","value":{"name":"Open"}},
+                   {"name":"Priority","value":{"name":"Major"}}]},
+  {"id":"3-20","idReadable":"EM-20","summary":"A new home for it","updated":1000,
+   "commentsCount":0,"tags":[],
+   "links":[{"id":"173-3s","direction":"OUTWARD","linkType":{"id":"173-3","name":"Subtask"},
+             "issues":[{"id":"3-10","idReadable":"EM-10"}]}],
+   "customFields":[{"name":"Type","value":{"name":"Task"}},
+                   {"name":"State","value":{"name":"Open"}},
+                   {"name":"Priority","value":{"name":"Major"}}]}
+]"#;
+
+/// A workspace with one bead paired to `EM-10`, and a mock that answers the
+/// fetch, the adoption stamp, and **both** link writes a push could attempt —
+/// the removal has to succeed and be recorded, or the bug is unobservable.
+fn reparent_scenario(server: &MockServer) -> (BrWorkspace, String) {
+    let workspace = BrWorkspace::new();
+    let init = run_br_with_env(&workspace, ["init", "--prefix", "em"], TOKEN, "init");
+    assert!(init.status.success(), "br init failed: {}", init.stderr);
+    let created = run_br_with_env(
+        &workspace,
+        [
+            "create",
+            "Mirrored bead",
+            "--priority",
+            "2",
+            "--external-ref",
+            "EM-10",
+        ],
+        TOKEN,
+        "create",
+    );
+    assert!(
+        created.status.success(),
+        "create failed: {}",
+        created.stderr
+    );
+    let existing = common::cli::parse_created_id(&created.stdout);
+
+    server.on("GET", LINK_TYPES_PATH, 200, LINK_TYPES);
+    server.on("GET", &issues_path(0), 200, REPARENT_ISSUES);
+    server.on(
+        "POST",
+        "/api/issues/EM-20?fields=idReadable",
+        200,
+        r#"{"idReadable":"EM-20"}"#,
+    );
+    server.on(
+        "DELETE",
+        "/api/issues/EM-10/links/173-3t/issues/3-20",
+        200,
+        "",
+    );
+    server.on(
+        "POST",
+        "/api/issues/EM-10/links/173-3t/issues?fields=idReadable",
+        200,
+        r#"{"idReadable":"EM-20"}"#,
+    );
+    write_remote_config(&beads_dir(&workspace), &server.base_url());
+    (workspace, existing)
+}
+
+/// Every `(issue, dep_type, depends_on)` row the workspace holds.
+fn dependency_edges(workspace: &BrWorkspace) -> Vec<(String, String, String)> {
+    let storage = open_storage(&beads_dir(workspace));
+    storage
+        .get_all_dependency_records()
+        .expect("dependency records")
+        .values()
+        .flatten()
+        .map(|d| {
+            (
+                d.issue_id.clone(),
+                d.dep_type.to_string(),
+                d.depends_on_id.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn adopting_a_new_parent_over_a_paired_bead_does_not_delete_the_link() {
+    let _log =
+        common::test_log("adopting_a_new_parent_over_a_paired_bead_does_not_delete_the_link");
+    let server = MockServer::start();
+    let (workspace, existing) = reparent_scenario(&server);
+
+    run_verb(&workspace, "pull");
+    run_verb(&workspace, "push");
+
+    let deletes: Vec<_> = server
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "DELETE")
+        .collect();
+    assert!(
+        deletes.is_empty(),
+        "the push deleted the parent link the pull had just imported: {deletes:?}"
+    );
+
+    let listed = run_br_with_env(&workspace, ["--json", "list"], TOKEN, "list");
+    assert!(listed.status.success(), "list failed: {}", listed.stderr);
+    let issues = common::cli::parse_list_issues(&listed.stdout);
+    let adoptee = issues
+        .iter()
+        .find(|i| i["external_ref"] == "EM-20")
+        .and_then(|i| i["id"].as_str())
+        .unwrap_or_else(|| panic!("EM-20 was never adopted: {}", listed.stdout))
+        .to_string();
+
+    let edges = dependency_edges(&workspace);
+    assert!(
+        edges.contains(&(existing.clone(), "parent-child".to_string(), adoptee)),
+        "the OUTWARD half of the adoptee's Subtask link must be imported: {edges:?}"
+    );
+
+    // And the existing bead was not renamed onto its new parent's id. A rename
+    // is a tombstone plus a forwarding pointer, permanently, and inflicting one
+    // because somebody rearranged a board is not a trade.
+    assert!(
+        issues.iter().any(|i| i["id"] == existing.as_str()),
+        "the paired bead must keep its id: {}",
+        listed.stdout
+    );
+    let tombstones = run_br_with_env(
+        &workspace,
+        ["--json", "list", "--status", "tombstone"],
+        TOKEN,
+        "list_tombstones",
+    );
+    assert!(
+        common::cli::parse_list_issues(&tombstones.stdout).is_empty(),
+        "no rename, so no tombstone: {}",
+        tombstones.stdout
+    );
 }
