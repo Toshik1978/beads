@@ -40,6 +40,29 @@ impl BundleKind {
             Self::State => "StateBundleElement",
         }
     }
+
+    /// The `$type` the bundle itself carries.
+    ///
+    /// Required on any *nested* bundle reference. `POST
+    /// /api/admin/projects/{id}/customFields/{instance}` with a body of
+    /// `{"bundle":{"id":"163-2"},"$type":"EnumProjectCustomField"}` answers
+    /// **HTTP 500 `java.lang.InstantiationException`**: `Bundle` is abstract,
+    /// and YouTrack will not infer the concrete subclass from the id — even
+    /// though the id is globally unique and the outer `$type` already implies
+    /// exactly one answer. Adding `"$type":"EnumBundle"` inside the nested
+    /// object is the whole difference between a 500 and a 200.
+    ///
+    /// The endpoint is only reached on the clone-and-re-point path, which
+    /// needs a bundle shared by two projects to trigger — so it stayed
+    /// unexercised against a real server until an instance had a second
+    /// project in it.
+    #[must_use]
+    pub fn bundle_type(self) -> &'static str {
+        match self {
+            Self::Enum => "EnumBundle",
+            Self::State => "StateBundle",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

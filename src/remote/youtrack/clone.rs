@@ -181,6 +181,10 @@ impl AdminClient {
 
     /// Point `field`'s project instance at `bundle`.
     ///
+    /// The nested `bundle` object carries its own `$type` as well as the
+    /// outer one; see [`BundleKind::bundle_type`] for why omitting it answers
+    /// HTTP 500 rather than a validation error.
+    ///
     /// # Errors
     /// Returns `RemoteError` on transport or HTTP failure.
     pub fn repoint_field_bundle(
@@ -194,7 +198,10 @@ impl AdminClient {
             "/api/admin/projects/{}/customFields/{}?fields=id,bundle(id,name)",
             project.id, field.instance_id
         );
-        let body = json!({ "bundle": { "id": bundle.id }, "$type": type_name });
+        let body = json!({
+            "bundle": { "id": bundle.id, "$type": bundle.kind.bundle_type() },
+            "$type": type_name,
+        });
         self.http()
             .post_json(&path, &body, &format!("re-point '{}'", field.field_name))
             .map(|_| ())
@@ -421,6 +428,47 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&posts[0].body).expect("json body");
         assert_eq!(body["bundle"]["id"], "165-9");
         assert_eq!(body["$type"], "StateProjectCustomField");
+        // The nested `$type` is not decoration: without it this POST answers
+        // HTTP 500 `java.lang.InstantiationException` against a real server.
+        assert_eq!(body["bundle"]["$type"], "StateBundle");
+    }
+
+    #[test]
+    fn an_enum_repoint_names_the_enum_bundle_type_inside_the_nested_object() {
+        let server = MockServer::start();
+        server.on(
+            "POST",
+            "/api/admin/projects/0-1/customFields/189-15?fields=id,bundle(id,name)",
+            200,
+            r#"{"id":"189-15","bundle":{"id":"163-2","name":"Beads: Types"}}"#,
+        );
+
+        let field = ProjectFieldBundle {
+            instance_id: "189-15".into(),
+            field_id: "161-1".into(),
+            field_name: "Type".into(),
+            bundle: BundleRef {
+                id: "163-1".into(),
+                name: "Types".into(),
+                kind: BundleKind::Enum,
+                values: Vec::new(),
+            },
+        };
+        let clone = BundleRef {
+            id: "163-2".into(),
+            name: "Beads: Types".into(),
+            kind: BundleKind::Enum,
+            values: Vec::new(),
+        };
+        admin(&server)
+            .repoint_field_bundle(&field, &project(), &clone)
+            .expect("repoint");
+
+        let posts = server.write_requests();
+        assert_eq!(posts.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&posts[0].body).expect("json body");
+        assert_eq!(body["$type"], "EnumProjectCustomField");
+        assert_eq!(body["bundle"]["$type"], "EnumBundle");
     }
 
     #[test]
