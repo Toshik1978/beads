@@ -16,6 +16,7 @@ use crate::common;
 
 use common::cli::{BrWorkspace, run_br_with_env};
 use common::mock_http::MockServer;
+use rusqlite::Connection;
 
 const TOKEN: [(&str, &str); 1] = [("BR_YOUTRACK_TOKEN", "t")];
 
@@ -255,6 +256,76 @@ fn e2e_remote_init_preflight_sees_types_that_arrived_only_in_the_jsonl() {
     assert!(
         server.requests().is_empty(),
         "still before any network access, got {:?}",
+        server.requests()
+    );
+}
+
+/// `Priority` derives `#[serde(transparent)] Deserialize`, so nothing
+/// stops a value outside 0..=4 from sitting in `.beads/beads.db` — `FromStr`
+/// only guards `br create`/`br update`, and the SQLite `CHECK` constraint
+/// only guards a write, not a row already on disk (a schema migration bug,
+/// or a hand edit made with `PRAGMA ignore_check_constraints=ON`, could get
+/// one there without ever going through either guard). Reproduce that
+/// directly against the database rather than the JSONL: editing the JSONL
+/// line instead would go through `IssueValidator` on the next auto-import
+/// and be refused before `remote init` ever ran, which would prove nothing
+/// about this pre-flight.
+///
+/// `remote.yaml`'s `priority_map` here is total over 0..=4, so
+/// `RemoteConfig::load`'s own `check_total` gate passes clean — this test is
+/// worthless if that earlier gate is what actually refuses. The one thing
+/// left standing between an out-of-range priority already on disk and a
+/// write to YouTrack is `preflight_vocabulary`'s loop over
+/// `WorkspaceVocabulary.priorities`, so this is the only test that exercises
+/// it end to end through `workspace_vocabulary()`.
+#[test]
+fn e2e_remote_init_refuses_an_out_of_range_priority_before_any_write() {
+    let _log =
+        common::test_log("e2e_remote_init_refuses_an_out_of_range_priority_before_any_write");
+    let workspace = initialised_workspace();
+    let server = MockServer::start();
+
+    let created = run_br_with_env(&workspace, ["create", "Ordinary"], TOKEN, "create");
+    assert!(
+        created.status.success(),
+        "create failed: {}",
+        created.stderr
+    );
+
+    let db_path = workspace.root.join(".beads").join("beads.db");
+    let conn = Connection::open(&db_path).expect("open beads.db");
+    conn.execute_batch(
+        "PRAGMA ignore_check_constraints = ON; \
+         UPDATE issues SET priority = 9;",
+    )
+    .expect("corrupt the stored priority past the CHECK constraint");
+    drop(conn);
+
+    write_remote_config(&workspace, &server.base_url());
+
+    let run = run_br_with_env(&workspace, ["remote", "init"], TOKEN, "remote_init");
+
+    assert!(
+        !run.status.success(),
+        "an out-of-range stored priority must refuse: stdout={} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("priority '9'") || run.stdout.contains("priority '9'"),
+        "must name the offending value and that it is a priority; stdout={} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("priority_map") || run.stdout.contains("priority_map"),
+        "must name the config key that would cover it; stdout={} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        server.requests().is_empty(),
+        "the pre-flight must run before any network access, got {:?}",
         server.requests()
     );
 }

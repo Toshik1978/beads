@@ -394,9 +394,22 @@ fn options_from(args: &RemoteInitArgs) -> InitOptions {
     }
 }
 
-/// The distinct `issue_type` and `status` values this workspace actually
-/// holds — every issue, closed and deferred included, because a value the
-/// maps do not cover blocks a push whether or not the issue is still open.
+/// The distinct `issue_type`, `status` and `priority` values this workspace
+/// actually holds — every issue, closed and deferred included, because a
+/// value the maps do not cover blocks a push whether or not the issue is
+/// still open.
+///
+/// `priorities` is populated even though `Priority`'s 0..=4 range is meant to
+/// be closed: `Priority` derives `#[serde(transparent)] Deserialize` with no
+/// bound of its own, and nothing re-validates a row already read back out of
+/// `beads.db`. A hand-edited `issues.jsonl` is not the live vector —
+/// `IssueValidator` rejects an out-of-range value at JSONL import, and
+/// SQLite's own `CHECK(priority >= 0 AND priority <= 4)` rejects one on
+/// write — but neither guard runs again on a plain read, so a row that
+/// reached storage by some other path (a corrupted `beads.db`, a future
+/// migration bug) would come back out unchecked. `preflight_vocabulary`'s
+/// priority loop is the belt-and-braces check for exactly that row; leaving
+/// this set empty made the loop dead code no path ever populated.
 fn workspace_vocabulary(storage: &SqliteStorage) -> Result<WorkspaceVocabulary> {
     let filters = ListFilters {
         include_closed: true,
@@ -407,6 +420,7 @@ fn workspace_vocabulary(storage: &SqliteStorage) -> Result<WorkspaceVocabulary> 
     for issue in storage.list_issues(&filters)? {
         vocab.types.insert(issue.issue_type.as_str().to_string());
         vocab.statuses.insert(issue.status.as_str().to_string());
+        vocab.priorities.insert(issue.priority.0.to_string());
     }
     Ok(vocab)
 }
