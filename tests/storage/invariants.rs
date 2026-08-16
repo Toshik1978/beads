@@ -52,7 +52,6 @@ fn schema_tables_and_columns_exist() {
         "export_hashes",
         "blocked_issues_cache",
         "child_counters",
-        "close_metadata",
     ] {
         assert!(tables.contains(table), "missing table: {table}");
     }
@@ -1026,45 +1025,55 @@ fn list_issues_with_counts_accurate_dependencies() {
     assert_eq!(storage.count_dependencies(&grandchild.id).unwrap(), 1); // grandchild depends on child1
 }
 
-/// bds-04l.16. `is_template` is `INTEGER NOT NULL DEFAULT 0` and
-/// `apply_schema` migrates legacy nullable tables to that shape, so
-/// `is_template IS NULL` is constant-false. SQLite folds it away while
-/// analysing the WHERE clause, and the rewritten clause then no longer implies
-/// the stored predicate of a partial index carrying the same disjunction --
-/// so the index becomes unusable. Where a site also carries `INDEXED BY` on a
-/// partial index it is not a slowdown but a hard error (`no query solution`).
+/// No `WHERE` clause in the storage layer may still constrain a column schema
+/// v19 dropped.
 ///
-/// bds-04l.4.3 removed the disjunct from the two `INDEXED BY` sites because
-/// they were failing outright; the other 22 were left, silently costing index
-/// use. This guard is source-level rather than per-site because the sites are
-/// mostly built by `sql.push_str` rather than from addressable constants, and
-/// because reintroduction -- not a specific query -- is the failure mode: one
-/// `push_str` copied from a neighbour puts it straight back.
+/// This replaces `the_dead_is_template_disjunct_stays_out_of_storage_sql`
+/// (bds-04l.16), which banned the single spelling `is_template IS NULL` — a
+/// disjunct that was constant-false against a `NOT NULL` column and cost
+/// partial-index use, or with `INDEXED BY` failed the query outright. Now that
+/// the column does not exist, the failure is louder and broader: any predicate
+/// naming `ephemeral`, `pinned` or `is_template` is a runtime `no such column`
+/// on the first query that reaches it, and `cargo check` cannot see it because
+/// these are SQL string literals.
 ///
-/// Comments are exempt: several deliberately quote the disjunct to explain why
-/// it must not be used.
+/// Scoped to predicates (`col =`, `col IS`) rather than to the bare names so
+/// that `LEGACY_NULLABLE_FLAGS_DDL` — a deliberate legacy `CREATE TABLE`
+/// fixture that must keep declaring all three — does not trip it. Comments are
+/// exempt: several explain why the predicates are gone.
 #[test]
-fn the_dead_is_template_disjunct_stays_out_of_storage_sql() {
+fn dropped_flag_columns_stay_out_of_storage_sql_predicates() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/sqlite.rs"),
     )
     .expect("src/storage/sqlite.rs must be readable");
+
+    let banned = [
+        "is_template =",
+        "is_template IS",
+        "ephemeral =",
+        "ephemeral IS",
+        "pinned =",
+        "pinned IS",
+    ];
 
     let offenders: Vec<String> = source
         .lines()
         .enumerate()
         .filter(|(_, line)| {
             let trimmed = line.trim_start();
-            !trimmed.starts_with("//") && line.contains("is_template IS NULL")
+            !trimmed.starts_with("//")
+                && !trimmed.starts_with("///")
+                && banned.iter().any(|needle| line.contains(needle))
         })
         .map(|(index, line)| format!("  src/storage/sqlite.rs:{}: {}", index + 1, line.trim()))
         .collect();
 
     assert!(
         offenders.is_empty(),
-        "`is_template IS NULL` is constant-false (the column is NOT NULL) and its presence \
-         in a WHERE clause costs partial-index use -- or, with INDEXED BY, fails the query \
-         outright. Drop the disjunct and keep just `is_template = 0`:\n{}",
+        "`ephemeral`, `pinned` and `is_template` were dropped from the issues table in \
+         schema v19. A predicate naming one is a runtime `no such column`, invisible to \
+         `cargo check` because it lives in a SQL string literal:\n{}",
         offenders.join("\n")
     );
 }

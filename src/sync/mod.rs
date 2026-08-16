@@ -1336,8 +1336,7 @@ fn export_issue_ids(storage: &SqliteStorage) -> Result<Vec<String>> {
     let rows = storage.execute_raw_query(
         r"SELECT id
           FROM issues
-          WHERE (ephemeral = 0 OR ephemeral IS NULL)
-            AND id NOT LIKE '%-wisp-%'
+          WHERE id NOT LIKE '%-wisp-%'
           ORDER BY id ASC",
     )?;
 
@@ -2655,7 +2654,6 @@ fn find_post_import_fk_violation(storage: &SqliteStorage) -> Result<Option<(Stri
         ("export_hashes", "issue_id"),
         ("blocked_issues_cache", "issue_id"),
         ("child_counters", "parent_id"),
-        ("close_metadata", "issue_id"),
     ];
 
     for (table, column) in fk_backed_tables {
@@ -2676,6 +2674,14 @@ fn find_post_import_fk_violation(storage: &SqliteStorage) -> Result<Option<(Stri
     Ok(None)
 }
 
+/// The incremental auto-flush filter.
+///
+/// Its one caller is `collect_incremental_auto_flush_changes`; full export
+/// goes through `export_issue_ids` / `get_all_issues_for_export` and their SQL
+/// filters instead. The two must agree on which ids reach `issues.jsonl`, and
+/// since schema v19 they do: the SQL side's `ephemeral = 0` half went with the
+/// column, leaving `id NOT LIKE '%-wisp-%'` on both sides.
+/// `incremental_auto_flush_and_full_export_select_the_same_ids` pins that.
 fn is_issue_exportable(issue: &Issue, retention_days: Option<u64>) -> bool {
     // `ephemeral` (bds-b4f.2.2) was set only by wisp-ID detection in
     // `normalize_issue`; the ID check below is the same condition directly.
@@ -5948,16 +5954,19 @@ mod tests {
         );
     }
 
+    /// The full-export exclusion path only. `export_to_jsonl` never calls
+    /// `is_issue_exportable` — that gates the separate incremental/auto-flush
+    /// path — so the rows here are filtered by `get_all_issues_for_export`'s
+    /// own `id NOT LIKE '%-wisp-%'` SQL predicate and nothing else. The old
+    /// `ephemeral = true` version of this test was excluded by that same SQL
+    /// clause, not by `is_issue_exportable`, so the comment claiming otherwise
+    /// was wrong before the field was removed too.
+    ///
+    /// `is_issue_exportable`'s own wisp check is covered by
+    /// `incremental_auto_flush_and_full_export_select_the_same_ids` above,
+    /// which drives it directly.
     #[test]
     fn test_export_excludes_wisp_issues() {
-        // `ephemeral` no longer exists on `Issue` (bds-b4f.2.2); it was set
-        // only by wisp-ID detection. This pins the full-export exclusion path:
-        // `export_to_jsonl` never calls `is_issue_exportable` (that function
-        // gates the separate incremental/auto-flush export path) — the rows
-        // here are filtered by `get_all_issues_for_export`'s own
-        // `id NOT LIKE '%-wisp-%'` SQL predicate. Same was true before this
-        // field's removal: the old `ephemeral = true` version of this test was
-        // also excluded by that SQL clause, not by `is_issue_exportable`.
         let mut storage = SqliteStorage::open_memory().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let output_path = temp_dir.path().join("issues.jsonl");
@@ -5976,6 +5985,55 @@ mod tests {
         assert_eq!(result.exported_count, 1);
         assert!(result.exported_ids.contains(&"bd-regular".to_string()));
         assert!(!result.exported_ids.contains(&"bd-wisp-1".to_string()));
+    }
+
+    /// The incremental auto-flush filter and the full-export SQL filter must
+    /// select the same set of ids.
+    ///
+    /// bds-b4f.2.2 opened a divergence between them: `is_issue_exportable`
+    /// dropped its `ephemeral` check when the field left `Issue`, while the
+    /// export SQL kept `ephemeral = 0`. A legacy `ephemeral = 1` row that was
+    /// not wisp-shaped was therefore written into `issues.jsonl` by an
+    /// incremental auto-flush and dropped again by the next full export —
+    /// churn, not a stable inclusion. Schema v19 closed it by removing the SQL
+    /// half, leaving `id NOT LIKE '%-wisp-%'` as the only filter on either
+    /// side. This asserts the two agree rather than assuming they do.
+    #[test]
+    fn incremental_auto_flush_and_full_export_select_the_same_ids() {
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("issues.jsonl");
+
+        let ids = ["bd-plain", "bd-second", "bd-wisp-1"];
+        for id in ids {
+            let issue = make_test_issue(id, "Export filter parity");
+            storage.create_issue(&issue, "test").unwrap();
+        }
+
+        let dirty: Vec<(String, String)> = ids
+            .iter()
+            .map(|id| ((*id).to_string(), String::new()))
+            .collect();
+        let changes = collect_incremental_auto_flush_changes(&storage, dirty).unwrap();
+        let mut incremental_ids: Vec<String> = changes.replacement_lines.keys().cloned().collect();
+        incremental_ids.sort();
+
+        let config = ExportConfig::default();
+        let mut full_ids = export_to_jsonl(&storage, &output_path, &config)
+            .unwrap()
+            .exported_ids;
+        full_ids.sort();
+
+        assert_eq!(
+            incremental_ids, full_ids,
+            "auto-flush and full export must write the same ids, or a row churns \
+             in and out of issues.jsonl on alternate syncs"
+        );
+        assert!(
+            !full_ids.contains(&"bd-wisp-1".to_string()),
+            "the surviving filter on both sides is the wisp-ID clause"
+        );
+        assert_eq!(full_ids.len(), 2);
     }
 
     #[test]

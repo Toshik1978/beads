@@ -109,20 +109,12 @@ fn length_prefixed_reference_content_hash(issue: &Issue) -> String {
     push_length_prefixed_field(&mut hasher, issue.status.as_str());
     push_length_prefixed_field(&mut hasher, &issue.priority.0.to_string());
     push_length_prefixed_field(&mut hasher, issue.issue_type.as_str());
-    // `assignee` no longer exists on `Issue` (bds-b4f.2.6); `content_hash` now
-    // passes a literal `None` placeholder for this slot, so the reference
-    // writer emits the same permanent placeholder.
-    push_length_prefixed_field(&mut hasher, ""); // was `assignee`
+    // Schema v19 collapsed five slots out of the digest entirely — `assignee`,
+    // `source_system`, `pinned` and `is_template` (the placeholders the field
+    // removals left) plus `external_ref` — so the reference writer emits
+    // nothing at all for them, not an empty placeholder.
     push_length_prefixed_field(&mut hasher, issue.owner.as_deref().unwrap_or(""));
     push_length_prefixed_field(&mut hasher, issue.created_by.as_deref().unwrap_or(""));
-    push_length_prefixed_field(&mut hasher, issue.external_ref.as_deref().unwrap_or(""));
-    // `source_system`, `pinned` and `is_template` no longer exist on `Issue`
-    // (bds-b4f.2.4, bds-b4f.2.2); `content_hash` now passes a literal
-    // placeholder for each slot, so the reference writer emits the same
-    // permanent placeholder.
-    push_length_prefixed_field(&mut hasher, ""); // was `source_system`
-    push_length_prefixed_field(&mut hasher, ""); // was `pinned`
-    push_length_prefixed_field(&mut hasher, ""); // was `is_template`
     push_length_prefixed_field(&mut hasher, ""); // quality_score nil
     push_length_prefixed_field(&mut hasher, ""); // crystallizes false
     push_length_prefixed_field(&mut hasher, ""); // await_type
@@ -236,18 +228,8 @@ proptest! {
             &issue.status,
             &issue.priority,
             &issue.issue_type,
-            // Mirrors the literal placeholder `content_hash` now passes for
-            // the removed `assignee` field (bds-b4f.2.6).
-            None,
             issue.owner.as_deref(),
             issue.created_by.as_deref(),
-            issue.external_ref.as_deref(),
-            // Mirrors the literal placeholders `content_hash` now passes for
-            // the removed `source_system`/`pinned`/`is_template` fields
-            // (bds-b4f.2.4, bds-b4f.2.2).
-            None,
-            false,
-            false,
         );
 
         prop_assert_eq!(direct, from_parts, "Direct and from_parts should match");
@@ -323,10 +305,11 @@ proptest! {
         issue.owner = owner;
         issue.created_by = created_by;
         issue.external_ref = external_ref;
-        // `assignee`, `source_system`, `pinned` and `is_template` no longer
-        // exist on `Issue` (bds-b4f.2.6, bds-b4f.2.4, bds-b4f.2.2); both
-        // `content_hash` and the reference writer now emit a fixed empty
-        // placeholder for those slots, so there is nothing left to vary here.
+        // `external_ref` is still varied above, deliberately: schema v19 took it
+        // out of the digest, and both `content_hash` and the reference writer
+        // ignore it, so varying it proves they ignore it in step. The four
+        // placeholder slots (`assignee`, `source_system`, `pinned`,
+        // `is_template`) are gone from both sides entirely.
 
         prop_assert_eq!(
             content_hash(&issue),
@@ -375,11 +358,6 @@ fn hash_distinguishes_structural_pairs_with_embedded_nuls() {
             &IssueType::Task,
             None,
             None,
-            None,
-            None,
-            None,
-            false,
-            false,
         );
         let hash_b = content_hash_from_parts(
             &title_b,
@@ -392,11 +370,6 @@ fn hash_distinguishes_structural_pairs_with_embedded_nuls() {
             &IssueType::Task,
             None,
             None,
-            None,
-            None,
-            None,
-            false,
-            false,
         );
 
         prop_assert_ne!(
@@ -480,17 +453,12 @@ fn content_hash_matches_length_prefixed_br_fixture() {
         &Status::InProgress,
         &Priority::HIGH,
         &IssueType::Bug,
-        Some("bob"),
         Some("alice"),
         Some("pane6"),
-        Some("github:org/repo#123"),
-        Some("github"),
-        true,
-        true,
     );
 
     assert_eq!(
-        hash, "ef08b448c7b8eb9a3c3b2facdd9fa8e0b2b420c99725629c6811f019a0a9ab87",
+        hash, "9305bd27ae2c0d4d7d4e8b5c2e0fb00135e944dee8facf77721d3b3d6df43232",
         "content_hash must match the length-prefixed br fixture"
     );
 }

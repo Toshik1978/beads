@@ -60,7 +60,9 @@ fn fixed_issue() -> Issue {
 fn push_issue_row_snapshot(out: &mut String, conn: &Connection) {
     let row = conn
         .query_row(
-            "SELECT id, title, status, priority, issue_type, assignee, description, \
+            // Twelve selected expressions became eleven when schema v19 dropped
+            // `assignee`; every index below was re-derived by counting.
+            "SELECT id, title, status, priority, issue_type, description, \
                     close_reason, created_at, updated_at, closed_at, content_hash \
              FROM issues WHERE id = 'storage-golden-1'",
         )
@@ -72,13 +74,12 @@ fn push_issue_row_snapshot(out: &mut String, conn: &Connection) {
     writeln!(out, "  status: {}", value_text(&row, 2)).unwrap();
     writeln!(out, "  priority: {}", value_i64(&row, 3)).unwrap();
     writeln!(out, "  issue_type: {}", value_text(&row, 4)).unwrap();
-    writeln!(out, "  assignee: {}", value_text(&row, 5)).unwrap();
-    writeln!(out, "  description: {}", value_text(&row, 6)).unwrap();
-    writeln!(out, "  close_reason: {}", value_text(&row, 7)).unwrap();
-    writeln!(out, "  created_at: {}", value_text(&row, 8)).unwrap();
+    writeln!(out, "  description: {}", value_text(&row, 5)).unwrap();
+    writeln!(out, "  close_reason: {}", value_text(&row, 6)).unwrap();
+    writeln!(out, "  created_at: {}", value_text(&row, 7)).unwrap();
     writeln!(out, "  updated_at: <updated_at>").unwrap();
-    writeln!(out, "  closed_at: {}", value_text(&row, 10)).unwrap();
-    writeln!(out, "  content_hash: {}", value_text(&row, 11)).unwrap();
+    writeln!(out, "  closed_at: {}", value_text(&row, 9)).unwrap();
+    writeln!(out, "  content_hash: {}", value_text(&row, 10)).unwrap();
 }
 
 fn normalized_jsonl(jsonl: &[u8]) -> String {

@@ -409,14 +409,15 @@ fn compute_summary(
             Status::Tombstone => tombstone += 1,
             Status::Pinned | Status::Custom(_) => {}
         }
-        if issue.pinned || issue.status == Status::Pinned {
+        // `StatsIssueRow.pinned` went with the column in schema v19. The
+        // `pinned` *status* is live user data and still counts.
+        if issue.status == Status::Pinned {
             pinned += 1;
         }
 
         // Track epics for eligible-for-closure calculation
         if issue.issue_type == IssueType::Epic
             && !matches!(issue.status, Status::Closed | Status::Tombstone)
-            && !issue.is_template
         {
             epics.push(issue.id.clone());
         }
@@ -480,10 +481,7 @@ fn is_wisp_issue_id(id: &str) -> bool {
 
 fn is_potential_ready_candidate(issue: &StatsIssueRow, now: &chrono::DateTime<Utc>) -> bool {
     issue.status == Status::Open
-        && !issue.ephemeral
         && !is_wisp_issue_id(&issue.id)
-        && !issue.pinned
-        && !issue.is_template
         && issue
             .defer_until
             .as_ref()
@@ -1495,14 +1493,6 @@ mod tests {
             created_at: issue.created_at,
             closed_at: issue.closed_at,
             defer_until: issue.defer_until,
-            // `Issue` no longer carries these three (bds-b4f.2.2); `StatsIssueRow`
-            // still does, populated from the DB columns directly by
-            // `list_stats_issues`/`list_stats_summary_issues` for legacy rows.
-            // Tests that need a flagged row build one directly instead of
-            // routing it through `Issue`.
-            ephemeral: false,
-            pinned: false,
-            is_template: false,
         }
     }
 
@@ -1651,29 +1641,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_summary_ready_excludes_templates() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-
-        let regular_issue = make_issue("t-1", Status::Open, IssueType::Task);
-        let template_issue = make_issue("t-2", Status::Open, IssueType::Task);
-
-        storage.create_issue(&regular_issue, "tester").unwrap();
-        storage.create_issue(&template_issue, "tester").unwrap();
-
-        // `Issue` no longer carries `is_template` (bds-b4f.2.2); flag the
-        // projected row directly to exercise the still-live `StatsIssueRow`
-        // exclusion this test targets.
-        let mut all_issues = [&regular_issue, &template_issue]
-            .into_iter()
-            .map(stats_row)
-            .collect::<Vec<_>>();
-        all_issues[1].is_template = true;
-        let summary = compute_test_summary(&storage, &all_issues);
-
-        assert_eq!(summary.ready_issues, 1);
-    }
-
-    #[test]
     fn test_compute_summary_ready_excludes_wisp_ids() {
         let mut storage = SqliteStorage::open_memory().unwrap();
 
@@ -1692,31 +1659,71 @@ mod tests {
         assert_eq!(summary.ready_issues, 1);
     }
 
+    /// Restores the coverage `test_compute_summary_excludes_template_epics_from_close_eligible_count`
+    /// carried before schema v19 removed `is_template` from `StatsIssueRow`
+    /// (`bds-b4f.3.1` review, finding F2). That test's premise — flagging a row
+    /// `is_template` — no longer compiles, but the field it asserted,
+    /// `epics_eligible_for_closure`, had no other test naming it anywhere in
+    /// the tree, and `test_stats_summary_rows_match_full_summary` only checks
+    /// lean-vs-full parity, which passes even if the value itself is wrong.
+    ///
+    /// This also exercises the `Closed | Tombstone` exclusion at the
+    /// epic-tracking filter (`compute_summary`, around `:419`): a closed epic
+    /// with every child closed must NOT be counted as "eligible for closure"
+    /// a second time — it already is closed. Without that exclusion this test
+    /// would see `2`, not `1`.
     #[test]
-    fn test_compute_summary_excludes_template_epics_from_close_eligible_count() {
+    fn test_compute_summary_epics_eligible_for_closure() {
         let mut storage = SqliteStorage::open_memory().unwrap();
 
-        let epic = make_issue("bd-epic-template", Status::Open, IssueType::Epic);
+        let epic_open = make_issue("bd-epic-open", Status::Open, IssueType::Epic);
 
-        let mut child = make_issue("bd-task-closed", Status::Closed, IssueType::Task);
-        child.closed_at = Some(Utc::now());
+        let mut child_of_open = make_issue("bd-task-closed", Status::Closed, IssueType::Task);
+        child_of_open.closed_at = Some(Utc::now());
 
-        storage.create_issue(&epic, "tester").unwrap();
-        storage.create_issue(&child, "tester").unwrap();
+        let mut epic_already_closed =
+            make_issue("bd-epic-already-closed", Status::Closed, IssueType::Epic);
+        epic_already_closed.closed_at = Some(Utc::now());
+
+        let mut child_of_closed_epic =
+            make_issue("bd-task-closed-2", Status::Closed, IssueType::Task);
+        child_of_closed_epic.closed_at = Some(Utc::now());
+
+        for issue in [
+            &epic_open,
+            &child_of_open,
+            &epic_already_closed,
+            &child_of_closed_epic,
+        ] {
+            storage.create_issue(issue, "tester").unwrap();
+        }
         storage
-            .add_dependency(&child.id, &epic.id, "parent-child", "tester")
+            .add_dependency(&child_of_open.id, &epic_open.id, "parent-child", "tester")
+            .unwrap();
+        storage
+            .add_dependency(
+                &child_of_closed_epic.id,
+                &epic_already_closed.id,
+                "parent-child",
+                "tester",
+            )
             .unwrap();
 
-        // `Issue` no longer carries `is_template` (bds-b4f.2.2); flag the
-        // projected row directly.
-        let mut all_issues = [&epic, &child]
-            .into_iter()
-            .map(stats_row)
-            .collect::<Vec<_>>();
-        all_issues[0].is_template = true;
+        let all_issues = [
+            &epic_open,
+            &child_of_open,
+            &epic_already_closed,
+            &child_of_closed_epic,
+        ]
+        .into_iter()
+        .map(stats_row)
+        .collect::<Vec<_>>();
         let summary = compute_test_summary(&storage, &all_issues);
 
-        assert_eq!(summary.epics_eligible_for_closure, 0);
+        // Only `epic_open` is tracked: `epic_already_closed` is excluded by
+        // the `Closed | Tombstone` filter even though all of its children are
+        // also closed.
+        assert_eq!(summary.epics_eligible_for_closure, 1);
     }
 
     #[test]
@@ -1758,9 +1765,9 @@ mod tests {
         closed_issue.closed_at = Some(now);
         let deferred_issue = make_issue("t-deferred", Status::Deferred, IssueType::Task);
         let draft_issue = make_issue("t-draft", Status::Draft, IssueType::Task);
-        // `pinned`/`is_template` no longer exist on `Issue` (bds-b4f.2.2); these
-        // two rows are plain open issues now. The full-vs-lean parity this test
-        // checks does not depend on either flag being set.
+        // `pinned`/`is_template` are gone from `Issue` (bds-b4f.2.2) and from
+        // the schema (v19); these two rows are plain open issues now. The
+        // full-vs-lean parity this test checks never depended on either flag.
         let pinned_issue = make_issue("t-pinned", Status::Open, IssueType::Task);
         let template_issue = make_issue("t-template", Status::Open, IssueType::Task);
         let wisp_issue = make_issue("t-wisp-1", Status::Open, IssueType::Task);
@@ -1838,8 +1845,8 @@ mod tests {
         let tombstone_issue = make_issue("t-4", Status::Open, IssueType::Task);
         let mut closed_issue = make_issue("t-5", Status::Closed, IssueType::Task);
         closed_issue.closed_at = Some(Utc::now());
-        // `is_template` no longer exists on `Issue` (bds-b4f.2.2); the "template"
-        // label below is what this test's assertions actually key on.
+        // `is_template` is gone from `Issue` and from the schema; the
+        // "template" label below is what this test's assertions key on.
         let template_issue = make_issue("t-6", Status::Open, IssueType::Task);
 
         storage.create_issue(&first_issue, "tester").unwrap();

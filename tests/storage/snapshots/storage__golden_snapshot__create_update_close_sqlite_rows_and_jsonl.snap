@@ -1,6 +1,6 @@
 ---
 source: tests/storage/golden_snapshot.rs
-assertion_line: 151
+assertion_line: 152
 expression: snapshot
 ---
 issue:
@@ -9,13 +9,12 @@ issue:
   status: closed
   priority: 1
   issue_type: task
-  assignee: 
   description: Updated description
   close_reason: completed golden flow
   created_at: 2026-04-22T12:00:00+00:00
   updated_at: <updated_at>
   closed_at: 2026-04-23T08:30:00+00:00
-  content_hash: 5d80e117fdad2901036be165d0ddc224d708e2b3bef0255abba3fb9a9b856a2b
+  content_hash: 836626f0d37fe2b4b48502daa09a6112ba8623e6524c11c3225a2a31add1f926
 jsonl:
 {
   "id": "storage-golden-1",

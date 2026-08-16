@@ -271,12 +271,7 @@ fn content_hash_deterministic_fixture() {
         &Priority::HIGH,
         &IssueType::Bug,
         None,
-        None,
         Some("alice"),
-        None,
-        None,
-        false,
-        false,
     );
 
     let hash2 = content_hash_from_parts(
@@ -289,17 +284,12 @@ fn content_hash_deterministic_fixture() {
         &Priority::HIGH,
         &IssueType::Bug,
         None,
-        None,
         Some("alice"),
-        None,
-        None,
-        false,
-        false,
     );
 
     assert_eq!(hash1, hash2, "Content hash must be deterministic");
     assert_eq!(
-        hash1, "e7c4a780edbb4ebf7df75cf3a38ca3ccb639e5c567b55066babbcca9f7eb06e2",
+        hash1, "f674c08f1ec761c99859eaaee05a316abcd65b7e446bc23991a5c32b6b631043",
         "Content hash must match the length-prefixed br fixture"
     );
     assert_eq!(hash1.len(), 64, "SHA256 hash should be 64 hex chars");
@@ -323,11 +313,6 @@ fn exp_101_no_collision() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
     let hash_b = content_hash_from_parts(
         "x\0y",
@@ -340,20 +325,15 @@ fn exp_101_no_collision() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     assert_eq!(
         hash_a,
-        "19c2a7bfc1ffe3f111332446640be3b7c11a2ff690dc2958d90723d0de7eb84d"
+        "93563ba75c7cc5afd6727eba8a9837f93466db2433095f0a0056163e922d6b18"
     );
     assert_eq!(
         hash_b,
-        "99713b7c2d00a4cb0f168b14bd65f8928243bd87d589d0e790ad9d7970846004"
+        "bf60838e66d0cebbebff713ced5cdeb8e3910086194b52431c945edeee8446ba"
     );
     assert_ne!(
         hash_a, hash_b,
@@ -383,11 +363,6 @@ fn content_hash_title_sensitivity() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     let hash2 = content_hash_from_parts(
@@ -401,11 +376,6 @@ fn content_hash_title_sensitivity() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     assert_ne!(
@@ -427,11 +397,6 @@ fn content_hash_status_sensitivity() {
         &IssueType::Task,
         None::<&str>,
         None::<&str>,
-        None::<&str>,
-        None::<&str>,
-        None::<&str>,
-        false,
-        false,
     );
 
     let hash_open = content_hash_from_parts(
@@ -445,11 +410,6 @@ fn content_hash_status_sensitivity() {
         base_args.6,
         base_args.7,
         base_args.8,
-        base_args.9,
-        base_args.10,
-        base_args.11,
-        base_args.12,
-        base_args.13,
     );
 
     let hash_closed = content_hash_from_parts(
@@ -463,11 +423,6 @@ fn content_hash_status_sensitivity() {
         base_args.6,
         base_args.7,
         base_args.8,
-        base_args.9,
-        base_args.10,
-        base_args.11,
-        base_args.12,
-        base_args.13,
     );
 
     assert_ne!(
@@ -490,11 +445,6 @@ fn content_hash_priority_sensitivity() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     let hash_p3 = content_hash_from_parts(
@@ -508,11 +458,6 @@ fn content_hash_priority_sensitivity() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     assert_ne!(
@@ -535,11 +480,6 @@ fn content_hash_type_sensitivity() {
         &IssueType::Bug,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     let hash_feature = content_hash_from_parts(
@@ -553,11 +493,6 @@ fn content_hash_type_sensitivity() {
         &IssueType::Feature,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     assert_ne!(
@@ -566,9 +501,14 @@ fn content_hash_type_sensitivity() {
     );
 }
 
-/// Test content hash includes boolean flags.
+/// Test content hash changes with owner.
+///
+/// This replaces `content_hash_boolean_sensitivity`, which varied `pinned` and
+/// `is_template` to prove those slots moved the digest. Schema v19 removed both
+/// parameters, so that test could no longer compile, let alone assert anything.
+/// `owner` is a surviving input that had no sensitivity test of its own.
 #[test]
-fn content_hash_boolean_sensitivity() {
+fn content_hash_owner_sensitivity() {
     let hash_default = content_hash_from_parts(
         "Test",
         None,
@@ -580,14 +520,9 @@ fn content_hash_boolean_sensitivity() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
-    let hash_pinned = content_hash_from_parts(
+    let hash_owned = content_hash_from_parts(
         "Test",
         None,
         None,
@@ -596,16 +531,11 @@ fn content_hash_boolean_sensitivity() {
         &Status::Open,
         &Priority::MEDIUM,
         &IssueType::Task,
+        Some("an-owner"),
         None,
-        None,
-        None,
-        None,
-        None,
-        true,
-        false, // pinned=true
     );
 
-    let hash_template = content_hash_from_parts(
+    let hash_other_owner = content_hash_from_parts(
         "Test",
         None,
         None,
@@ -614,23 +544,14 @@ fn content_hash_boolean_sensitivity() {
         &Status::Open,
         &Priority::MEDIUM,
         &IssueType::Task,
+        Some("another-owner"),
         None,
-        None,
-        None,
-        None,
-        None,
-        false,
-        true, // is_template=true
     );
 
-    assert_ne!(hash_default, hash_pinned, "pinned flag should affect hash");
+    assert_ne!(hash_default, hash_owned, "owner should affect the hash");
     assert_ne!(
-        hash_default, hash_template,
-        "is_template flag should affect hash"
-    );
-    assert_ne!(
-        hash_pinned, hash_template,
-        "Different flags should produce different hashes"
+        hash_owned, hash_other_owner,
+        "different owners should produce different hashes"
     );
 }
 
@@ -709,11 +630,6 @@ fn content_hash_optional_fields() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     // With description
@@ -728,11 +644,6 @@ fn content_hash_optional_fields() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
     // With design
@@ -747,15 +658,14 @@ fn content_hash_optional_fields() {
         &IssueType::Task,
         None,
         None,
-        None,
-        None,
-        None,
-        false,
-        false,
     );
 
-    // With external_ref
-    let hash_ext = content_hash_from_parts(
+    // With created_by. `external_ref` used to be varied here and asserted to
+    // change the digest; schema v19 removed it from the hash inputs (it points
+    // into another system rather than describing issue content), so that
+    // assertion would now be false. `external_ref_is_not_a_hash_input` below
+    // pins the new behaviour directly rather than leaving it untested.
+    let hash_creator = content_hash_from_parts(
         "Test",
         None,
         None,
@@ -765,17 +675,56 @@ fn content_hash_optional_fields() {
         &Priority::MEDIUM,
         &IssueType::Task,
         None,
-        None,
-        None,
-        Some("github:org/repo#123"),
-        None,
-        false,
-        false,
+        Some("a-creator"),
     );
 
     assert_ne!(hash_none, hash_desc);
     assert_ne!(hash_none, hash_design);
-    assert_ne!(hash_none, hash_ext);
+    assert_ne!(hash_none, hash_creator);
+}
+
+/// Schema v19 removed `external_ref` from the digest. It stays a column and a
+/// field; two issues that differ only in it now hash alike.
+#[test]
+fn external_ref_is_not_a_hash_input() {
+    let mut issue = Issue {
+        id: "bd-extref".to_string(),
+        content_hash: None,
+        title: "External ref".to_string(),
+        description: None,
+        design: None,
+        acceptance_criteria: None,
+        notes: None,
+        status: Status::Open,
+        priority: Priority::MEDIUM,
+        issue_type: IssueType::Task,
+        owner: None,
+        created_at: Utc::now(),
+        created_by: None,
+        updated_at: Utc::now(),
+        closed_at: None,
+        close_reason: None,
+        defer_until: None,
+        external_ref: None,
+        source_repo: None,
+        deleted_at: None,
+        deleted_by: None,
+        delete_reason: None,
+        original_type: None,
+        former_ids: vec![],
+        labels: vec![],
+        dependencies: vec![],
+        comments: vec![],
+    };
+
+    let without = content_hash(&issue);
+    issue.external_ref = Some("github:org/repo#123".to_string());
+    let with = content_hash(&issue);
+
+    assert_eq!(
+        without, with,
+        "external_ref left the digest in schema v19 and must not move it"
+    );
 }
 
 // =============================================================================

@@ -135,7 +135,6 @@ proptest! {
                 statuses: Some(ALL_KNOWN_STATUSES.to_vec()),
                 include_closed: true,
                 include_deferred: true,
-                include_templates: true,
                 ..Default::default()
             })
             .unwrap();
@@ -150,7 +149,6 @@ proptest! {
                     statuses: Some(vec![status.clone()]),
                     include_closed: true,
                     include_deferred: true,
-                    include_templates: true,
                     ..Default::default()
                 })
                 .unwrap();

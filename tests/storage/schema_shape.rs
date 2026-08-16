@@ -26,13 +26,13 @@
 //! that neutrality was *measured*, not assumed: before the swap, the same schema
 //! was built twice, once by `br init` on the pure-Rust engine and once by piping
 //! `SCHEMA_SQL` through the `sqlite3` CLI, and every normalised value pinned
-//! below was byte-identical between the two — all 14 table DDLs and all 39 index
-//! DDLs. See [`normalize_ddl`] for the three renderings that had to be
+//! below was byte-identical between the two — every table DDL and every index
+//! DDL. See [`normalize_ddl`] for the three renderings that had to be
 //! normalised away.
 //!
 //! One engine difference could not be normalised away and is avoided instead:
 //! the pure-Rust engine reported `PRAGMA index_list`'s `partial` column as `0`
-//! for every index, where real SQLite reports `1` for the **thirteen** that
+//! for every index, where real SQLite reports `1` for those that
 //! really are partial. Partiality is therefore taken from the DDL's `WHERE`
 //! clause, never from that column. Now that the engine is `rusqlite`, that
 //! column is truthful and the workaround can go — tracked as `bds-04l.13`.
@@ -111,7 +111,6 @@ type IndexShape = (
 const EXPECTED_TABLES: &[&str] = &[
     "blocked_issues_cache",
     "child_counters",
-    "close_metadata",
     "comments",
     "config",
     "dependencies",
@@ -122,7 +121,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "metadata",
 ];
 
-/// Full column shape of all 14 tables, in declaration order.
+/// Full column shape of every table, in declaration order.
 ///
 /// Column *order* is load-bearing: `src/storage/schema.rs` documents that
 /// migrations append at the end so fresh and migrated databases agree, and
@@ -148,22 +147,6 @@ const EXPECTED_TABLE_COLUMNS: &[(&str, &[ColumnShape])] = &[
         &[
             ("parent_id", "TEXT", false, None, 1),
             ("last_child", "INTEGER", true, Some("0"), 0),
-        ],
-    ),
-    (
-        "close_metadata",
-        &[
-            ("issue_id", "TEXT", false, None, 1),
-            ("bypassed_policy", "INTEGER", true, Some("0"), 0),
-            ("bypass_reason", "TEXT", false, None, 0),
-            ("policy_gates_fired", "TEXT", false, None, 0),
-            (
-                "recorded_at",
-                "DATETIME",
-                true,
-                Some("CURRENT_TIMESTAMP"),
-                0,
-            ),
         ],
     ),
     (
@@ -229,34 +212,19 @@ const EXPECTED_TABLE_COLUMNS: &[(&str, &[ColumnShape])] = &[
             ("status", "TEXT", true, Some("'open'"), 0),
             ("priority", "INTEGER", true, Some("2"), 0),
             ("issue_type", "TEXT", true, Some("'task'"), 0),
-            ("assignee", "TEXT", false, None, 0),
             ("owner", "TEXT", false, Some("''"), 0),
-            ("estimated_minutes", "INTEGER", false, None, 0),
             ("created_at", "DATETIME", true, Some("CURRENT_TIMESTAMP"), 0),
             ("created_by", "TEXT", false, Some("''"), 0),
             ("updated_at", "DATETIME", true, Some("CURRENT_TIMESTAMP"), 0),
             ("closed_at", "DATETIME", false, None, 0),
             ("close_reason", "TEXT", false, Some("''"), 0),
-            ("closed_by_session", "TEXT", false, Some("''"), 0),
-            ("due_at", "DATETIME", false, None, 0),
             ("defer_until", "DATETIME", false, None, 0),
             ("external_ref", "TEXT", false, None, 0),
-            ("source_system", "TEXT", false, Some("''"), 0),
             ("source_repo", "TEXT", true, Some("'.'"), 0),
             ("deleted_at", "DATETIME", false, None, 0),
             ("deleted_by", "TEXT", false, Some("''"), 0),
             ("delete_reason", "TEXT", false, Some("''"), 0),
             ("original_type", "TEXT", false, Some("''"), 0),
-            ("compaction_level", "INTEGER", false, Some("0"), 0),
-            ("compacted_at", "DATETIME", false, None, 0),
-            ("compacted_at_commit", "TEXT", false, None, 0),
-            ("original_size", "INTEGER", false, None, 0),
-            ("sender", "TEXT", false, Some("''"), 0),
-            ("ephemeral", "INTEGER", true, Some("0"), 0),
-            ("pinned", "INTEGER", true, Some("0"), 0),
-            ("is_template", "INTEGER", true, Some("0"), 0),
-            ("source_repo_path", "TEXT", false, None, 0),
-            ("agent_context", "TEXT", false, None, 0),
             ("former_ids", "TEXT", true, Some("'[]'"), 0),
         ],
     ),
@@ -290,14 +258,6 @@ const EXPECTED_FOREIGN_KEYS: &[ForeignKey] = &[
     (
         "child_counters",
         "parent_id",
-        "issues",
-        "id",
-        "NO ACTION",
-        "CASCADE",
-    ),
-    (
-        "close_metadata",
-        "issue_id",
         "issues",
         "id",
         "NO ACTION",
@@ -363,13 +323,6 @@ const EXPECTED_TABLE_DDL: &[(&str, &str)] = &[
          default 0, foreign key parent_id references issues id on delete cascade",
     ),
     (
-        "close_metadata",
-        "create table close_metadata issue_id text primary key, bypassed_policy integer not \
-         null default 0, bypass_reason text, policy_gates_fired text, recorded_at datetime \
-         not null default current_timestamp, foreign key issue_id references issues id on \
-         delete cascade",
-    ),
-    (
         "comments",
         "create table comments id integer primary key autoincrement, issue_id text not null, \
          author text not null, text text not null, created_at datetime not null default \
@@ -406,16 +359,13 @@ const EXPECTED_TABLE_DDL: &[(&str, &str)] = &[
          null default '', acceptance_criteria text not null default '', notes text not null \
          default '', status text not null default 'open', priority integer not null default 2 \
          check priority >= 0 and priority <= 4 , issue_type text not null default 'task', \
-         assignee text, owner text default '', estimated_minutes integer, created_at datetime \
+         owner text default '', created_at datetime \
          not null default current_timestamp, created_by text default '', updated_at datetime \
          not null default current_timestamp, closed_at datetime, close_reason text default \
-         '', closed_by_session text default '', due_at datetime, defer_until datetime, \
-         external_ref text, source_system text default '', source_repo text not null default \
+         '', defer_until datetime, \
+         external_ref text, source_repo text not null default \
          '.', deleted_at datetime, deleted_by text default '', delete_reason text default '', \
-         original_type text default '', compaction_level integer default 0, compacted_at \
-         datetime, compacted_at_commit text, original_size integer, sender text default '', \
-         ephemeral integer not null default 0, pinned integer not null default 0, is_template \
-         integer not null default 0, source_repo_path text, agent_context text, former_ids \
+         original_type text default '', former_ids \
          text not null default '[]', check status \
          = 'closed' and closed_at is not null or status = 'tombstone' or status not in \
          'closed', 'tombstone' and closed_at is null",
@@ -431,7 +381,7 @@ const EXPECTED_TABLE_DDL: &[(&str, &str)] = &[
     ),
 ];
 
-/// Every one of the 39 indexes, not a curated subset. Name-only pinning let
+/// Every index, not a curated subset. Name-only pinning let
 /// `idx_issues_status ON issues(priority)` through: same name, wrong column,
 /// useless index, green suite.
 const EXPECTED_INDEX_SHAPE: &[IndexShape] = &[
@@ -440,20 +390,6 @@ const EXPECTED_INDEX_SHAPE: &[IndexShape] = &[
         "idx_blocked_cache_blocked_at",
         false,
         &["blocked_at"],
-        None,
-    ),
-    (
-        "close_metadata",
-        "idx_close_metadata_bypassed",
-        false,
-        &["bypassed_policy"],
-        Some("bypassed_policy = 1"),
-    ),
-    (
-        "close_metadata",
-        "idx_close_metadata_recorded_at",
-        false,
-        &["recorded_at"],
         None,
     ),
     (
@@ -519,13 +455,6 @@ const EXPECTED_INDEX_SHAPE: &[IndexShape] = &[
     ),
     (
         "issues",
-        "idx_issues_assignee",
-        false,
-        &["assignee"],
-        Some("assignee is not null"),
-    ),
-    (
-        "issues",
         "idx_issues_content_hash",
         false,
         &["content_hash"],
@@ -547,20 +476,6 @@ const EXPECTED_INDEX_SHAPE: &[IndexShape] = &[
     ),
     (
         "issues",
-        "idx_issues_due_at",
-        false,
-        &["due_at"],
-        Some("due_at is not null"),
-    ),
-    (
-        "issues",
-        "idx_issues_ephemeral",
-        false,
-        &["ephemeral"],
-        Some("ephemeral = 1"),
-    ),
-    (
-        "issues",
         "idx_issues_external_ref_unique",
         true,
         &["external_ref"],
@@ -578,14 +493,7 @@ const EXPECTED_INDEX_SHAPE: &[IndexShape] = &[
         "idx_issues_list_active_order",
         false,
         &["priority", "created_at"],
-        Some("status not in 'closed', 'tombstone' and is_template = 0 or is_template is null"),
-    ),
-    (
-        "issues",
-        "idx_issues_pinned",
-        false,
-        &["pinned"],
-        Some("pinned = 1"),
+        Some("status not in 'closed', 'tombstone'"),
     ),
     ("issues", "idx_issues_priority", false, &["priority"], None),
     (
@@ -593,7 +501,7 @@ const EXPECTED_INDEX_SHAPE: &[IndexShape] = &[
         "idx_issues_ready",
         false,
         &["status", "priority", "created_at"],
-        Some("status = 'open' and ephemeral = 0 and pinned = 0 and is_template = 0"),
+        Some("status = 'open'"),
     ),
     ("issues", "idx_issues_status", false, &["status"], None),
     (
@@ -903,7 +811,7 @@ fn user_version(conn: &Connection) -> i64 {
 ///    and keeps `IF NOT EXISTS`; `sqlite3` emits `key` and drops it. Quotes are
 ///    removed and the clause elided.
 ///
-/// After this, all 14 table DDLs and all 39 index DDLs are byte-identical
+/// After this, every table DDL and every index DDL is byte-identical
 /// between the two engines — which is the evidence that the pinned constants
 /// will survive the `rusqlite` port untouched.
 fn normalize_ddl(sql: &str) -> String {
@@ -1136,7 +1044,7 @@ fn fresh_init_stamps_the_current_schema_version() {
     // migrated without the stamp being written.
     assert_eq!(
         user_version(&conn),
-        18,
+        19,
         "PRAGMA user_version on a fresh database changed"
     );
     assert_eq!(

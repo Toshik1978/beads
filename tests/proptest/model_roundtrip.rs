@@ -286,7 +286,7 @@ proptest! {
         let reference_hash = content_hash_from_parts(
             &title, None, None, None, None,
             &expected, &beads::model::Priority::MEDIUM,
-            &IssueType::Task, None, None, None, None, None, false, false,
+            &IssueType::Task, None, None,
         );
         for variant in case_variants(canonical) {
             let json = format!("\"{}\"", variant);
@@ -294,7 +294,7 @@ proptest! {
             let hash = content_hash_from_parts(
                 &title, None, None, None, None,
                 &status, &beads::model::Priority::MEDIUM,
-                &IssueType::Task, None, None, None, None, None, false, false,
+                &IssueType::Task, None, None,
             );
             prop_assert_eq!(
                 &hash, &reference_hash,
@@ -312,7 +312,7 @@ proptest! {
         let reference_hash = content_hash_from_parts(
             &title, None, None, None, None,
             &Status::Open, &beads::model::Priority::MEDIUM,
-            &expected, None, None, None, None, None, false, false,
+            &expected, None, None,
         );
         for variant in case_variants(canonical) {
             let json = format!("\"{}\"", variant);
@@ -320,7 +320,7 @@ proptest! {
             let hash = content_hash_from_parts(
                 &title, None, None, None, None,
                 &Status::Open, &beads::model::Priority::MEDIUM,
-                &issue_type, None, None, None, None, None, false, false,
+                &issue_type, None, None,
             );
             prop_assert_eq!(
                 &hash, &reference_hash,

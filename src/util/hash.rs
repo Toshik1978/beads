@@ -43,14 +43,6 @@ fn hex_digit(nibble: u8) -> char {
 /// - title, description, design, `acceptance_criteria`, notes
 /// - status, priority, `issue_type`
 /// - owner, `created_by`
-/// - `external_ref`
-/// - empty/default placeholders for reserved fields not represented in Rust,
-///   including `assignee`, `source_system`, `pinned` and `is_template`
-///   (removed from `Issue`; the digest is an on-disk value and must not move
-///   until the migration that rebuilds every stored hash). Unlike the other
-///   three, `assignee` was not uniformly default across every record, so this
-///   placeholder is the one accepted digest drift in the field-removal
-///   sequence — see bds-b4f.2.6.
 ///
 /// Fields excluded:
 /// - id, `content_hash` (circular)
@@ -58,9 +50,16 @@ fn hex_digit(nibble: u8) -> char {
 /// - timestamps (`created_at`, `updated_at`, `closed_at`, etc.)
 /// - tombstone metadata (`deleted_at`, `deleted_by`, `delete_reason`)
 /// - `defer_until`, `close_reason`
+/// - `external_ref` — a pointer into another system rather than issue
+///   content. It remains a column and a field; schema v19 (bds-b4f.3.1)
+///   removed it from the digest.
 /// - `estimated_minutes`, `due_at` and `closed_by_session` (removed from
 ///   `Issue`, bds-b4f.2.3; they were never hash inputs, so removing them
 ///   took no placeholder and moved no digest)
+/// - `assignee`, `source_system`, `pinned` and `is_template`, which held
+///   literal placeholder slots between their field removals and schema v19.
+///   Schema v19 collapsed those slots and rebuilt every stored hash in the
+///   same transaction, which is the only place the digest is allowed to move.
 ///
 /// `status` is included, so a live issue and a `Status::Tombstone` issue do
 /// not hash alike solely because deletion metadata is excluded. Tombstone
@@ -78,21 +77,8 @@ pub fn content_hash(issue: &Issue) -> String {
         &issue.status,
         &issue.priority,
         &issue.issue_type,
-        // Placeholder for a field no longer represented in Rust. Unlike the
-        // other placeholders below this one is not universally default — an
-        // issue that had an assignee now hashes differently — which is why
-        // the migration that rebuilds every stored hash lands immediately
-        // after this commit (bds-b4f.2.6).
-        None, // was issue.assignee.as_deref()
         issue.owner.as_deref(),
         issue.created_by.as_deref(),
-        issue.external_ref.as_deref(),
-        // Placeholders for fields no longer represented in Rust. The digest is
-        // an on-disk value: it must not move until the migration that rebuilds
-        // every stored hash removes these slots.
-        None,  // was issue.source_system.as_deref()
-        false, // was issue.pinned
-        false, // was issue.is_template
     )
 }
 
@@ -108,13 +94,8 @@ pub fn content_hash_from_parts(
     status: &Status,
     priority: &Priority,
     issue_type: &IssueType,
-    assignee: Option<&str>,
     owner: Option<&str>,
     created_by: Option<&str>,
-    external_ref: Option<&str>,
-    source_system: Option<&str>,
-    pinned: bool,
-    is_template: bool,
 ) -> String {
     let mut writer = HashFieldWriter::new();
 
@@ -126,13 +107,8 @@ pub fn content_hash_from_parts(
     writer.field(status.as_str());
     writer.field(&priority.0.to_string());
     writer.field(issue_type.as_str());
-    writer.field_opt(assignee);
     writer.field_opt(owner);
     writer.field_opt(created_by);
-    writer.field_opt(external_ref);
-    writer.field_opt(source_system);
-    writer.field_flag(pinned, "pinned");
-    writer.field_flag(is_template, "template");
 
     // Keep placeholders for reserved fields so the field set remains explicit
     // and future additions have stable slots.
@@ -260,6 +236,11 @@ mod tests {
 
     #[test]
     fn test_content_hash_distinguishes_embedded_nul_boundaries() {
+        // Schema v19 (bds-b4f.3.1) removed five slots from the digest —
+        // `assignee`, `source_system`, `pinned`, `is_template` (the placeholders
+        // the field removals left) and `external_ref` — so every digest below
+        // differs from its pre-v19 value. The `assert_ne!` fixtures still hold:
+        // they pin the *absence* of the old NUL-separated collision.
         let hash_a = content_hash_from_parts(
             "x",
             Some("y\0z"),
@@ -271,11 +252,6 @@ mod tests {
             &IssueType::Task,
             None,
             None,
-            None,
-            None,
-            None,
-            false,
-            false,
         );
         let hash_b = content_hash_from_parts(
             "x\0y",
@@ -288,11 +264,6 @@ mod tests {
             &IssueType::Task,
             None,
             None,
-            None,
-            None,
-            None,
-            false,
-            false,
         );
 
         assert_ne!(
@@ -346,17 +317,8 @@ mod tests {
             &issue.status,
             &issue.priority,
             &issue.issue_type,
-            // Mirrors the literal placeholder `content_hash` now passes for
-            // the removed `assignee` field.
-            None,
             issue.owner.as_deref(),
             issue.created_by.as_deref(),
-            issue.external_ref.as_deref(),
-            // Mirrors the literal placeholders `content_hash` now passes for
-            // the removed `source_system`/`pinned`/`is_template` fields.
-            None,
-            false,
-            false,
         );
         assert_eq!(direct, from_parts);
     }

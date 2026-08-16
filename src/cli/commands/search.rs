@@ -506,7 +506,6 @@ fn build_filters(args: &ListArgs) -> Result<ListFilters> {
         priorities,
         include_closed,
         include_deferred,
-        include_templates: false,
         title_contains: args.title_contains.clone(),
         // #349: search stays capped (a broad text query can match a large
         // fraction of the corpus); list/ready are complete by default.
@@ -634,6 +633,13 @@ fn apply_client_filters(
             }
         }
 
+        // Redundant in practice and kept deliberately (bds-b4f.3.1 ruling).
+        // `include_deferred` is false only when an explicit `--status` list was
+        // given that does not name `deferred`, and the SQL layer already
+        // filtered those rows out with the same flag. It survives as a
+        // client-side backstop over whichever projection fed `issues`; the
+        // `--overdue` tests that used to reach it directly went with `due_at`
+        // in bds-b4f.2.3, and `--deferred` still has e2e coverage.
         if !include_deferred && matches!(issue.status, Status::Deferred) {
             continue;
         }

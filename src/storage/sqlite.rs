@@ -517,7 +517,6 @@ pub const ID_BEARING_COLUMNS: &[(&str, &str)] = &[
     ("export_hashes", "issue_id"),
     ("blocked_issues_cache", "issue_id"),
     ("child_counters", "parent_id"),
-    ("close_metadata", "issue_id"),
 ];
 
 /// SQLite-based storage backend.
@@ -778,10 +777,8 @@ impl BlockedIssueProjection {
     const fn cached_blocked_by_index(self) -> usize {
         match self {
             // former_ids is at 23, so bc.blocked_by lands at 24 in the
-            // joined projection (source_system, source_repo_path and
-            // agent_context no longer occupy earlier positions,
-            // bds-b4f.2.4 and bds-b4f.2.5; assignee no longer does either,
-            // bds-b4f.2.6).
+            // joined projection. Every column schema v19 dropped is out of
+            // this SELECT already, so nothing between 0 and 23 shifts.
             Self::Full => 24,
             Self::Command => 9,
         }
@@ -1326,9 +1323,9 @@ impl SqliteStorage {
             DROP TABLE IF EXISTS comments;
             DROP TABLE IF EXISTS labels;
             DROP TABLE IF EXISTS dependencies;
-            -- bds-04l.23 removed these two tables from the schema. The drops
-            -- stay because this runs on whatever shape is on disk, which may
-            -- predate the v16 migration that removes them.
+            -- bds-04l.23 and bds-b4f.3.1 removed these three tables from the
+            -- schema. The drops stay because this runs on whatever shape is on
+            -- disk, which may predate the v16/v19 migrations that remove them.
             DROP TABLE IF EXISTS gate_result_history;
             DROP TABLE IF EXISTS gate_results;
             DROP TABLE IF EXISTS close_metadata;
@@ -1451,7 +1448,6 @@ impl SqliteStorage {
             ("export_hashes", "issue_id"),
             ("blocked_issues_cache", "issue_id"),
             ("child_counters", "parent_id"),
-            ("close_metadata", "issue_id"),
         ];
         if !ALLOWED_PAIRS.contains(&(table, column)) {
             return Err(crate::error::BeadsError::Config(format!(
@@ -1488,7 +1484,6 @@ impl SqliteStorage {
             ("export_hashes", "issue_id"),
             ("blocked_issues_cache", "issue_id"),
             ("child_counters", "parent_id"),
-            ("close_metadata", "issue_id"),
         ];
 
         let mut violations = Vec::new();
@@ -1883,115 +1878,6 @@ impl SqliteStorage {
             messages.push("integrity_check returned no diagnostic rows".to_string());
         }
         Ok(messages)
-    }
-
-    /// Persist closure-time policy metadata (issue #274 Phase 1) for `issue_id`.
-    ///
-    /// Inserts (or replaces) one row in the `close_metadata` table with the
-    /// bypass auditing values. All fields are optional:
-    /// passing every-`None` still records a row that pins `bypassed_policy = 0`
-    /// for the close, which keeps the table strictly additive — every close
-    /// performed under an active policy is queryable later. Callers decide
-    /// whether policy metadata is active enough to warrant a row.
-    ///
-    /// `policy_gates_fired` is stored as the JSON serialisation of the gate
-    /// names that fired (or that were waived by `--bypass-policy`). An empty
-    /// slice serialises to `"[]"` so callers can always rely on JSON typing.
-    ///
-    /// `#[cfg(test)]` because it has no production caller and never had one
-    /// since bds-b4f.4.1 removed close-policy gates and the `--bypass-policy`
-    /// flag from `br close`: its only caller was there. `close_metadata` and
-    /// its reader `get_close_metadata` are scheduled for full removal in
-    /// bds-b4f.3.1's schema migration; this stays gated (rather than deleted
-    /// here) only because that removal needs a schema-version bump kept in
-    /// one migration commit. Its job until then is to let the tests beside it
-    /// check that a write is well-formed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database write fails or JSON serialisation of
-    /// `policy_gates_fired` fails.
-    #[cfg(test)]
-    pub fn record_close_metadata(
-        &self,
-        issue_id: &str,
-        bypassed: bool,
-        bypass_reason: Option<&str>,
-        policy_gates_fired: &[String],
-    ) -> Result<()> {
-        let gates_json = serde_json::to_string(policy_gates_fired).map_err(BeadsError::from)?;
-
-        // INSERT OR REPLACE: a re-close (e.g. close → reopen → close) overwrites
-        // the prior row. `close_metadata` records the currently-effective
-        // metadata for the most recent close, not a history of them.
-        self.conn.execute_with_params(
-            "INSERT OR REPLACE INTO close_metadata (
-                issue_id,
-                bypassed_policy,
-                bypass_reason,
-                policy_gates_fired,
-                recorded_at
-            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            &[
-                SqliteValue::from(issue_id),
-                SqliteValue::from(i64::from(bypassed)),
-                bypass_reason.map_or(SqliteValue::Null, SqliteValue::from),
-                SqliteValue::from(gates_json.as_str()),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Read a previously-stored close-metadata row, or `None` when no policy
-    /// metadata was recorded for this close.
-    ///
-    /// `#[cfg(test)]` because it has no production caller and never had one:
-    /// nothing displays close metadata, and — since bds-b4f.4.1 — the writer
-    /// beside it is test-only too. Its job is to let the close tests check
-    /// that a write was correct, so gating states that intent and keeps it
-    /// out of the shipped binary rather than leaving it to read as an
-    /// unfinished feature (bds-cn6). Both are scheduled for full removal in
-    /// bds-b4f.3.1's schema migration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    #[cfg(test)]
-    pub fn get_close_metadata(&self, issue_id: &str) -> Result<Option<CloseMetadataRow>> {
-        if !crate::storage::schema::table_exists(&self.conn, "close_metadata") {
-            return Ok(None);
-        }
-        let rows = self.conn.query_with_params(
-            "SELECT bypassed_policy, bypass_reason, policy_gates_fired, recorded_at \
-             FROM close_metadata WHERE issue_id = ?",
-            &[SqliteValue::from(issue_id)],
-        )?;
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
-        let bypassed = row
-            .get(0)
-            .and_then(SqliteValue::as_integer)
-            .unwrap_or_default()
-            != 0;
-        let gates_json: Option<String> =
-            row.get(2).and_then(SqliteValue::as_text).map(String::from);
-        let policy_gates_fired = match gates_json.as_deref() {
-            Some(json) if !json.is_empty() => {
-                serde_json::from_str::<Vec<String>>(json).map_err(BeadsError::from)?
-            }
-            _ => Vec::new(),
-        };
-        Ok(Some(CloseMetadataRow {
-            bypassed_policy: bypassed,
-            bypass_reason: row.get(1).and_then(SqliteValue::as_text).map(String::from),
-            policy_gates_fired,
-            recorded_at: row
-                .get(3)
-                .and_then(SqliteValue::as_text)
-                .map(String::from)
-                .unwrap_or_default(),
-        }))
     }
 
     /// Install the full, already-validated workflow policy. Capacity is cloned
@@ -3376,7 +3262,6 @@ impl SqliteStorage {
         if let Some(ref status) = updates.status {
             let old_status_obj = issue.status.clone();
             let old_status = old_status_obj.as_str().to_string();
-            let was_terminal = old_status_obj.is_terminal();
             issue.status.clone_from(status);
             add_update("status", SqliteValue::from(status.as_str()));
 
@@ -3420,12 +3305,6 @@ impl SqliteStorage {
                     SqliteValue::from(reason.as_deref().unwrap_or("")),
                 );
             } else {
-                if was_terminal && !status.is_terminal() {
-                    conn.execute_with_params(
-                        "DELETE FROM close_metadata WHERE issue_id = ?",
-                        &[SqliteValue::from(id)],
-                    )?;
-                }
                 if issue.closed_at.is_some() && updates.closed_at.is_none() {
                     // Reopening (or fixing state): Clear closed_at if it was set
                     issue.closed_at = None;
@@ -3677,10 +3556,6 @@ impl SqliteStorage {
                     SqliteValue::from(Utc::now().to_rfc3339()),
                     SqliteValue::from(id),
                 ],
-            )?;
-            conn.execute_with_params(
-                "DELETE FROM close_metadata WHERE issue_id = ?",
-                &[SqliteValue::from(id)],
             )?;
 
             ctx.mark_dirty(id);
@@ -4138,10 +4013,6 @@ impl SqliteStorage {
             sql.push_str(" AND status != 'tombstone'");
         }
 
-        if !filters.include_templates {
-            sql.push_str(" AND is_template = 0");
-        }
-
         if let Some(ref title_contains) = filters.title_contains {
             sql.push_str(" AND title LIKE ? ESCAPE '\\'");
             let escaped = escape_like_pattern(title_contains);
@@ -4210,7 +4081,6 @@ impl SqliteStorage {
                          former_ids
                   FROM issues
                   WHERE {status_filter}
-                    AND is_template = 0
                     AND priority = ?
                   ORDER BY created_at DESC, id ASC
                   LIMIT {remaining}"
@@ -4234,26 +4104,19 @@ impl SqliteStorage {
     /// pin the text the product actually runs, not a copy of it that can drift
     /// out of agreement without failing.
     ///
-    /// `is_template = 0` alone, deliberately. `is_template` is
-    /// `INTEGER NOT NULL DEFAULT 0` (`schema.rs`), so `is_template IS NULL` is
-    /// dead — and it is not free. SQLite folds it to constant false while
-    /// analyzing the WHERE clause, which stops the rewritten clause from
-    /// implying `idx_issues_list_active_order`'s stored predicate and makes the
-    /// partial index unusable. Measured on a database this build produced:
+    /// The `WHERE` clause must keep implying `idx_issues_list_active_order`'s
+    /// stored predicate, or the partial index becomes unusable. Schema v19
+    /// dropped `is_template` from both sides at once — the query's
+    /// `AND is_template = 0` and the index's matching predicate — so the two
+    /// still agree; adding a term to one without the other is what breaks it.
     ///
-    /// ```text
-    /// with    `OR is_template IS NULL` -> SCAN issues
-    /// without                          -> SCAN issues USING INDEX idx_issues_list_active_order
-    /// ```
-    ///
-    /// This half has no `INDEXED BY`, so the term degrades it silently rather
+    /// This half has no `INDEXED BY`, so a mismatch degrades it silently rather
     /// than turning it into `no query solution`. See
     /// [`Self::LIST_ACTIVE_PRIORITY_WINDOW_SQL`] for the loud half.
     const LIST_ACTIVE_UNWINDOWED_SQL: &str =
         "SELECT id, title, status, priority, issue_type, created_at, updated_at
              FROM issues
              WHERE status NOT IN ('closed', 'tombstone')
-               AND is_template = 0
              ORDER BY COALESCE(priority, 2) ASC, created_at DESC, id ASC";
 
     /// List short text/table command issues without hydrating fields the renderer never inspects.
@@ -4287,7 +4150,6 @@ impl SqliteStorage {
                 .is_some_and(|priorities| !priorities.is_empty())
             || filters.include_closed
             || !filters.include_deferred
-            || filters.include_templates
             || filters.title_contains.is_some()
             || filters.has_date_range_filters()
             || !filters.exclude.is_empty()
@@ -4332,20 +4194,18 @@ impl SqliteStorage {
     /// (`list_limit_window_stays_on_the_active_order_partial_index`) pins the
     /// text the product actually runs rather than a copy that can drift.
     ///
-    /// `is_template = 0` alone, deliberately. Adding `OR is_template IS NULL`
-    /// back stops SQLite proving that this WHERE implies
-    /// `idx_issues_list_active_order`'s stored predicate — `is_template` is
-    /// `NOT NULL`, so the `IS NULL` term folds to constant false — and because
-    /// `INDEXED BY` is a *mandatory* hint, the planner then raises
-    /// `no query solution` rather than falling back. Every
-    /// `br list --limit N` fails outright. Equally, deleting `INDEXED BY`
-    /// silences that error by abandoning the partial index for
+    /// The `WHERE` clause must keep implying `idx_issues_list_active_order`'s
+    /// stored predicate. `INDEXED BY` is a *mandatory* hint, so a clause SQLite
+    /// cannot prove implies that predicate raises `no query solution` rather
+    /// than falling back, and every `br list --limit N` fails outright. That is
+    /// why schema v19 moved the query's `AND is_template = 0` and the index's
+    /// matching predicate in the same commit. Equally, deleting `INDEXED BY`
+    /// silences such an error by abandoning the partial index for
     /// `idx_issues_priority` plus a full sort; the guard rejects both.
     const LIST_ACTIVE_PRIORITY_WINDOW_SQL: &str =
         "SELECT id, title, status, priority, issue_type, created_at, updated_at
                  FROM issues INDEXED BY idx_issues_list_active_order
                  WHERE status NOT IN ('closed', 'tombstone')
-                   AND is_template = 0
                    AND priority = ?
                  ORDER BY created_at DESC, id ASC
                  LIMIT ?";
@@ -4471,10 +4331,6 @@ impl SqliteStorage {
             sql.push_str(" AND status != 'tombstone'");
         }
 
-        if !filters.include_templates {
-            sql.push_str(" AND is_template = 0");
-        }
-
         if let Some(updated_before) = filters.updated_before {
             sql.push_str(" AND updated_at <= ?");
             params.push(SqliteValue::from(updated_before.to_rfc3339()));
@@ -4513,7 +4369,7 @@ impl SqliteStorage {
     pub fn list_stats_issues(&self) -> Result<Vec<StatsIssueRow>> {
         let rows = self.conn.query(
             r"SELECT id, status, priority, issue_type, created_at, closed_at,
-                     defer_until, ephemeral, pinned, is_template
+                     defer_until
               FROM issues",
         )?;
         let mut issues = Vec::with_capacity(rows.len());
@@ -4531,7 +4387,7 @@ impl SqliteStorage {
     pub fn list_stats_summary_issues(&self) -> Result<Vec<StatsIssueRow>> {
         let rows = self.conn.query(
             r"SELECT id, status, issue_type, created_at, closed_at,
-                     defer_until, ephemeral, pinned, is_template
+                     defer_until
               FROM issues",
         )?;
         let mut issues = Vec::with_capacity(rows.len());
@@ -4623,10 +4479,6 @@ impl SqliteStorage {
             sql.push_str(" AND status != 'tombstone'");
         }
 
-        if !filters.include_templates {
-            sql.push_str(" AND is_template = 0");
-        }
-
         if let Some(ref title_contains) = filters.title_contains {
             sql.push_str(" AND title LIKE ? ESCAPE '\\'");
             let escaped = escape_like_pattern(title_contains);
@@ -4654,8 +4506,7 @@ impl SqliteStorage {
         let issue_rows = self.conn.query(&format!(
             "SELECT id
              FROM issues
-             WHERE {status_filter}
-               AND is_template = 0"
+             WHERE {status_filter}"
         ))?;
         if issue_rows.is_empty() {
             return Ok(0);
@@ -4703,8 +4554,7 @@ impl SqliteStorage {
         let row = self.conn.query_row(&format!(
             "SELECT COUNT(*)
              FROM issues
-             WHERE {status_filter}
-               AND is_template = 0"
+             WHERE {status_filter}"
         ))?;
         let count = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
         Ok(usize::try_from(count).unwrap_or(0))
@@ -4909,10 +4759,6 @@ impl SqliteStorage {
             sql.push_str(" AND status != 'tombstone'");
         }
 
-        if !filters.include_templates {
-            sql.push_str(" AND is_template = 0");
-        }
-
         if let Some(ref title_contains) = filters.title_contains {
             sql.push_str(" AND title LIKE ? ESCAPE '\\'");
             let escaped = escape_like_pattern(title_contains);
@@ -4975,7 +4821,6 @@ impl SqliteStorage {
         let sql = format!(
             "SELECT 1 FROM issues
              WHERE {status_filter}
-               AND is_template = 0
                AND {SEARCH_TEXT_MATCH_SQL}
              LIMIT 1"
         );
@@ -4999,7 +4844,6 @@ impl SqliteStorage {
         let sql = format!(
             r"{}
               AND {status_filter}
-              AND is_template = 0
               AND {priority_predicate}
               AND {SEARCH_TEXT_MATCH_SQL}
               ORDER BY {order_by}
@@ -5024,10 +4868,10 @@ impl SqliteStorage {
     /// 3. `defer_until` is NULL or <= now (unless `include_deferred`)
     /// 4. ID does not contain `-wisp-`
     ///
-    /// `pinned`, `ephemeral` and `is_template` (bds-b4f.2.2) no longer
-    /// constrain readiness: the fields were removed from `Issue` because
-    /// they were never populated through any live write path, and the DB
-    /// columns they used to read stay `0` for every row from here on.
+    /// `pinned`, `ephemeral` and `is_template` no longer constrain readiness:
+    /// the fields were removed from `Issue` in bds-b4f.2.2 because they were
+    /// never populated through any live write path, and schema v19 dropped the
+    /// columns behind them.
     ///
     /// # Errors
     ///
@@ -5255,8 +5099,8 @@ impl SqliteStorage {
             sql.push_str(" AND (defer_until IS NULL OR datetime(defer_until) <= datetime('now'))");
         }
 
-        // Ready condition 4: not a wisp. `pinned`/`ephemeral`/`is_template`
-        // (bds-b4f.2.2) no longer gate readiness — see the doc comment above.
+        // Ready condition 4: not a wisp. `pinned`/`ephemeral`/`is_template` no
+        // longer gate readiness — see the doc comment above.
         sql.push_str(" AND id NOT LIKE '%-wisp-%'");
 
         // The negative filters (bds-3rt), from the same struct `list` and
@@ -6198,8 +6042,7 @@ impl SqliteStorage {
                AND (
                  i.status NOT IN ('closed', 'tombstone')
                  OR i.id IS NULL
-               )
-               AND (i.is_template = 0 OR i.id IS NULL)",
+               )",
         )?;
         let mut blocked_issues_map: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -6245,8 +6088,7 @@ impl SqliteStorage {
                    AND (
                      i.status NOT IN ('closed', 'tombstone')
                      OR i.id IS NULL
-                   )
-                   AND (i.is_template = 0 OR i.id IS NULL)",
+                   )",
                 placeholders.join(", ")
             );
             let params: Vec<SqliteValue> = chunk
@@ -6402,7 +6244,6 @@ impl SqliteStorage {
              WHERE d.type = 'parent-child'
                AND p.issue_type = 'epic'
                AND i.status NOT IN ('closed', 'tombstone')
-               AND i.is_template = 0
                AND d.depends_on_id NOT LIKE 'external:%'
                AND d.issue_id NOT LIKE 'external:%'",
         ))?;
@@ -6451,7 +6292,6 @@ impl SqliteStorage {
                    AND d.type = 'parent-child'
                    AND p.issue_type = 'epic'
                    AND i.status NOT IN ('closed', 'tombstone')
-                   AND i.is_template = 0
                    AND d.depends_on_id NOT LIKE 'external:%'
                    AND d.issue_id NOT LIKE 'external:%'",
                 placeholders.join(", ")
@@ -7205,8 +7045,7 @@ impl SqliteStorage {
                 i.status
              FROM dependencies d
              JOIN issues i ON d.issue_id = i.id
-             WHERE d.type = 'parent-child'
-               AND i.is_template = 0",
+             WHERE d.type = 'parent-child'",
         )?;
         let mut counts: std::collections::HashMap<String, (usize, usize)> =
             std::collections::HashMap::new();
@@ -7252,7 +7091,6 @@ impl SqliteStorage {
         let rows = self.conn.query_with_params(
             "SELECT i.id FROM issues i \
              WHERE i.status IN ('open', 'in_progress') \
-               AND i.is_template = 0 \
                AND i.id LIKE ? ESCAPE '\\' \
                AND i.id NOT LIKE ? ESCAPE '\\'",
             &[
@@ -7389,19 +7227,16 @@ impl SqliteStorage {
             // `OR IGNORE` drops that redundant duplicate instead of aborting
             // the whole rename. The single-column-PK tables in this list
             // (`dirty_issues`, `export_hashes`, `blocked_issues_cache`,
-            // `child_counters`, `close_metadata`) can only collide with a
-            // *stale* row already sitting at `new_id`; `rename_issue` has
-            // already confirmed `new_id` names no live issue, so such a row
-            // can only be an orphan left behind by something that skipped
-            // cleanup (`purge_issue` at the time of writing does not clear
-            // `close_metadata`). `OR IGNORE` then keeps the orphan and drops
-            // the moved issue's own row for that table instead — for
-            // `dirty_issues` this is harmless (the caller re-marks `new_id`
-            // dirty below) and for the two caches it self-heals on the next
-            // rebuild, but for `close_metadata` it would silently discard the
-            // renamed issue's real close metadata in favor of someone else's
-            // leftover row. That collision requires an id `purge_issue` has
-            // already leaked, so it is accepted here rather than solved.
+            // `child_counters`) can only collide with a *stale* row already
+            // sitting at `new_id`; `rename_issue` has already confirmed
+            // `new_id` names no live issue, so such a row can only be an orphan
+            // left behind by something that skipped cleanup. `OR IGNORE` then
+            // keeps the orphan and drops the moved issue's own row for that
+            // table instead — for `dirty_issues` this is harmless (the caller
+            // re-marks `new_id` dirty below) and for the two caches it
+            // self-heals on the next rebuild. Every table left in this list is
+            // therefore recoverable; `close_metadata`, the one where a
+            // discarded row would have been real data, is gone in v19.
             conn.execute_with_params(
                 &format!("UPDATE OR IGNORE {table} SET {column} = ? WHERE {column} = ?"),
                 &[SqliteValue::from(new_id), SqliteValue::from(old_id)],
@@ -9092,7 +8927,7 @@ impl SqliteStorage {
     /// Get all labels attached to exportable issues.
     ///
     /// This mirrors the JSONL export issue filter so relation hydration does
-    /// not observe rows for excluded ephemerals or wisps.
+    /// not observe rows for excluded wisps.
     ///
     /// # Errors
     ///
@@ -9102,8 +8937,7 @@ impl SqliteStorage {
             "SELECT labels.issue_id, labels.label
              FROM labels
              INNER JOIN issues ON issues.id = labels.issue_id
-             WHERE (issues.ephemeral = 0 OR issues.ephemeral IS NULL)
-               AND issues.id NOT LIKE '%-wisp-%'
+             WHERE issues.id NOT LIKE '%-wisp-%'
              ORDER BY labels.issue_id, labels.label",
         )?;
 
@@ -9731,7 +9565,11 @@ impl SqliteStorage {
 
     /// Get all issues for JSONL export.
     ///
-    /// Includes tombstones (for sync propagation), excludes ephemerals and wisps.
+    /// Includes tombstones (for sync propagation), excludes wisps.
+    ///
+    /// The `ephemeral = 0` half of this filter went with the column in schema
+    /// v19. It never excluded anything the wisp-ID clause did not: `ephemeral`
+    /// was only ever set by wisp-ID detection in `normalize_issue`.
     /// Returns issues sorted by ID for deterministic output.
     ///
     /// # Errors
@@ -9745,8 +9583,7 @@ impl SqliteStorage {
                            deleted_at, deleted_by, delete_reason, original_type,
                            former_ids
                     FROM issues
-                    WHERE (ephemeral = 0 OR ephemeral IS NULL)
-                      AND id NOT LIKE '%-wisp-%'
+                    WHERE id NOT LIKE '%-wisp-%'
                     ORDER BY id ASC";
 
         let rows = self.conn.query(sql)?;
@@ -9825,8 +9662,7 @@ impl SqliteStorage {
                     dependencies.thread_id
              FROM dependencies
              INNER JOIN issues ON issues.id = dependencies.issue_id
-             WHERE (issues.ephemeral = 0 OR issues.ephemeral IS NULL)
-               AND issues.id NOT LIKE '%-wisp-%'
+             WHERE issues.id NOT LIKE '%-wisp-%'
              ORDER BY dependencies.issue_id, dependencies.depends_on_id",
         )?;
 
@@ -9895,8 +9731,7 @@ impl SqliteStorage {
                     comments.created_at
              FROM comments
              INNER JOIN issues ON issues.id = comments.issue_id
-             WHERE (issues.ephemeral = 0 OR issues.ephemeral IS NULL)
-               AND issues.id NOT LIKE '%-wisp-%'
+             WHERE issues.id NOT LIKE '%-wisp-%'
              ORDER BY comments.issue_id ASC, comments.created_at ASC, comments.id ASC",
         )?;
 
@@ -10155,7 +9990,6 @@ impl SqliteStorage {
             "SELECT 1
              FROM issues
              WHERE status NOT IN ('closed', 'tombstone')
-               AND is_template = 0
              LIMIT 1",
         )?;
         Ok(!rows.is_empty())
@@ -10295,12 +10129,10 @@ impl SqliteStorage {
             // in the Full SELECT and before `bc.blocked_by` in the
             // BlockedIssue::Full variant; the cached_blocked_by_index was
             // bumped in lock-step so the projection-specific blocked-by
-            // accessor still finds the right column. `assignee` (bds-b4f.2.6),
-            // `source_system` and `source_repo_path` (bds-b4f.2.4),
-            // `agent_context` (bds-b4f.2.5), `estimated_minutes`,
-            // `closed_by_session` and `due_at` (bds-b4f.2.3), and before them
-            // `sender`, `ephemeral`, `pinned` and `is_template` (bds-b4f.2.2),
-            // no longer occupy earlier positions.
+            // accessor still finds the right column. None of the fifteen
+            // columns schema v19 dropped occupies an earlier position; they
+            // left this SELECT one epic task at a time (bds-b4f.2.2 through
+            // bds-b4f.2.6) before the columns themselves went.
             former_ids: serde_json::from_str(&get_str(23)).unwrap_or_default(),
             labels: vec![],
             dependencies: vec![],
@@ -10564,9 +10396,6 @@ impl SqliteStorage {
                 .and_then(SqliteValue::as_integer)
                 .map(|value| value as i32)
         };
-        let get_bool = |idx: usize| -> bool {
-            row.get(idx).and_then(SqliteValue::as_integer).unwrap_or(0) != 0
-        };
         let get_opt_datetime = |idx: usize| -> Result<Option<DateTime<Utc>>> {
             parse_opt_datetime_value(row.get(idx))
         };
@@ -10579,9 +10408,6 @@ impl SqliteStorage {
             created_at: parse_datetime_value(row.get(4))?,
             closed_at: get_opt_datetime(5)?,
             defer_until: get_opt_datetime(6)?,
-            ephemeral: get_bool(7),
-            pinned: get_bool(8),
-            is_template: get_bool(9),
         })
     }
 
@@ -10591,9 +10417,6 @@ impl SqliteStorage {
                 .and_then(SqliteValue::as_text)
                 .unwrap_or("")
                 .to_string()
-        };
-        let get_bool = |idx: usize| -> bool {
-            row.get(idx).and_then(SqliteValue::as_integer).unwrap_or(0) != 0
         };
         let get_opt_datetime = |idx: usize| -> Result<Option<DateTime<Utc>>> {
             parse_opt_datetime_value(row.get(idx))
@@ -10607,9 +10430,6 @@ impl SqliteStorage {
             created_at: parse_datetime_value(row.get(3))?,
             closed_at: get_opt_datetime(4)?,
             defer_until: get_opt_datetime(5)?,
-            ephemeral: get_bool(6),
-            pinned: get_bool(7),
-            is_template: get_bool(8),
         })
     }
 
@@ -10781,7 +10601,6 @@ pub struct ListFilters {
     pub priorities: Option<Vec<Priority>>,
     pub include_closed: bool,
     pub include_deferred: bool,
-    pub include_templates: bool,
     pub title_contains: Option<String>,
     pub limit: Option<usize>,
     /// Offset for pagination (number of rows to skip before applying LIMIT)
@@ -10887,27 +10706,6 @@ fn append_date_range_filters(
     }
 }
 
-/// Closure-time policy metadata row (issue #274 Phase 1).
-///
-/// One row per terminal close that carried any opt-in policy data — Tier 1
-/// attribution, a `--bypass-policy` waiver, or the list of gates that fired.
-///
-/// `#[cfg(test)]` with [`SqliteStorage::get_close_metadata`], the only thing
-/// that constructs it; since bds-b4f.4.1 the rows themselves are written only
-/// by test code too (both are scheduled for removal in bds-b4f.3.1).
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloseMetadataRow {
-    pub bypassed_policy: bool,
-    pub bypass_reason: Option<String>,
-    /// Names of gates that fired during evaluation. Always serialised as a
-    /// JSON array on disk; empty when no gates fired (e.g. clean Tier 1
-    /// capture, or a successful close on a project with no `policy.yaml`).
-    pub policy_gates_fired: Vec<String>,
-    /// Timestamp the metadata row was recorded, in ISO 8601 / RFC 3339.
-    pub recorded_at: String,
-}
-
 /// Lean issue row used by the stats command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatsIssueRow {
@@ -10918,9 +10716,6 @@ pub struct StatsIssueRow {
     pub created_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
     pub defer_until: Option<DateTime<Utc>>,
-    pub ephemeral: bool,
-    pub pinned: bool,
-    pub is_template: bool,
 }
 
 /// Fields to update on an issue.
@@ -11090,7 +10885,6 @@ fn default_visible_limited_page_limit(filters: &ListFilters) -> Option<usize> {
         && filters.types.as_ref().is_none_or(Vec::is_empty)
         && filters.priorities.as_ref().is_none_or(Vec::is_empty)
         && !filters.include_closed
-        && !filters.include_templates
         && filters.title_contains.is_none()
         && filters.sort.is_none()
         && !filters.reverse
@@ -11113,7 +10907,6 @@ fn default_visible_single_label_count_filter(filters: &ListFilters) -> Option<&s
         && filters.types.as_ref().is_none_or(Vec::is_empty)
         && filters.priorities.as_ref().is_none_or(Vec::is_empty)
         && !filters.include_closed
-        && !filters.include_templates
         && filters.title_contains.is_none()
         && filters.labels_or.as_ref().is_none_or(Vec::is_empty)
         && !filters.has_date_range_filters()
@@ -14595,68 +14388,6 @@ mod tests {
             .unwrap();
         assert_eq!(deleted.status, Status::Tombstone);
         assert_eq!(deleted.delete_reason.as_deref(), Some("cleanup"));
-    }
-
-    #[test]
-    fn test_reopen_clears_close_metadata() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
-
-        let issue = make_issue("bd-rmeta", "Reopen metadata", Status::Open, 2, t1, None);
-        storage.create_issue(&issue, "tester").unwrap();
-
-        let close_update = IssueUpdate {
-            status: Some(Status::Closed),
-            close_reason: Some(Some("done".to_string())),
-            ..IssueUpdate::default()
-        };
-        storage
-            .update_issue("bd-rmeta", &close_update, "tester")
-            .unwrap();
-        storage
-            .record_close_metadata("bd-rmeta", false, None, &[])
-            .unwrap();
-        assert!(storage.get_close_metadata("bd-rmeta").unwrap().is_some());
-
-        let reopen_update = IssueUpdate {
-            status: Some(Status::Open),
-            closed_at: Some(None),
-            close_reason: Some(None),
-            ..IssueUpdate::default()
-        };
-        storage
-            .update_issue("bd-rmeta", &reopen_update, "tester")
-            .unwrap();
-
-        assert!(storage.get_close_metadata("bd-rmeta").unwrap().is_none());
-    }
-
-    #[test]
-    fn test_delete_issue_clears_close_metadata() {
-        let mut storage = SqliteStorage::open_memory().unwrap();
-        let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
-
-        let issue = make_issue("bd-dmeta", "Delete metadata", Status::Open, 2, t1, None);
-        storage.create_issue(&issue, "tester").unwrap();
-
-        let close_update = IssueUpdate {
-            status: Some(Status::Closed),
-            close_reason: Some(Some("done".to_string())),
-            ..IssueUpdate::default()
-        };
-        storage
-            .update_issue("bd-dmeta", &close_update, "tester")
-            .unwrap();
-        storage
-            .record_close_metadata("bd-dmeta", false, None, &[])
-            .unwrap();
-        assert!(storage.get_close_metadata("bd-dmeta").unwrap().is_some());
-
-        storage
-            .delete_issue("bd-dmeta", "tester", "cleanup", None)
-            .unwrap();
-
-        assert!(storage.get_close_metadata("bd-dmeta").unwrap().is_none());
     }
 
     #[test]
@@ -18445,18 +18176,10 @@ mod tests {
         closed.closed_at = Some(day_3);
         storage.create_issue(&closed, "tester").unwrap();
 
-        let template = make_issue("bd-template", "Template", Status::Open, 0, day_3, None);
-        storage.create_issue(&template, "tester").unwrap();
-        // `is_template` no longer exists on `Issue` (bds-b4f.2.2); the column
-        // stays until the v19 migration, so flag this row directly to keep
-        // exercising the fast-path/baseline parity this test targets.
-        storage
-            .conn
-            .execute_with_params(
-                "UPDATE issues SET is_template = 1 WHERE id = ?",
-                &[SqliteValue::from("bd-template")],
-            )
-            .unwrap();
+        // A template row used to live here, flagged directly in SQL so the
+        // `is_template = 0` predicate had something to exclude. Schema v19
+        // dropped the column and the predicate together, so there is nothing
+        // left to exclude and the row would only change the expected order.
 
         let fast = storage
             .list_issues(&ListFilters {
@@ -18587,14 +18310,14 @@ mod tests {
     /// Two opposite regressions are pinned here, because behavioural tests
     /// catch only one of them:
     ///
-    /// 1. Re-adding `OR is_template IS NULL` to the WHERE clause. The column
-    ///    is `NOT NULL`, so SQLite folds the term to constant false, the
-    ///    rewritten clause stops implying the partial index's stored
-    ///    predicate, and `INDEXED BY` — a mandatory hint — turns an unusable
-    ///    index into `no query solution` instead of a fallback. Every
-    ///    `br list --limit N` fails. This is what the storage-engine port
-    ///    exposed (`bds-04l.4.3`); the previous engine ignored `INDEXED BY`
-    ///    entirely.
+    /// 1. Adding a term to the WHERE clause that SQLite cannot prove implies
+    ///    the partial index's stored predicate. `INDEXED BY` is a mandatory
+    ///    hint, so the planner then raises `no query solution` instead of
+    ///    falling back, and every `br list --limit N` fails. The historical
+    ///    instance was `OR is_template IS NULL` against a `NOT NULL` column,
+    ///    folded to constant false (`bds-04l.4.3`; the previous engine ignored
+    ///    `INDEXED BY` entirely). Schema v19 dropped that column and the
+    ///    predicate together, so the shape is gone but the hazard is not.
     /// 2. Deleting `INDEXED BY` to make that error go away. The query then
     ///    succeeds on `idx_issues_priority` plus a full sort and the partial
     ///    index goes unused — a performance regression disguised as a fix,
@@ -18630,13 +18353,13 @@ mod tests {
         // rather than a measurable plan difference. Measured on both an empty
         // database and a populated one (40 issues), on SQLite 3.50.6 and the
         // bundled 3.53.2: deleting `INDEXED BY` alone leaves the plan above
-        // unchanged, because with `is_template = 0` the planner picks the
-        // partial index by itself. The fallback to `idx_issues_priority` plus a
-        // full sort appears only when the dead `is_template IS NULL` disjunct is
-        // *also* restored. So this assertion does not discriminate the hint on
-        // its own — it exists so the hint is not deleted as apparently
-        // redundant, leaving nothing but the planner's discretion between
-        // `br list` and a full sort.
+        // unchanged, because the planner picks the partial index by itself.
+        // The fallback to `idx_issues_priority` plus a full sort appeared only
+        // when a term the index's predicate did not imply was *also* present.
+        // So this assertion does not discriminate the hint on its own — it
+        // exists so the hint is not deleted as apparently redundant, leaving
+        // nothing but the planner's discretion between `br list` and a full
+        // sort.
         assert!(
             SqliteStorage::LIST_ACTIVE_PRIORITY_WINDOW_SQL
                 .contains("INDEXED BY idx_issues_list_active_order"),
@@ -18649,11 +18372,11 @@ mod tests {
     /// The unwindowed half of the same command path (`br list` with no
     /// `--limit`) must also reach the partial index.
     ///
-    /// It carries no `INDEXED BY`, so `OR is_template IS NULL` degrades it
-    /// silently rather than loudly: measured on a database this build
-    /// produced, the disjunction turns `SCAN issues USING INDEX
-    /// idx_issues_list_active_order` into a bare `SCAN issues`. Nothing else
-    /// in the suite would notice.
+    /// It carries no `INDEXED BY`, so a WHERE clause the index's predicate does
+    /// not imply degrades it silently rather than loudly: measured on a
+    /// database this build produced, the historical `OR is_template IS NULL`
+    /// disjunction turned `SCAN issues USING INDEX idx_issues_list_active_order`
+    /// into a bare `SCAN issues`. Nothing else in the suite would notice.
     ///
     /// The SQL comes from `SqliteStorage::LIST_ACTIVE_UNWINDOWED_SQL` rather
     /// than from a copy here. An earlier version of this test embedded its own
@@ -19379,18 +19102,22 @@ mod tests {
             .query_row_with_params(
                 "SELECT
                     typeof(description), typeof(design), typeof(acceptance_criteria), typeof(notes),
-                    typeof(owner), typeof(created_by), typeof(close_reason), typeof(closed_by_session),
-                    typeof(source_system), typeof(source_repo), typeof(deleted_by), typeof(delete_reason),
-                    typeof(original_type), typeof(sender),
+                    typeof(owner), typeof(created_by), typeof(close_reason), typeof(source_repo),
+                    typeof(deleted_by), typeof(delete_reason), typeof(original_type),
                     description, design, acceptance_criteria, notes, owner, created_by, close_reason,
-                    closed_by_session, source_system, source_repo, deleted_by, delete_reason,
-                    original_type, sender
+                    source_repo, deleted_by, delete_reason, original_type
                  FROM issues WHERE id = ?",
                 &[SqliteValue::from(issue.id.as_str())],
             )
             .unwrap();
 
-        for index in 0..14 {
+        // Twenty-eight selected expressions became twenty-two when schema v19
+        // dropped `closed_by_session`, `source_system` and `sender`, so every
+        // range below was re-derived by counting rather than adjusted by feel.
+        // 0..11 are the eleven `typeof(...)` calls; 11..22 are the same eleven
+        // columns' values, with `source_repo` — the one that coalesces to '.'
+        // rather than '' — eighth in that run, at 18.
+        for index in 0..11 {
             assert_eq!(
                 row.get(index).and_then(SqliteValue::as_text),
                 Some("text"),
@@ -19398,7 +19125,7 @@ mod tests {
             );
         }
 
-        for index in 14..23 {
+        for index in 11..18 {
             assert_eq!(
                 row.get(index).and_then(SqliteValue::as_text),
                 Some(""),
@@ -19407,12 +19134,12 @@ mod tests {
         }
 
         assert_eq!(
-            row.get(23).and_then(SqliteValue::as_text),
+            row.get(18).and_then(SqliteValue::as_text),
             Some("."),
             "source_repo should coalesce missing values to '.'"
         );
 
-        for index in 24..28 {
+        for index in 19..22 {
             assert_eq!(
                 row.get(index).and_then(SqliteValue::as_text),
                 Some(""),
@@ -20650,15 +20377,6 @@ mod tests {
             None,
         );
         closed.closed_at = Some(base + chrono::Duration::minutes(11));
-        let template = make_issue(
-            "bd-search-template",
-            "needle template",
-            Status::Open,
-            0,
-            base + chrono::Duration::minutes(9),
-            None,
-        );
-
         for issue in [
             make_issue(
                 "bd-search-p1",
@@ -20701,20 +20419,9 @@ mod tests {
                 None,
             ),
             closed,
-            template,
         ] {
             storage.create_issue(&issue, "tester").unwrap();
         }
-        // `is_template` no longer exists on `Issue` (bds-b4f.2.2); the column
-        // stays until the v19 migration, so flag this row directly to keep
-        // exercising the fast-path/generic parity this test targets.
-        storage
-            .conn
-            .execute_with_params(
-                "UPDATE issues SET is_template = 1 WHERE id = ?",
-                &[SqliteValue::from("bd-search-template")],
-            )
-            .unwrap();
 
         let fast_filters = ListFilters {
             include_deferred: true,
@@ -20756,7 +20463,6 @@ mod tests {
 
         let mut closed = issue("bd-count-closed", "needle closed", Status::Closed, 0);
         closed.closed_at = Some(base);
-        let template = issue("bd-count-template", "needle template", Status::Open, 0);
         let mut feature = issue("bd-count-feature", "needle feature", Status::Open, 1);
         feature.issue_type = IssueType::Feature;
         feature.description = Some("needle in the description".to_string());
@@ -20767,21 +20473,10 @@ mod tests {
             issue("bd-count-deferred", "needle deferred", Status::Deferred, 0),
             issue("bd-count-other", "unrelated", Status::Open, 2),
             closed,
-            template,
             feature,
         ] {
             storage.create_issue(&issue, "tester").unwrap();
         }
-        // `is_template` no longer exists on `Issue` (bds-b4f.2.2); the column
-        // stays until the v19 migration, so flag this row directly to keep
-        // exercising the `include_templates` filter shape below.
-        storage
-            .conn
-            .execute_with_params(
-                "UPDATE issues SET is_template = 1 WHERE id = ?",
-                &[SqliteValue::from("bd-count-template")],
-            )
-            .unwrap();
         storage.add_label("bd-count-open-1", "core").unwrap();
         storage.add_label("bd-count-feature", "core").unwrap();
         storage
@@ -20794,11 +20489,10 @@ mod tests {
     fn test_count_search_issues_matches_unlimited_search_length() {
         let storage = count_search_fixture();
 
-        let shapes: [(&str, fn(&mut ListFilters)); 9] = [
+        let shapes: [(&str, fn(&mut ListFilters)); 8] = [
             ("default", |_| {}),
             ("deferred", |f| f.include_deferred = true),
             ("closed", |f| f.include_closed = true),
-            ("templates", |f| f.include_templates = true),
             ("type", |f| f.types = Some(vec![IssueType::Feature])),
             ("priority", |f| f.priorities = Some(vec![Priority(2)])),
             ("status", |f| f.statuses = Some(vec![Status::Open])),
@@ -21594,10 +21288,14 @@ mod tests {
         );
     }
 
-    /// The pre-migration `issues` shape: `ephemeral`, `pinned` and
+    /// The pre-v19 `issues` shape, with `ephemeral`, `pinned` and
     /// `is_template` declared merely `INTEGER`, so a row can hold a
     /// storage-class NULL in them. Extracted from the test below purely to keep
     /// that function under clippy's line ceiling.
+    ///
+    /// This is a self-contained legacy fixture and is *meant* to name the
+    /// columns schema v19 drops: it is the input the migration has to cope
+    /// with. Nothing selects them out of it.
     const LEGACY_NULLABLE_FLAGS_DDL: &str = r"
             CREATE TABLE issues (
                 id TEXT PRIMARY KEY,
@@ -21650,25 +21348,25 @@ mod tests {
             );
             ";
 
-    /// A legacy row whose `ephemeral` / `pinned` / `is_template` are
-    /// storage-class NULL must still show up in `br ready`.
+    /// A legacy table carrying `ephemeral` / `pinned` / `is_template` — with
+    /// storage-class NULLs in them — must open, lose the three columns, and
+    /// still return its row from `br ready`.
     ///
-    /// bds-04l.16 changed HOW that is guaranteed. This test used to build the
-    /// nullable table by hand, skip `apply_schema`, and rely on every ready
-    /// query carrying `OR is_template IS NULL` -- a disjunct that is
-    /// constant-false on any migrated database and costs partial-index use, or
-    /// with `INDEXED BY` fails the query outright. The guarantee now comes from
-    /// the migration instead: `apply_schema` rewrites the column to NOT NULL and
-    /// backfills the NULLs to 0, which is what every real open does
-    /// (`SqliteStorage::open` calls it), so the shape this test used to
-    /// construct cannot reach the query in production.
+    /// The name changed with what it proves. Through bds-04l.16 this asserted
+    /// that `apply_schema` backfilled the NULLs to 0 and the ready query then
+    /// treated them as false. Schema v19 removes the columns outright, so the
+    /// backfill half no longer exists to assert and the ready half holds
+    /// trivially — the query stopped naming any of the three in bds-b4f.2.2.
+    /// What is left is real and is exactly what the fixture is shaped to test:
+    /// the drop happens on the path every open takes.
     ///
-    /// So the fixture keeps its legacy nullable table and its NULL row, and now
-    /// runs `apply_schema` over it exactly as an open would. That is a stronger
-    /// assertion than before: it pins the migration AND the query together,
-    /// rather than a query workaround for a shape the migration removes.
+    /// That path is the *pre-schema rebuild*, not the v19 migration arm.
+    /// `issues_column_order_matches` compares against
+    /// `EXPECTED_ISSUE_COLUMN_ORDER`, this table does not match it, so
+    /// `rebuild_issues_table` projects it onto the canonical column list and
+    /// the fifteen dead columns are simply not carried over.
     #[test]
-    fn test_get_ready_issues_treats_null_legacy_flags_as_false() {
+    fn legacy_nullable_flag_columns_are_dropped_and_the_row_stays_ready() {
         let conn = Connection::open(":memory:").unwrap();
         crate::storage::schema::execute_batch(&conn, LEGACY_NULLABLE_FLAGS_DDL).unwrap();
 
@@ -21709,18 +21407,18 @@ mod tests {
         crate::storage::schema::apply_schema(&storage.conn)
             .expect("a legacy nullable-flag table must migrate cleanly");
 
-        let flags = storage
+        let columns: Vec<String> = storage
             .conn
-            .query("SELECT ephemeral, pinned, is_template FROM issues WHERE id = 'bd-legacy-ready'")
-            .unwrap();
-        let row = flags
-            .first()
-            .expect("the legacy row must survive the migration");
-        for (index, column) in ["ephemeral", "pinned", "is_template"].iter().enumerate() {
-            assert_eq!(
-                row.get(index).and_then(SqliteValue::as_integer),
-                Some(0),
-                "{column} must be backfilled from NULL to 0 by apply_schema"
+            .query("PRAGMA table_info('issues')")
+            .unwrap()
+            .iter()
+            .filter_map(|row| row.get(1).and_then(SqliteValue::as_text).map(String::from))
+            .collect();
+        for column in ["ephemeral", "pinned", "is_template"] {
+            assert!(
+                !columns.iter().any(|name| name == column),
+                "schema v19 drops {column}; apply_schema must reshape a legacy \
+                 table rather than carry it forward, got {columns:?}"
             );
         }
 
@@ -21968,9 +21666,8 @@ mod tests {
             .execute_with_params(
                 r"
                 INSERT INTO issues (
-                    id, title, status, priority, issue_type, created_at, updated_at,
-                    ephemeral, pinned, is_template
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, title, status, priority, issue_type, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ",
                 &[
                     SqliteValue::from("bd-orphan.6"),
@@ -21980,9 +21677,6 @@ mod tests {
                     SqliteValue::from("task"),
                     SqliteValue::from(stamp.as_str()),
                     SqliteValue::from(stamp.as_str()),
-                    SqliteValue::from(0_i64),
-                    SqliteValue::from(0_i64),
-                    SqliteValue::from(0_i64),
                 ],
             )
             .unwrap();

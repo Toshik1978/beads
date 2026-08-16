@@ -1832,6 +1832,57 @@ mod tests {
             .expect("a closed issue must still accept field-only updates");
     }
 
+    /// `validate_route_runtime_guards`'s uniqueness branch — "External
+    /// reference ... already exists on issue" — had no coverage at any level.
+    ///
+    /// The function's only unit test went with
+    /// `test_validate_route_runtime_guards_rejects_assigned_claim_target` when
+    /// `assignee` was removed in bds-b4f.2.6, but this half pre-dates that epic
+    /// and was never covered: the multi-id guard beside it has its own test,
+    /// which is what made the gap easy to miss.
+    #[test]
+    fn validate_route_runtime_guards_rejects_an_external_ref_held_by_another_issue() {
+        init_test_logging();
+
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let issue = |id: &str, external_ref: Option<&str>| Issue {
+            id: id.to_string(),
+            title: format!("Issue {id}"),
+            status: Status::Open,
+            priority: Priority::MEDIUM,
+            issue_type: IssueType::Task,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            external_ref: external_ref.map(str::to_string),
+            ..Issue::default()
+        };
+        storage
+            .create_issue(&issue("bd-holder", Some("GH-42")), "tester")
+            .unwrap();
+        storage
+            .create_issue(&issue("bd-claimant", None), "tester")
+            .unwrap();
+
+        let update = IssueUpdate {
+            external_ref: Some(Some("GH-42".to_string())),
+            ..IssueUpdate::default()
+        };
+
+        let err = validate_route_runtime_guards(&storage, &["bd-claimant".to_string()], &update)
+            .expect_err("an external_ref already held by another issue must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("External reference 'GH-42' already exists on issue bd-holder"),
+            "the refusal must name the holder, got: {message}"
+        );
+
+        // The same guard must not fire when the issue already holds the value:
+        // re-setting an external_ref on its current owner is a no-op, not a
+        // collision.
+        validate_route_runtime_guards(&storage, &["bd-holder".to_string()], &update)
+            .expect("re-setting an issue's own external_ref must be allowed");
+    }
+
     #[test]
     fn test_validate_multi_issue_external_ref_update_rejects_multiple_distinct_ids() {
         init_test_logging();
