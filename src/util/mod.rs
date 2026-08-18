@@ -7,9 +7,11 @@
 //! - ID generation (base36 adaptive)
 //! - Last-touched tracking
 //! - Progress indicators (for long-running operations)
+//! - Holding the machine awake for a long network run
 
 mod hash;
 pub mod id;
+pub mod keep_awake;
 pub mod markdown_import;
 pub mod progress;
 pub mod time;

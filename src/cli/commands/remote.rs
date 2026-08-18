@@ -38,6 +38,7 @@ use crate::remote::youtrack::admin::AdminClient;
 use crate::remote::youtrack::init::{self, InitOptions, InitReport, WorkspaceVocabulary};
 use crate::remote::youtrack::links::LinkTypes;
 use crate::storage::{ListFilters, SqliteStorage};
+use crate::util::keep_awake::KeepAwake;
 use serde::Serialize;
 
 /// Execute the remote command.
@@ -75,6 +76,9 @@ pub fn execute(
             Ok(())
         }
         RemoteCommands::Pull(args) => {
+            // Held for the whole verb, released by `Drop` at the end of this
+            // arm. A dry run holds it too: it still makes every read.
+            let _awake = KeepAwake::hold(!args.no_keep_awake);
             let mut storage_ctx = config::open_storage_with_cli(&beads_dir, cli)?;
             let layer = storage_ctx.load_config(cli)?;
             let id_config = config::id_config_from_layer(&layer);
@@ -88,6 +92,7 @@ pub fn execute(
             finish("br remote pull", report.is_none_or(|r| r.is_clean()))
         }
         RemoteCommands::Push(args) => {
+            let _awake = KeepAwake::hold(!args.no_keep_awake);
             let mut storage_ctx = config::open_storage_with_cli(&beads_dir, cli)?;
             let report = push(
                 &cfg,
@@ -104,6 +109,10 @@ pub fn execute(
         // newly-adopted issue looks unpaired to the push half and the link
         // differ tries to remove links it has not learned about yet.
         RemoteCommands::Sync(args) => {
+            // One guard for both halves: `sync` is the verb this exists for,
+            // and releasing between pull and push would leave the machine
+            // free to sleep in the gap.
+            let _awake = KeepAwake::hold(!args.no_keep_awake);
             let mut storage_ctx = config::open_storage_with_cli(&beads_dir, cli)?;
             let layer = storage_ctx.load_config(cli)?;
             let id_config = config::id_config_from_layer(&layer);

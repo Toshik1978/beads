@@ -1651,6 +1651,15 @@ pub struct RemotePushArgs {
     /// exits non-zero, writing nothing.
     #[arg(long)]
     pub confirm_initial: bool,
+
+    /// Let the machine idle-sleep during the run
+    ///
+    /// A laptop that sleeps mid-run drops the connection, and br cannot tell
+    /// a lost answer from an unsent request — so by default a remote verb
+    /// holds an assertion (macOS only) that prevents idle sleep for as long
+    /// as it runs. Closing the lid still sleeps the machine regardless.
+    #[arg(long)]
+    pub no_keep_awake: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1658,6 +1667,15 @@ pub struct RemotePullArgs {
     /// Report what would change without writing anything
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Let the machine idle-sleep during the run
+    ///
+    /// A laptop that sleeps mid-run drops the connection, and br cannot tell
+    /// a lost answer from an unsent request — so by default a remote verb
+    /// holds an assertion (macOS only) that prevents idle sleep for as long
+    /// as it runs. Closing the lid still sleeps the machine regardless.
+    #[arg(long)]
+    pub no_keep_awake: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1672,6 +1690,15 @@ pub struct RemoteSyncArgs {
     /// `br remote push` is. See that command's `--confirm-initial`.
     #[arg(long)]
     pub confirm_initial: bool,
+
+    /// Let the machine idle-sleep during the run
+    ///
+    /// A laptop that sleeps mid-run drops the connection, and br cannot tell
+    /// a lost answer from an unsent request — so by default a remote verb
+    /// holds an assertion (macOS only) that prevents idle sleep for as long
+    /// as it runs. Closing the lid still sleeps the machine regardless.
+    #[arg(long)]
+    pub no_keep_awake: bool,
 }
 
 #[derive(Subcommand, Debug)]

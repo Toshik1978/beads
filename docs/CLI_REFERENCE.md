@@ -1433,6 +1433,7 @@ always `0`, which a consumer can assert without parsing prose.
 |--------|-------------|
 | `--confirm-initial` | Allow a first run — see above |
 | `--dry-run` | Report what would change without writing anything |
+| `--no-keep-awake` | Let the machine idle-sleep during the run — see below |
 
 Refuses, in order, all before any write: a local vocabulary gap, a
 plan-level unmapped value naming the offending bead, the first-run gate, then
@@ -1445,6 +1446,7 @@ it.
 | Option | Description |
 |--------|-------------|
 | `--dry-run` | Report what would change without writing anything |
+| `--no-keep-awake` | Let the machine idle-sleep during the run — see below |
 
 Applies the `State`/`Priority` changes the remote won, imports comments, and
 adopts every unpaired remote issue — in parentage order, so an adoptee whose
@@ -1457,11 +1459,30 @@ created flat and reparented afterward. No first-run gate — see above.
 |--------|-------------|
 | `--confirm-initial` | Allow a first run — see `push` |
 | `--dry-run` | Report what would change without writing anything |
+| `--no-keep-awake` | Let the machine idle-sleep during the run — see below |
 
 `pull`, then `push`, each reconciling afresh from a fresh fetch — pull runs
 first so an issue adopted this run is already a bead by the time push
 computes its link diff, rather than looking unpaired and having its links
 seen as unexplained remote additions.
+
+Each half renders its own plan under a `pull:` / `push:` label, so a run with
+nothing to do prints the same block twice — once per half, agreeing.
+
+**Idle sleep, and `--no-keep-awake`**
+
+`push`, `pull` and `sync` hold a macOS power assertion (`caffeinate -i`) for
+as long as they run, released when the command ends and — because the child
+is told to watch this process — even if it ends abnormally. A laptop that
+idle-sleeps mid-run drops every open connection, and the resulting
+`Connection reset by peer` cannot be told apart from a request that never
+left: br will not blindly repeat a write, since repeating a create is how a
+mirror doubles. `--no-keep-awake` opts out.
+
+Two limits worth knowing. It prevents **idle** sleep only — closing the lid
+sleeps the machine regardless, unless it is on AC power with an external
+display. And it is macOS-only; elsewhere the flag is accepted and nothing is
+held.
 
 **Examples:**
 ```bash
