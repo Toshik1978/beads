@@ -107,6 +107,12 @@ pub fn execute(
             let mut storage_ctx = config::open_storage_with_cli(&beads_dir, cli)?;
             let layer = storage_ctx.load_config(cli)?;
             let id_config = config::id_config_from_layer(&layer);
+            // Each half renders its own plan, so a sync that has nothing to
+            // do prints the same "nothing to do" block twice. Unlabelled,
+            // that reads as the command having run twice; these two lines
+            // are what say which half is speaking. `pull` and `push` on
+            // their own stay unlabelled — there is only one half to name.
+            ctx.print_line("pull:");
             let pulled = pull(
                 &cfg,
                 &mut storage_ctx.storage,
@@ -114,6 +120,7 @@ pub fn execute(
                 args.dry_run,
                 ctx,
             )?;
+            ctx.print_line("push:");
             let pushed = push(
                 &cfg,
                 &mut storage_ctx.storage,
