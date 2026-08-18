@@ -189,6 +189,50 @@ pub fn comment_counts_agree(remote: &RemoteIssue, local_count: u32) -> bool {
     remote.comments_count == local_count
 }
 
+/// Whether a comment push landed, given how many copies of `text`'s body
+/// this run has now tried to put on `id_readable`.
+///
+/// A comment `POST` whose answer is lost is the same problem
+/// `crate::remote::execute` solves for creates and links, with a quieter
+/// symptom: the comment is on the mirror, [`comment_counts_agree`] therefore
+/// returns true on the next run, and the failure this run reported names
+/// work that nothing will ever revisit. So the effect is read rather than
+/// the write repeated — repeating it is how a mirror grows a second copy of
+/// the same comment.
+///
+/// **`expected` is a count, not a flag, and that is the whole subtlety.** A
+/// body reaches [`plan_comment_sync`]'s `to_push` only when the mirror
+/// carries no `[br]` comment with it, so the mirror's count for that body
+/// starts this run at zero and should read `k` once `k` copies have landed.
+/// A bead that says the same thing twice therefore pushes two identical
+/// bodies, and asking "is it there?" for the second would be answered by the
+/// first one's copy. Pass the ordinal of the copy being pushed — 1 for the
+/// first, 2 for the second — and the first copy can no longer stand in for
+/// the second.
+///
+/// Comparison goes through [`is_br_echo`] and `strip_marker`, the same pair
+/// `plan_comment_sync` compares with, so this cannot disagree with the plan
+/// about what "already pushed" means.
+///
+/// # Errors
+/// Returns whatever `http` returns on transport or HTTP failure — which is
+/// reported as the original failure by the caller, because a check that
+/// could not be made proves nothing.
+pub fn comment_landed(
+    http: &HttpClient,
+    id_readable: &str,
+    text: &str,
+    expected: usize,
+) -> Result<bool, RemoteError> {
+    let body = strip_marker(text);
+    let present = fetch_comments(http, id_readable)?
+        .iter()
+        .filter(|comment| is_br_echo(&comment.text))
+        .filter(|comment| strip_marker(&comment.text) == body)
+        .count();
+    Ok(present >= expected)
+}
+
 /// True iff `text`'s **first line** is exactly the `[br]` marker.
 ///
 /// A leading-line check, never a substring match: a bead comment that quotes

@@ -198,6 +198,37 @@ pub fn link_remove(
     http.delete_issue_link(from_readable, link_id, to_internal_id)
 }
 
+/// The `fields=` selector a link read needs: the `{linkID}` the differ
+/// selects by, and both identifiers a linked issue can be addressed with.
+///
+/// `fetch::ISSUE_FIELDS` embeds this same substring inside a much larger
+/// selector. The two cannot share one constant — `concat!` takes literals
+/// only — so the repetition is deliberate and
+/// `the_snapshot_selector_embeds_the_link_selector` fails if they drift.
+const LINK_FIELDS: &str = "links(id,direction,linkType(id,name),issues(id,idReadable))";
+
+/// The links `id_readable` carries right now, read on its own.
+///
+/// A second link read exists for one narrow reason: a write whose response
+/// was lost. [`crate::remote::http::may_retry`] deliberately never repeats a
+/// `POST` — repeating one is how a mirror duplicates — so the layer above
+/// checks for the write's own effect instead, and this is the read that
+/// check is made of. It is issued on a failure path only, never on the
+/// ordinary one, which is why it costs a request per failed link rather
+/// than per link.
+///
+/// # Errors
+/// Returns whatever `http` returns on transport or HTTP failure.
+pub fn fetch_issue_links(
+    http: &HttpClient,
+    id_readable: &str,
+    types: &LinkTypes,
+) -> Result<Vec<RemoteLink>, RemoteError> {
+    let path = format!("/api/issues/{id_readable}?fields={LINK_FIELDS}");
+    let raw = http.get_json(&path, "issue links")?;
+    Ok(parse_links(&raw, types))
+}
+
 /// Read every non-empty link bucket out of a fetched issue's `links` array.
 #[must_use]
 pub fn parse_links(raw: &Value, types: &LinkTypes) -> Vec<RemoteLink> {
@@ -429,6 +460,18 @@ mod tests {
         let posts = server.write_requests();
         assert_eq!(posts.len(), 1);
         assert!(posts[0].body.contains("EM-5"), "{}", posts[0].body);
+    }
+
+    /// The one-issue read and the snapshot read must ask for the same link
+    /// shape: the differ selects by `link_id` and a removal needs the linked
+    /// issue's internal id, and a selector that dropped either would report
+    /// the link as absent rather than erroring.
+    #[test]
+    fn the_snapshot_selector_embeds_the_link_selector() {
+        assert!(
+            crate::remote::youtrack::fetch::ISSUE_FIELDS.contains(LINK_FIELDS),
+            "ISSUE_FIELDS no longer contains {LINK_FIELDS}"
+        );
     }
 
     #[test]

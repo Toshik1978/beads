@@ -30,6 +30,41 @@
 //! fetch naming the bead it belongs to. [`orphaned_creates`] finds it and the
 //! bead is paired with no POST at all. That is what makes the create
 //! idempotent — not the transport.
+//!
+//! ## The same check, for a link write
+//!
+//! A link `POST` is in exactly the same position, and was not covered for
+//! longer than it should have been. The symptom is quieter than a duplicate
+//! and reads worse: the run names `EM-27 + blocks EM-29` as failed, exits
+//! non-zero, and says re-running does the remainder — and the re-run then
+//! reports nothing to do, because the write had landed and the socket died
+//! carrying the answer back. Nothing is wrong with the mirror at that point;
+//! the report was.
+//!
+//! [`link_change_landed`] closes it the same way `orphaned_creates` does, by
+//! reading the effect rather than repeating the write: one GET of that
+//! issue's links, on the failure path only, selecting by the same `link_id`
+//! the differ read by. If the end state the change asked for holds, the
+//! change is reported as done — annotated, so a lost response stays visible
+//! — and if it does not, or the check itself cannot reach the server, the
+//! failure stands. An unproven write is never assumed.
+//!
+//! ## And a comment write's, by counting
+//!
+//! A comment is the third write in the same position and the quietest of the
+//! three, because the thing that hides it is the optimisation that makes
+//! comments affordable at all: `comment_counts_agree` compares counts, a
+//! landed comment makes them agree, and the next run never looks. The
+//! reported failure is then the only trace, and it is wrong.
+//!
+//! [`crate::remote::comments::comment_landed`] reads the effect the same
+//! way, with one wrinkle the link case does not have. `plan_comment_sync`
+//! puts a body in `to_push` only when the mirror carries no `[br]` comment
+//! with it, so the mirror's count for that body starts the run at zero — but
+//! a bead that says the same thing twice pushes two identical bodies, and
+//! "is it there?" for the second would be answered by the first one's copy.
+//! So the check counts: the ordinal of the copy being pushed is passed in,
+//! and the mirror must show at least that many.
 
 use crate::error::Result;
 use crate::model::{Issue, Status};
@@ -39,8 +74,8 @@ use crate::remote::adopt::{
     topological_order,
 };
 use crate::remote::comments::{
-    LocalComment, YOUTRACK_AUTHOR, comment_counts_agree, fetch_comments, plan_comment_sync,
-    push_comment,
+    LocalComment, YOUTRACK_AUTHOR, comment_counts_agree, comment_landed, fetch_comments,
+    plan_comment_sync, push_comment,
 };
 use crate::remote::config::RemoteConfig;
 use crate::remote::diff::{Direction, Field};
@@ -52,7 +87,7 @@ use crate::remote::plan::{CommentWork, ReconcilePlan, build_plan};
 use crate::remote::reconcile::{is_in_scope, pair_workspace};
 use crate::remote::tombstone::{TombstoneAction, deleted_comment_text, plan_tombstones};
 use crate::remote::youtrack::fetch::fetch_snapshot;
-use crate::remote::youtrack::links::{LinkTypes, link_add, link_remove};
+use crate::remote::youtrack::links::{LinkTypes, fetch_issue_links, link_add, link_remove};
 use crate::remote::youtrack::mapping::{
     FieldSet, deleted_state_body, issue_create_body, issue_update_body,
 };
@@ -648,6 +683,11 @@ pub struct PushReport {
     /// `"EM-1 - blocks EM-3"` per link removed.
     pub links_removed: Vec<String>,
     pub comments_pushed: usize,
+    /// How many of `comments_pushed` were already on the mirror when this run
+    /// looked: the write landed and its answer was lost. Counted apart so a
+    /// dropped response stays visible instead of reading as an ordinary
+    /// success — see this module's doc.
+    pub comments_recovered: usize,
     /// Bead ids whose mirror was marked with `deleted_state`.
     pub tombstones_marked: Vec<String>,
     /// Tag names br could not create or attach. Never fatal: a label is not
@@ -952,21 +992,98 @@ fn push_links(http: &HttpClient, types: &LinkTypes, plan: &ReconcilePlan, report
             match outcome {
                 Ok(()) if added => report.links_added.push(rendered),
                 Ok(()) => report.links_removed.push(rendered),
-                Err(err) => report.failures.push(format!("{rendered}: {err}")),
+                // A failed link write is not the same as an unapplied one.
+                // `RemoteError::Transport` flattens a request that never left
+                // and a response that died on the way back into one variant,
+                // and `http::may_retry` cannot tell them apart either, so it
+                // refuses to repeat the `POST`. That leaves this layer to do
+                // what the create path already does: check for the write's
+                // own effect. Reporting a failure without checking is how a
+                // run names work it actually completed — and the re-run it
+                // tells you to do then finds nothing to do, because there is
+                // nothing left.
+                Err(err) => {
+                    let recovered = format!("{rendered} {LOST_ANSWER}");
+                    match link_change_landed(http, types, &issue_plan.remote_id, change) {
+                        Ok(true) if added => report.links_added.push(recovered),
+                        Ok(true) => report.links_removed.push(recovered),
+                        // Either the write genuinely did not land, or the
+                        // check itself could not reach the server — and an
+                        // unproven write is reported as a failure, never
+                        // assumed.
+                        Ok(false) | Err(_) => report.failures.push(format!("{rendered}: {err}")),
+                    }
+                }
             }
         }
     }
 }
 
+/// What a recovered link write is annotated with, so a lost response is
+/// visible in the report rather than silently swallowed.
+const LOST_ANSWER: &str = "(the answer was lost; the mirror already has it)";
+
+/// Whether the end state `change` asked for holds on the mirror now.
+///
+/// Selects the link by `LinkTypes::link_id(kind, mirrored_direction(kind))`
+/// — the identifier the differ read by and the executor wrote with, so this
+/// check cannot disagree with either (see `link_diff`'s module doc).
+fn link_change_landed(
+    http: &HttpClient,
+    types: &LinkTypes,
+    remote_id: &str,
+    change: &LinkChange,
+) -> std::result::Result<bool, RemoteError> {
+    let (kind, target_readable) = match change {
+        LinkChange::Add {
+            kind,
+            target_readable,
+        }
+        | LinkChange::Remove {
+            kind,
+            target_readable,
+            ..
+        } => (*kind, target_readable.as_str()),
+    };
+    let link_id = types.link_id(kind, mirrored_direction(kind));
+    let present = fetch_issue_links(http, remote_id, types)?
+        .iter()
+        .filter(|link| link.link_id == link_id)
+        .flat_map(|link| link.issues.iter())
+        .any(|issue| issue.id_readable == target_readable);
+    Ok(match change {
+        LinkChange::Add { .. } => present,
+        LinkChange::Remove { .. } => !present,
+    })
+}
+
 fn push_comments(http: &HttpClient, comments: &[CommentWork], report: &mut PushReport) {
     for work in comments {
+        // How many copies of each body this run has already put on this
+        // issue. `comment_landed` needs the ordinal of the copy being pushed,
+        // not a yes/no — see its doc for why a repeated comment would
+        // otherwise recover itself.
+        let mut landed: HashMap<&str, usize> = HashMap::new();
         for text in &work.to_push {
-            match push_comment(http, &work.remote_id, text) {
-                Ok(()) => report.comments_pushed += 1,
-                Err(err) => report
-                    .failures
-                    .push(format!("comment on {}: {err}", work.remote_id)),
-            }
+            let ordinal = landed.get(text.as_str()).copied().unwrap_or(0) + 1;
+            let recovered = if let Err(err) = push_comment(http, &work.remote_id, text) {
+                // `unwrap_or(false)` folds the two ways this can fail to
+                // prove anything into one: the comment is genuinely not on
+                // the mirror, or the check itself could not reach the
+                // server. An unproven write is reported as a failure.
+                if !comment_landed(http, &work.remote_id, text, ordinal).unwrap_or(false) {
+                    report
+                        .failures
+                        .push(format!("comment on {}: {err}", work.remote_id));
+                    continue;
+                }
+                true
+            } else {
+                false
+            };
+            report.comments_pushed += 1;
+            report.comments_recovered += usize::from(recovered);
+            landed.insert(text.as_str(), ordinal);
         }
     }
 }
@@ -1445,5 +1562,297 @@ mod tests {
             rendered.contains("Beads ID"),
             "must say how to fix it: {rendered}"
         );
+    }
+
+    /// A comment write whose response never arrived. Same shape as the link
+    /// case below, and the same reason: the count gate makes a landed
+    /// comment invisible to the next run, so a failure reported here names
+    /// work that is already done and nothing ever revisits it.
+    mod comment_writes_whose_response_was_lost {
+        use super::*;
+        use crate::remote::http::{RetryPolicy, Token};
+        use test_support::mock_http::MockServer;
+
+        const POST_PATH: &str = "/api/issues/EM-27/comments?fields=id";
+        const READ_PATH: &str =
+            "/api/issues/EM-27/comments?fields=id,text,author(login),created&$skip=0&$top=500";
+
+        fn client(server: &MockServer) -> HttpClient {
+            HttpClient::new(&server.base_url(), Token::new("t"), RetryPolicy::none())
+        }
+
+        fn work(texts: &[&str]) -> Vec<CommentWork> {
+            vec![CommentWork {
+                bead_id: "bds-1".into(),
+                remote_id: "EM-27".into(),
+                to_push: texts.iter().map(|t| (*t).to_string()).collect(),
+                to_pull: Vec::new(),
+            }]
+        }
+
+        /// One `[br]` comment carrying `body`, as the mirror reports it.
+        fn echo(id: &str, body: &str) -> String {
+            format!(
+                r#"{{"id":"{id}","text":"[br]\n{body}","author":{{"login":"anton"}},"created":1786881856457}}"#
+            )
+        }
+
+        #[test]
+        fn a_landed_comment_is_reported_as_done_not_failed() {
+            let server = MockServer::start();
+            server.on_drop("POST", POST_PATH);
+            server.on(
+                "GET",
+                READ_PATH,
+                200,
+                &format!("[{}]", echo("7-1", "hello")),
+            );
+
+            let mut report = PushReport::default();
+            push_comments(&client(&server), &work(&["[br]\nhello"]), &mut report);
+
+            assert!(report.failures.is_empty(), "{report:?}");
+            assert_eq!(report.comments_pushed, 1, "{report:?}");
+            assert_eq!(report.comments_recovered, 1, "{report:?}");
+        }
+
+        #[test]
+        fn a_comment_that_never_landed_is_still_a_failure() {
+            let server = MockServer::start();
+            server.on_drop("POST", POST_PATH);
+            server.on("GET", READ_PATH, 200, "[]");
+
+            let mut report = PushReport::default();
+            push_comments(&client(&server), &work(&["[br]\nhello"]), &mut report);
+
+            assert_eq!(report.comments_pushed, 0, "{report:?}");
+            assert_eq!(report.comments_recovered, 0, "{report:?}");
+            assert_eq!(report.failures.len(), 1, "{report:?}");
+            assert!(
+                report.failures[0].contains("EM-27"),
+                "{:?}",
+                report.failures
+            );
+        }
+
+        /// The duplicate-body case, which is the whole reason the check
+        /// counts rather than asking "is it there?". A bead that says the
+        /// same thing twice puts two identical bodies in `to_push`; if the
+        /// first lands and the second is lost for real, the first one's copy
+        /// must not be mistaken for the second's.
+        #[test]
+        fn the_first_copy_does_not_recover_the_second() {
+            let server = MockServer::start();
+            // One create answered, then the connection drops.
+            server.on_sequence("POST", POST_PATH, vec![(200, r#"{"id":"7-1"}"#.into())]);
+            server.on_drop_after("POST", POST_PATH, 1);
+            // The mirror shows exactly one copy: the first push's.
+            server.on(
+                "GET",
+                READ_PATH,
+                200,
+                &format!("[{}]", echo("7-1", "hello")),
+            );
+
+            let mut report = PushReport::default();
+            push_comments(
+                &client(&server),
+                &work(&["[br]\nhello", "[br]\nhello"]),
+                &mut report,
+            );
+
+            assert_eq!(
+                report.comments_pushed, 1,
+                "only the first landed: {report:?}"
+            );
+            assert_eq!(report.comments_recovered, 0, "{report:?}");
+            assert_eq!(report.failures.len(), 1, "{report:?}");
+        }
+
+        /// And the mirror showing both copies means both landed.
+        #[test]
+        fn both_copies_present_recovers_the_second() {
+            let server = MockServer::start();
+            server.on_sequence("POST", POST_PATH, vec![(200, r#"{"id":"7-1"}"#.into())]);
+            server.on_drop_after("POST", POST_PATH, 1);
+            server.on(
+                "GET",
+                READ_PATH,
+                200,
+                &format!("[{},{}]", echo("7-1", "hello"), echo("7-2", "hello")),
+            );
+
+            let mut report = PushReport::default();
+            push_comments(
+                &client(&server),
+                &work(&["[br]\nhello", "[br]\nhello"]),
+                &mut report,
+            );
+
+            assert!(report.failures.is_empty(), "{report:?}");
+            assert_eq!(report.comments_pushed, 2, "{report:?}");
+            assert_eq!(report.comments_recovered, 1, "{report:?}");
+        }
+    }
+
+    /// A link write whose response never arrived, and the mirror that shows
+    /// the write landed anyway.
+    ///
+    /// This is the link half of the create recovery this module's doc
+    /// describes. `Connection reset by peer` after the server applied the
+    /// POST is indistinguishable here from one before it was sent, and
+    /// `http::may_retry` refuses to repeat a `POST` for exactly that reason
+    /// — so the check is for the write's own effect.
+    mod link_writes_whose_response_was_lost {
+        use super::*;
+        use crate::remote::http::{RetryPolicy, Token};
+        use crate::remote::link_diff::LinkChange;
+        use crate::remote::youtrack::links::LinkKind;
+        use test_support::mock_http::MockServer;
+
+        const ADD_PATH: &str = "/api/issues/EM-27/links/173-1s/issues?fields=idReadable";
+        const READ_PATH: &str =
+            "/api/issues/EM-27?fields=links(id,direction,linkType(id,name),issues(id,idReadable))";
+
+        fn types() -> LinkTypes {
+            LinkTypes {
+                subtask: "173-3".into(),
+                depend: "173-1".into(),
+                relates: "173-0".into(),
+            }
+        }
+
+        fn plan_adding_em_29() -> ReconcilePlan {
+            ReconcilePlan {
+                link_changes: vec![crate::remote::plan::IssueLinkPlan {
+                    bead_id: "bds-1".into(),
+                    remote_id: "EM-27".into(),
+                    changes: vec![LinkChange::Add {
+                        kind: LinkKind::Depend,
+                        target_readable: "EM-29".into(),
+                    }],
+                }],
+                ..ReconcilePlan::default()
+            }
+        }
+
+        fn client(server: &MockServer) -> HttpClient {
+            HttpClient::new(&server.base_url(), Token::new("t"), RetryPolicy::none())
+        }
+
+        #[test]
+        fn a_landed_add_is_reported_as_done_not_failed() {
+            let server = MockServer::start();
+            server.on_drop("POST", ADD_PATH);
+            server.on(
+                "GET",
+                READ_PATH,
+                200,
+                r#"{"links":[{"id":"173-1s","direction":"OUTWARD","linkType":{"id":"173-1","name":"Depend"},"issues":[{"id":"3-221","idReadable":"EM-29"}]}]}"#,
+            );
+
+            let mut report = PushReport::default();
+            push_links(
+                &client(&server),
+                &types(),
+                &plan_adding_em_29(),
+                &mut report,
+            );
+
+            assert!(
+                report.failures.is_empty(),
+                "the link is on the mirror; nothing failed: {:?}",
+                report.failures
+            );
+            assert_eq!(report.links_added.len(), 1, "{report:?}");
+            assert!(
+                report.links_added[0].contains("EM-27 + blocks EM-29"),
+                "{:?}",
+                report.links_added
+            );
+        }
+
+        #[test]
+        fn a_landed_removal_is_reported_as_done_not_failed() {
+            let server = MockServer::start();
+            server.on_drop("DELETE", "/api/issues/EM-27/links/173-1s/issues/3-221");
+            // The bucket is gone from the read, so the removal was applied.
+            server.on("GET", READ_PATH, 200, r#"{"links":[]}"#);
+
+            let plan = ReconcilePlan {
+                link_changes: vec![crate::remote::plan::IssueLinkPlan {
+                    bead_id: "bds-1".into(),
+                    remote_id: "EM-27".into(),
+                    changes: vec![LinkChange::Remove {
+                        kind: LinkKind::Depend,
+                        target_internal_id: "3-221".into(),
+                        target_readable: "EM-29".into(),
+                    }],
+                }],
+                ..ReconcilePlan::default()
+            };
+            let mut report = PushReport::default();
+            push_links(&client(&server), &types(), &plan, &mut report);
+
+            assert!(report.failures.is_empty(), "{report:?}");
+            assert_eq!(report.links_removed.len(), 1, "{report:?}");
+            assert!(
+                report.links_removed[0].contains("EM-27 - blocks EM-29"),
+                "{:?}",
+                report.links_removed
+            );
+        }
+
+        /// The recovered write says so. A run that silently reported a
+        /// dropped response as an ordinary success would hide a real network
+        /// fault behind a clean report.
+        #[test]
+        fn a_recovered_write_says_the_answer_was_lost() {
+            let server = MockServer::start();
+            server.on_drop("POST", ADD_PATH);
+            server.on(
+                "GET",
+                READ_PATH,
+                200,
+                r#"{"links":[{"id":"173-1s","direction":"OUTWARD","linkType":{"id":"173-1","name":"Depend"},"issues":[{"id":"3-221","idReadable":"EM-29"}]}]}"#,
+            );
+
+            let mut report = PushReport::default();
+            push_links(
+                &client(&server),
+                &types(),
+                &plan_adding_em_29(),
+                &mut report,
+            );
+
+            assert!(
+                report.links_added[0].contains(LOST_ANSWER),
+                "{:?}",
+                report.links_added
+            );
+        }
+
+        #[test]
+        fn an_add_that_never_landed_is_still_a_failure() {
+            let server = MockServer::start();
+            server.on_drop("POST", ADD_PATH);
+            server.on("GET", READ_PATH, 200, r#"{"links":[]}"#);
+
+            let mut report = PushReport::default();
+            push_links(
+                &client(&server),
+                &types(),
+                &plan_adding_em_29(),
+                &mut report,
+            );
+
+            assert!(report.links_added.is_empty(), "{report:?}");
+            assert_eq!(report.failures.len(), 1, "{report:?}");
+            assert!(
+                report.failures[0].contains("EM-27 + blocks EM-29"),
+                "{:?}",
+                report.failures
+            );
+        }
     }
 }

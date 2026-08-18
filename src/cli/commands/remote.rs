@@ -305,6 +305,16 @@ fn print_push_report(report: &PushReport, ctx: &OutputContext) {
     if report.comments_pushed > 0 {
         ctx.print_line(&format!("pushed {} comment(s)", report.comments_pushed));
     }
+    if report.comments_recovered > 0 {
+        // Said out loud because the alternative readings are both wrong: a
+        // silent success hides that the connection failed at all, and a
+        // failure would name work that is done.
+        ctx.print_line(&format!(
+            "{} of those were already on the mirror — the write had landed and only its answer \
+             was lost",
+            report.comments_recovered
+        ));
+    }
     for entry in &report.tombstones_marked {
         ctx.print_line(&format!(
             "marked {entry} as {} and commented on it; no issue was deleted",
