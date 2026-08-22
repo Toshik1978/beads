@@ -9,6 +9,100 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.8.0 — 2026-08-22
+
+`br search` stops understating its own scope. It matched `title`, `description`
+and `id`; the three other prose fields a bead carries — `design`,
+`acceptance_criteria` and `notes` — were unreachable from the CLI entirely,
+while `br show` printed them and the CLI reference called the command "search
+in all fields". That is the breaking change here: the default scope is now all
+six fields, so a query that ran before can return rows it did not return
+before, and `--in` is the way back to any narrower scope.
+
+The rest is `br remote` under conditions that are not the happy path — a
+laptop that idle-sleeps mid-run, a connection that dies after the server has
+already committed the write, and a `sync` whose two halves were
+indistinguishable in its own output. None of it changes what the mirror does;
+all three are about a run reporting truthfully what it did.
+
+### Highlights
+
+- **`br search` matches every field `br show` renders.** `id`, `title`,
+  `description`, `design`, `acceptance_criteria`, `notes`. A term that
+  appeared only in a design document could not previously be found by any flag
+  combination on offer: `--fields` selects **CSV output columns** and is
+  ignored entirely for text output, and `--notes-contains` is a client-side
+  filter applied *after* the SQL search, so it narrows a result set the needle
+  could never have entered in the first place.
+- **`--in <FIELDS>` narrows the scope back down.** It takes the canonical
+  names above plus the aliases `desc`, `ac`, `acceptance-criteria` and
+  `criteria`; `--in title,description` is the pre-1.8 behaviour. An unknown
+  field name is an error rather than a silently empty result, and an empty
+  scope is refused for the same reason. `--fields` gained no new powers and
+  still means CSV columns.
+- **A text-mode hit says which field it came from.** The result line shows the
+  title, so a match in prose the reader cannot see would read as arbitrary;
+  hits in `design`, `acceptance_criteria` or `notes` are now labelled with
+  their field. Hits the old scope could already find print exactly as before,
+  so existing output is unchanged wherever the old scope was sufficient.
+- **`push`, `pull` and `sync` hold the machine awake while they run.** A
+  laptop that idle-sleeps mid-run drops every open connection, and the
+  `Connection reset by peer` that follows cannot be distinguished from a
+  request that never left — which is precisely the ambiguity the retry
+  policy refuses to guess at. A terminal emulator holds no power assertion for
+  the processes it runs, so running in one never prevented this.
+  `--no-keep-awake` opts out.
+- **A link or comment write is proved failed before it is reported as one.** A
+  transport error cannot say whether the write landed, and repeating the POST
+  is how a mirror duplicates. Creates already closed that window by checking
+  for the write's own effect; link and comment writes did not, so a reset
+  mid-response made a run name work it had actually completed, exit non-zero,
+  and promise that re-running would finish it — and the re-run then found
+  nothing to do, because there was nothing left. Both now re-read the effect
+  on the failure path, and a recovered write is annotated rather than counted
+  as an ordinary success. A check that could not be made proves nothing, so an
+  unproven write stays a failure.
+- **`sync` says which half is speaking.** It is pull then push, each rendering
+  its own plan, so a run with nothing to do printed the same block twice —
+  which read as the command having run twice rather than as two halves
+  agreeing. `pull` and `push` on their own stay unlabelled; there is only one
+  half to name.
+
+### What this deliberately does not do
+
+- **Keeping the machine awake is macOS-only, and covers idle sleep only.** It
+  spawns `/usr/bin/caffeinate -i` rather than calling `IOKit`, whose assertion
+  API is C and therefore `unsafe`, which this crate forbids outright. On Linux
+  the guard holds nothing at all. Closing the lid still sleeps the machine
+  regardless, unless it is on AC power with an external display attached, so
+  this covers walking away from a long push and is not a promise that the run
+  survives a closed laptop. A missing or unrunnable `caffeinate` yields a
+  guard that holds nothing rather than a run that refuses to start.
+- **Search is still a substring match, not an index.** Widening the scope
+  widened the same `instr()` scan; there is no FTS table, no ranking, and no
+  stemming. Matching is case-insensitive and literal.
+- **`list` is unchanged.** `--in` is a `search` flag, and the client-side
+  `--desc-contains` / `--notes-contains` filters keep their existing
+  narrowing semantics on both commands.
+- **A comment edited after it was mirrored still appends a duplicate**, and
+  only three dependency types mirror. Both remain as described in v1.7.0.
+
+### ⚠ Breaking Changes
+
+- [24cb23f](https://github.com/Toshik1978/beads/commit/24cb23f2e6257ddfe053ddece624258738158d5a) match every field `br show` renders
+
+### Features
+
+- [070cd86](https://github.com/Toshik1978/beads/commit/070cd86c95e18124945db92c043ff11d0e610ee6) feat(remote): hold the machine awake for the length of a remote run
+- [24cb23f](https://github.com/Toshik1978/beads/commit/24cb23f2e6257ddfe053ddece624258738158d5a) feat(search)!: match every field `br show` renders
+
+### Bug Fixes
+
+- [1fe2101](https://github.com/Toshik1978/beads/commit/1fe2101ecea02585f37be04b3156aadf661991f3) fix(remote): prove a link or comment write failed before reporting it
+- [ded8bd0](https://github.com/Toshik1978/beads/commit/ded8bd0c0752cedb7097b693e7fda9914c7dd9e5) fix(remote): name which half of a sync is speaking
+
+---
+
 ## v1.7.0 — 2026-08-16
 
 `br` gains a second surface: **`br remote`**, which mirrors a workspace into a

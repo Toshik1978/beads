@@ -1,6 +1,6 @@
 [package]
 name = "beads"
-version = "1.7.0"
+version = "1.8.0"
 publish = false
 edition = "2024"
 # Two different facts live here, and conflating them is what made this section
