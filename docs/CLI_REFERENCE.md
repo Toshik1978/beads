@@ -765,6 +765,22 @@ Full-text search across issues.
 br search <QUERY> [OPTIONS]
 ```
 
+Matches a case-insensitive substring against every field `br show` renders:
+`id`, `title`, `description`, `design`, `acceptance_criteria` and `notes`.
+
+**Options:**
+| Option | Description |
+|--------|-------------|
+| `--in <FIELDS>` | Fields to match the query against (comma-separated; default: all of them) |
+
+`--in` narrows the scope. It accepts the canonical names above plus the
+aliases `desc` (description) and `ac` / `acceptance-criteria` / `criteria`
+(acceptance criteria); an unknown name is an error rather than a silently
+empty result.
+
+Do not confuse it with `--fields`, which selects **output columns** for
+`--format csv` and has no effect on which fields are searched.
+
 Supports all filter options from `list`. Unlike `list`/`ready` (which are
 complete by default), `search` results are **capped at 50 by default**
 (`--limit <N>`, `0`=unlimited) — a broad text query can match a large fraction
@@ -774,10 +790,20 @@ Because it can truncate, `--json` emits the [paginated
 envelope](#paginated-envelope-list-ready-search-blocked): check `has_more` to learn
 whether matches were dropped.
 
+In text output, a match found in `design`, `acceptance_criteria` or `notes` is
+annotated with the field it came from — the result line shows only the title,
+so an unannotated hit in prose you cannot see would read as arbitrary.
+
 **Examples:**
 ```bash
-# Search in all fields
+# Search every field
 br search "authentication"
+
+# Only where it appears in a design document
+br search "CoinMarketCap" --in design
+
+# Title or description, the pre-1.8 scope
+br search "auth" --in title,description
 
 # Search with filters
 br search "bug" -t bug -p 0

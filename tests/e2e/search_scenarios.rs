@@ -13,7 +13,9 @@
 // `common::` paths in this suite keep working unchanged.
 use crate::common;
 
-use common::cli::{BrWorkspace, extract_json_payload, parse_issue_page_issues, run_br};
+use common::cli::{
+    BrWorkspace, extract_json_payload, parse_issue_page, parse_issue_page_issues, run_br,
+};
 use serde_json::Value;
 
 fn parse_created_id(stdout: &str) -> String {
@@ -666,4 +668,189 @@ fn search_combined_multiple_filters() {
         assert_eq!(issue["status"], "open");
         assert_eq!(issue["issue_type"], "bug");
     }
+}
+
+/// The `em-dtnh` case: a term that appears *only* in a bead's `design`.
+///
+/// `search` used to match `title`, `description` and `id` and nothing else,
+/// so a word living in `design`, `acceptance_criteria` or `notes` could not be
+/// found by any flag the CLI offered — `--fields` selects CSV output columns
+/// and is ignored for text output, and `--notes-contains` narrows an already
+/// too-narrow SQL result rather than widening it.
+fn workspace_with_prose_only_terms() -> (BrWorkspace, String) {
+    let workspace = BrWorkspace::new();
+    let init = run_br(&workspace, ["init"], "init");
+    assert!(init.status.success(), "init failed: {}", init.stderr);
+
+    let created = run_br(
+        &workspace,
+        [
+            "create",
+            "Crypto is a currency, not a security",
+            "-t",
+            "task",
+            "-d",
+            "Rebuild the Exchange editor and the model under it.",
+        ],
+        "create_prose_bead",
+    );
+    assert!(
+        created.status.success(),
+        "create failed: {}",
+        created.stderr
+    );
+    let id = parse_created_id(&created.stdout);
+
+    let updated = run_br(
+        &workspace,
+        [
+            "update",
+            &id,
+            "--design",
+            "Price is an exchange rate resolved from CoinMarketCap, cached locally.",
+            "--acceptance-criteria",
+            "A held currency round-trips through the Firefly ledger.",
+            "--notes",
+            "Superseded the per-currency-account sketch.",
+        ],
+        "set_prose_fields",
+    );
+    assert!(
+        updated.status.success(),
+        "update failed: {}",
+        updated.stderr
+    );
+
+    (workspace, id)
+}
+
+fn search_ids(workspace: &BrWorkspace, args: &[&str], label: &str) -> Vec<String> {
+    let output = run_br(workspace, args.iter().copied(), label);
+    assert!(output.status.success(), "search failed: {}", output.stderr);
+    parse_issue_page_issues(&output.stdout)
+        .iter()
+        .filter_map(|issue| issue.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn search_finds_a_term_that_appears_only_in_design() {
+    let (workspace, id) = workspace_with_prose_only_terms();
+    let ids = search_ids(
+        &workspace,
+        &["search", "CoinMarketCap", "--format", "json"],
+        "search_design_term",
+    );
+    assert_eq!(
+        ids,
+        vec![id],
+        "a term present only in `design` must be findable by a bare search"
+    );
+}
+
+#[test]
+fn search_finds_terms_that_appear_only_in_acceptance_criteria_or_notes() {
+    let (workspace, id) = workspace_with_prose_only_terms();
+    for (term, field) in [("Firefly", "acceptance_criteria"), ("Superseded", "notes")] {
+        let ids = search_ids(
+            &workspace,
+            &["search", term, "--format", "json"],
+            "search_prose_term",
+        );
+        assert_eq!(ids, vec![id.clone()], "'{term}' lives only in {field}");
+    }
+}
+
+#[test]
+fn search_in_narrows_the_scope_to_the_named_fields() {
+    let (workspace, id) = workspace_with_prose_only_terms();
+
+    let scoped_out = search_ids(
+        &workspace,
+        &[
+            "search",
+            "CoinMarketCap",
+            "--in",
+            "title,description",
+            "--format",
+            "json",
+        ],
+        "search_in_excludes_design",
+    );
+    assert!(
+        scoped_out.is_empty(),
+        "--in title,description must not reach `design`, got {scoped_out:?}"
+    );
+
+    let scoped_in = search_ids(
+        &workspace,
+        &[
+            "search",
+            "CoinMarketCap",
+            "--in",
+            "design",
+            "--format",
+            "json",
+        ],
+        "search_in_includes_design",
+    );
+    assert_eq!(scoped_in, vec![id], "--in design must reach `design`");
+}
+
+#[test]
+fn search_in_accepts_aliases_and_rejects_unknown_fields() {
+    let (workspace, id) = workspace_with_prose_only_terms();
+
+    let via_alias = search_ids(
+        &workspace,
+        &["search", "Firefly", "--in", "ac", "--format", "json"],
+        "search_in_alias",
+    );
+    assert_eq!(via_alias, vec![id], "`ac` must alias acceptance_criteria");
+
+    let bad = run_br(
+        &workspace,
+        ["search", "anything", "--in", "assignee"],
+        "search_in_unknown_field",
+    );
+    assert!(
+        !bad.status.success(),
+        "an unknown --in field must fail rather than silently match nothing"
+    );
+    assert!(
+        bad.stderr.contains("assignee") && bad.stderr.contains("acceptance_criteria"),
+        "the error must quote the bad name and list the valid ones: {}",
+        bad.stderr
+    );
+}
+
+#[test]
+fn search_json_total_counts_the_widened_scope() {
+    let (workspace, _id) = workspace_with_prose_only_terms();
+    let output = run_br(
+        &workspace,
+        ["search", "CoinMarketCap", "--format", "json"],
+        "search_total",
+    );
+    assert!(output.status.success(), "search failed: {}", output.stderr);
+    let total = parse_issue_page(&output.stdout)["total"]
+        .as_u64()
+        .expect("search --json must report a total");
+    assert_eq!(
+        total, 1,
+        "the COUNT(*) behind `total` must match the rows the query returned"
+    );
+}
+
+#[test]
+fn search_text_output_labels_a_match_found_outside_the_description() {
+    let (workspace, _id) = workspace_with_prose_only_terms();
+    let output = run_br(&workspace, ["search", "CoinMarketCap"], "search_text_label");
+    assert!(output.status.success(), "search failed: {}", output.stderr);
+    assert!(
+        output.stdout.contains("design"),
+        "a design-only hit must say which field matched, got:\n{}",
+        output.stdout
+    );
 }

@@ -207,6 +207,17 @@ const SORT_KEY_CANDIDATES: &[(&str, &str)] = &[
 const DEP_TREE_FORMAT_CANDIDATES: &[(&str, &str)] =
     &[("text", "Text output"), ("mermaid", "Mermaid graph")];
 
+const SEARCH_FIELD_CANDIDATES: &[(&str, &str)] = &[
+    ("id", "Issue ID"),
+    ("title", "Title"),
+    ("description", "Description"),
+    ("design", "Design"),
+    ("acceptance_criteria", "Acceptance criteria"),
+    ("notes", "Notes"),
+    ("desc", "Alias for description"),
+    ("ac", "Alias for acceptance_criteria"),
+];
+
 const CSV_FIELD_CANDIDATES: &[(&str, &str)] = &[
     ("id", "Issue ID"),
     ("title", "Title"),
@@ -625,6 +636,10 @@ fn sort_key_completer(current: &OsStr) -> Vec<CompletionCandidate> {
 
 fn csv_fields_completer(current: &OsStr) -> Vec<CompletionCandidate> {
     static_candidates_delimited(current, ',', CSV_FIELD_CANDIDATES)
+}
+
+fn search_fields_completer(current: &OsStr) -> Vec<CompletionCandidate> {
+    static_candidates_delimited(current, ',', SEARCH_FIELD_CANDIDATES)
 }
 
 /// Agent-first issue tracker (`SQLite` + JSONL)
@@ -1402,7 +1417,9 @@ pub struct ListArgs {
     #[arg(long, value_enum)]
     pub format: Option<OutputFormat>,
 
-    /// CSV fields to include (comma-separated)
+    /// CSV fields to include (comma-separated). Applies to `--format csv`
+    /// only; it selects output columns and does not affect which fields are
+    /// searched — see `br search --in`.
     ///
     /// Available: id, title, description, status, priority, `issue_type`,
     /// owner, `created_at`, `updated_at`, `closed_at`,
@@ -1418,6 +1435,11 @@ pub struct ListArgs {
 pub struct SearchArgs {
     /// Search query
     pub query: String,
+
+    /// Fields to match the query against (comma-separated). Defaults to every
+    /// field: id, title, description, design, acceptance_criteria, notes.
+    #[arg(long = "in", value_name = "FIELDS", add = ArgValueCompleter::new(search_fields_completer))]
+    pub search_in: Option<String>,
 
     #[command(flatten)]
     pub filters: ListArgs,
@@ -2535,6 +2557,7 @@ mod tests {
         "`--notes-contains <TEXT>` | Notes contains substring",
         "`--format <FMT>` | Output format: text, json, csv",
         "`--days <N>` | Issues not updated in N days (default: 30)",
+        "`--in <FIELDS>` | Fields to match the query against",
     ];
 
     fn assert_all_top_level_commands_are_documented() {

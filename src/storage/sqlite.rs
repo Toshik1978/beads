@@ -2,6 +2,7 @@
 
 use crate::error::{BeadsError, Result};
 use crate::format::{IssueDetails, IssueWithDependencyMetadata};
+use crate::model::search::SearchScope;
 use crate::model::sort::{SortDirection, SortField, SortKey, SortSpec};
 use crate::model::{Comment, Dependency, DependencyType, Issue, IssueType, Priority, Status};
 use crate::storage::conn::compat::{OpenFlags, open_with_flags};
@@ -607,24 +608,24 @@ enum SearchIssueProjection {
     CommandText,
 }
 
-/// The text-match predicate every search query is built around.
+/// The scope a search runs over: `--in` when given, every field otherwise.
 ///
-/// It lives here alone so that the row query, the fast default-visible page,
-/// and the `COUNT(*)` backing `search --json`'s `total` cannot drift apart:
-/// a count that matched a different set of rows than the query would report a
-/// truthful-looking total for the wrong question. Callers must follow it with
-/// [`push_search_needle_params`] to bind its three placeholders.
-const SEARCH_TEXT_MATCH_SQL: &str =
-    "(instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0)";
+/// Read through this one function so that the row query, the fast
+/// default-visible page, and the `COUNT(*)` backing `search --json`'s `total`
+/// cannot drift apart: a count that matched a different set of rows than the
+/// query would report a truthful-looking total for the wrong question.
+fn search_scope(filters: &ListFilters) -> SearchScope {
+    filters.search_in.clone().unwrap_or_default()
+}
 
-/// Bind the three placeholders of [`SEARCH_TEXT_MATCH_SQL`] to one needle.
+/// Bind every placeholder of [`SearchScope::match_sql`] to one needle.
 ///
 /// The needle must already be lowercased — the predicate lowercases only the
 /// column side.
-fn push_search_needle_params(params: &mut Vec<SqliteValue>, needle: &str) {
-    params.push(SqliteValue::from(needle));
-    params.push(SqliteValue::from(needle));
-    params.push(SqliteValue::from(needle));
+fn push_search_needle_params(params: &mut Vec<SqliteValue>, needle: &str, scope: &SearchScope) {
+    for _ in 0..scope.placeholder_count() {
+        params.push(SqliteValue::from(needle));
+    }
 }
 
 /// The `WHERE` fragment shared by a search query and its count.
@@ -723,7 +724,7 @@ impl SearchIssueProjection {
             }
             Self::CommandText => {
                 r"SELECT id, title, description, status, priority, issue_type,
-                         created_at, updated_at
+                         created_at, updated_at, design, acceptance_criteria, notes
                   FROM issues
                   WHERE 1=1"
             }
@@ -4605,6 +4606,7 @@ impl SqliteStorage {
                 filters.include_deferred,
                 limit,
                 projection,
+                &search_scope(filters),
             );
         }
 
@@ -4754,18 +4756,21 @@ impl SqliteStorage {
         append_date_range_filters(&mut sql, &mut params, filters);
         append_exclusion_filters(&mut sql, &mut params, &filters.exclude);
 
-        let _ = write!(sql, " AND {SEARCH_TEXT_MATCH_SQL}");
-        push_search_needle_params(&mut params, &trimmed.to_ascii_lowercase());
+        let scope = search_scope(filters);
+        let _ = write!(sql, " AND {}", scope.match_sql());
+        push_search_needle_params(&mut params, &trimmed.to_ascii_lowercase(), &scope);
 
         Ok(SearchWhereClause::Clause { sql, params })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_default_visible_limited_page(
         &self,
         query: &str,
         include_deferred: bool,
         limit: usize,
         projection: SearchIssueProjection,
+        scope: &SearchScope,
     ) -> Result<Vec<Issue>> {
         let status_filter = if include_deferred {
             "status NOT IN ('closed', 'tombstone')"
@@ -4773,7 +4778,7 @@ impl SqliteStorage {
             "status NOT IN ('closed', 'tombstone', 'deferred')"
         };
         let needle = query.to_ascii_lowercase();
-        if !self.search_default_visible_has_match(status_filter, &needle)? {
+        if !self.search_default_visible_has_match(status_filter, &needle, scope)? {
             return Ok(Vec::new());
         }
 
@@ -4785,6 +4790,7 @@ impl SqliteStorage {
             Priority::CRITICAL.0,
             "created_at DESC, id ASC",
             limit,
+            scope,
         )?;
 
         let remaining = limit.saturating_sub(issues.len());
@@ -4797,21 +4803,28 @@ impl SqliteStorage {
                 Priority::CRITICAL.0,
                 "priority ASC, created_at DESC, id ASC",
                 remaining,
+                scope,
             )?);
         }
 
         Ok(issues)
     }
 
-    fn search_default_visible_has_match(&self, status_filter: &str, needle: &str) -> Result<bool> {
+    fn search_default_visible_has_match(
+        &self,
+        status_filter: &str,
+        needle: &str,
+        scope: &SearchScope,
+    ) -> Result<bool> {
         let sql = format!(
             "SELECT 1 FROM issues
              WHERE {status_filter}
-               AND {SEARCH_TEXT_MATCH_SQL}
-             LIMIT 1"
+               AND {}
+             LIMIT 1",
+            scope.match_sql()
         );
-        let mut params = Vec::with_capacity(3);
-        push_search_needle_params(&mut params, needle);
+        let mut params = Vec::with_capacity(scope.placeholder_count());
+        push_search_needle_params(&mut params, needle, scope);
         let rows = self.conn.query_with_params(&sql, &params)?;
         Ok(!rows.is_empty())
     }
@@ -4826,18 +4839,20 @@ impl SqliteStorage {
         priority_value: i32,
         order_by: &str,
         limit: usize,
+        scope: &SearchScope,
     ) -> Result<Vec<Issue>> {
         let sql = format!(
             r"{}
               AND {status_filter}
               AND {priority_predicate}
-              AND {SEARCH_TEXT_MATCH_SQL}
+              AND {match_sql}
               ORDER BY {order_by}
               LIMIT {limit}",
-            projection.select_clause()
+            projection.select_clause(),
+            match_sql = scope.match_sql()
         );
         let mut params = vec![SqliteValue::from(i64::from(priority_value))];
-        push_search_needle_params(&mut params, needle);
+        push_search_needle_params(&mut params, needle, scope);
         let rows = self.conn.query_with_params(&sql, &params)?;
         let mut issues = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -10298,9 +10313,9 @@ impl SqliteStorage {
             content_hash: None,
             title: get_str(1),
             description: get_non_empty_str(2),
-            design: None,
-            acceptance_criteria: None,
-            notes: None,
+            design: get_non_empty_str(8),
+            acceptance_criteria: get_non_empty_str(9),
+            notes: get_non_empty_str(10),
             status: parse_status(row.get(3).and_then(SqliteValue::as_text)),
             priority: Priority(get_opt_i32(4).unwrap_or_else(|| Priority::default().0)),
             issue_type: parse_issue_type(row.get(5).and_then(SqliteValue::as_text)),
@@ -10593,6 +10608,10 @@ pub struct ListFilters {
     pub offset: Option<usize>,
     /// Sort specification; `None` means the default ordering.
     pub sort: Option<SortSpec>,
+    /// Which fields `search` matches its query against; `None` means every
+    /// field (see [`SearchScope::default_scope`]). Ignored by `list`, which
+    /// has no query text to match.
+    pub search_in: Option<SearchScope>,
     /// Reverse sort order
     pub reverse: bool,
     /// Filter by labels (all specified labels must match)
@@ -20128,9 +20147,27 @@ mod tests {
             .find(|issue| issue.id == "bd-search-proj-a")
             .unwrap();
         assert!(projected_description_match.description.is_some());
-        assert!(projected_description_match.design.is_none());
-        assert!(projected_description_match.acceptance_criteria.is_none());
-        assert!(projected_description_match.notes.is_none());
+
+        // The three prose fields are loaded even though the result *line* does
+        // not print them: `search` matches against them, so its text renderer
+        // needs their text to show which one a hit came from. Leaving them out
+        // was what made a `design`-only match render as a bare title with no
+        // stated reason.
+        assert_eq!(
+            projected_description_match.design.as_deref(),
+            description_match.design.as_deref()
+        );
+        assert_eq!(
+            projected_description_match.acceptance_criteria.as_deref(),
+            description_match.acceptance_criteria.as_deref()
+        );
+        assert_eq!(
+            projected_description_match.notes.as_deref(),
+            description_match.notes.as_deref()
+        );
+
+        // ...and the projection is still narrow everywhere it can afford to
+        // be: nothing matches against `owner`, so it is not read.
         assert!(projected_description_match.owner.is_none());
     }
 

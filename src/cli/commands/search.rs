@@ -1,6 +1,7 @@
 //! Search command implementation.
 //!
-//! Classic bd-style LIKE search across title/description/id with list-like filters.
+//! Substring search across every field `br show` renders, with list-like
+//! filters. `--in` narrows which fields are matched.
 
 use crate::cli::{
     DEFAULT_LIST_OFFSET, DEFAULT_SEARCH_LIMIT, ListArgs, OutputFormat, SearchArgs,
@@ -12,6 +13,7 @@ use crate::format::{
     IssueWithCounts, TextFormatOptions, csv, format_issue_line_with, markdown::strip_markdown,
     terminal_width,
 };
+use crate::model::search::{SearchField, SearchScope};
 use crate::model::sort::SortSpec;
 use crate::model::{Issue, IssueType, Priority, Status};
 use crate::output::{IssueTable, IssueTableColumns, JsonArrayPageMeta, OutputContext, OutputMode};
@@ -60,12 +62,14 @@ pub fn execute_with_storage_ctx(
     storage_ctx: &config::OpenStorageResult,
 ) -> Result<()> {
     let query = validate_query(args)?;
+    let scope = build_scope(args)?;
     let storage = &storage_ctx.storage;
     let output_format = resolve_output_format_with_outer_mode(
         args.filters.format,
         outer_ctx.inherited_output_mode(),
     );
-    let page = collect_search_results_for_output(storage, query, &args.filters, output_format)?;
+    let page =
+        collect_search_results_for_output(storage, query, &args.filters, output_format, &scope)?;
     render_search_results(
         storage,
         page,
@@ -74,7 +78,21 @@ pub fn execute_with_storage_ctx(
         output_format,
         cli,
         storage_ctx,
+        &scope,
     )
+}
+
+/// Resolve `--in` to the fields this search matches against.
+///
+/// Absent, it is every field: a bare `br search` reaches all the prose
+/// `br show` renders. It used to reach only title, description and id, so a
+/// term that appeared solely in `design`, `acceptance_criteria` or `notes`
+/// was unfindable by any flag combination the CLI offered.
+fn build_scope(args: &SearchArgs) -> Result<SearchScope> {
+    match args.search_in.as_deref() {
+        Some(raw) => raw.parse(),
+        None => Ok(SearchScope::default_scope()),
+    }
 }
 
 fn validate_query(args: &SearchArgs) -> Result<&str> {
@@ -119,7 +137,15 @@ fn collect_search_results(
     query: &str,
     list_args: &ListArgs,
 ) -> Result<Vec<Issue>> {
-    Ok(collect_search_results_with_projection(storage, query, list_args, false, false)?.issues)
+    Ok(collect_search_results_with_projection(
+        storage,
+        query,
+        list_args,
+        false,
+        false,
+        &SearchScope::default_scope(),
+    )?
+    .issues)
 }
 
 fn collect_search_results_for_output(
@@ -127,6 +153,7 @@ fn collect_search_results_for_output(
     query: &str,
     list_args: &ListArgs,
     output_format: OutputFormat,
+    scope: &SearchScope,
 ) -> Result<SearchPage> {
     collect_search_results_with_projection(
         storage,
@@ -134,6 +161,7 @@ fn collect_search_results_for_output(
         list_args,
         matches!(output_format, OutputFormat::Text),
         matches!(output_format, OutputFormat::Json),
+        scope,
     )
 }
 
@@ -143,8 +171,10 @@ fn collect_search_results_with_projection(
     list_args: &ListArgs,
     use_text_projection: bool,
     needs_total: bool,
+    scope: &SearchScope,
 ) -> Result<SearchPage> {
     let mut filters = build_filters(list_args)?;
+    filters.search_in = Some(scope.clone());
     let sort_spec = filters.sort.clone();
     let client_filters = needs_client_filters(list_args);
     let needs_post_query_ordering = requires_post_query_ordering(list_args, client_filters);
@@ -213,6 +243,7 @@ fn render_search_results(
     output_format: OutputFormat,
     cli: &config::CliOverrides,
     storage_ctx: &config::OpenStorageResult,
+    scope: &SearchScope,
 ) -> Result<()> {
     let SearchPage { issues, total } = page;
     let quiet = cli.quiet.unwrap_or(false);
@@ -257,7 +288,7 @@ fn render_search_results(
     let ctx = OutputContext::from_output_format(output_format, quiet, !use_color);
 
     if matches!(ctx.mode(), OutputMode::Rich) {
-        let context_snippets = build_context_snippets(&issues, query);
+        let context_snippets = build_context_snippets(&issues, query, scope);
         let show_context = !context_snippets.is_empty();
         let columns = IssueTableColumns {
             id: true,
@@ -293,9 +324,16 @@ fn render_search_results(
         issues.len(),
         query
     ));
+    let highlight = build_highlight_regex(query);
     for issue in &issues {
         let line = format_issue_line_with(issue, format_options);
         ctx.print_line(&line);
+        if let Some(regex) = highlight.as_ref()
+            && let Some(context) = issue_match_context(issue, regex, scope)
+            && context.needs_explanation()
+        {
+            ctx.print_line(&format!("    {}", context.display()));
+        }
     }
 
     Ok(())
@@ -350,43 +388,127 @@ fn issue_with_counts(
     }
 }
 
-fn build_context_snippets(issues: &[crate::model::Issue], query: &str) -> HashMap<String, String> {
+/// The prose fields a snippet can be drawn from, in the order they are tried.
+///
+/// Deliberately not [`SearchField::ALL`] order: `description` stays first so
+/// its snippet — the only one that existed before `design`,
+/// `acceptance_criteria` and `notes` became searchable — is unchanged for
+/// every result that used to produce one.
+const SNIPPET_FIELDS: &[SearchField] = &[
+    SearchField::Description,
+    SearchField::Design,
+    SearchField::AcceptanceCriteria,
+    SearchField::Notes,
+];
+
+/// Where a result matched, and the text around the match.
+struct MatchContext {
+    field: SearchField,
+    snippet: String,
+}
+
+impl MatchContext {
+    /// The context line, labelled with its field when that field is prose the
+    /// result row does not otherwise show. A `description` hit stays
+    /// unlabelled, as it always was, and an id hit carries its own wording.
+    fn display(&self) -> String {
+        match self.field {
+            SearchField::Description | SearchField::Id | SearchField::Title => self.snippet.clone(),
+            field => format!("{}: {}", field.heading(), self.snippet),
+        }
+    }
+
+    /// Did this match come from prose that only became searchable when the
+    /// default scope widened past title/description/id?
+    ///
+    /// Those are the results a plain-text listing has to explain: the line it
+    /// prints shows the title, so a hit anywhere else looks arbitrary without
+    /// one. Hits the old scope could already find stay unannotated, which is
+    /// what keeps plain output byte-identical for every query that worked
+    /// before.
+    const fn needs_explanation(&self) -> bool {
+        matches!(
+            self.field,
+            SearchField::Design | SearchField::AcceptanceCriteria | SearchField::Notes
+        )
+    }
+}
+
+fn build_context_snippets(
+    issues: &[crate::model::Issue],
+    query: &str,
+    scope: &SearchScope,
+) -> HashMap<String, String> {
     let Some(regex) = build_highlight_regex(query) else {
         return HashMap::new();
     };
 
     let mut snippets = HashMap::new();
     for issue in issues {
-        if let Some(description) = issue.description.as_deref() {
-            // Strip markdown first to ensure markers are recognized at line starts.
-            let stripped = strip_markdown(description);
-
-            // Try to find match in stripped text first
-            if let Some(mat) = regex.find(&stripped) {
-                let snippet = snippet_around_match(&stripped, mat.start(), mat.end(), 32);
-                if !snippet.is_empty() {
-                    snippets.insert(issue.id.clone(), snippet);
-                    continue;
-                }
-            }
-
-            // Fallback: if the match exists in raw but not stripped, use raw snippet
-            // (some matches may disappear after stripping; better to show something than nothing)
-            if let Some(mat) = regex.find(description) {
-                let snippet = snippet_around_match(description, mat.start(), mat.end(), 32);
-                if !snippet.is_empty() {
-                    snippets.insert(issue.id.clone(), snippet);
-                    continue;
-                }
-            }
-        }
-
-        if regex.is_match(&issue.id) && !regex.is_match(&issue.title) {
-            snippets.insert(issue.id.clone(), "ID match".to_string());
+        if let Some(context) = issue_match_context(issue, &regex, scope) {
+            snippets.insert(issue.id.clone(), context.display());
         }
     }
 
     snippets
+}
+
+/// Why this issue matched.
+fn issue_match_context(
+    issue: &crate::model::Issue,
+    regex: &Regex,
+    scope: &SearchScope,
+) -> Option<MatchContext> {
+    for &field in SNIPPET_FIELDS {
+        if !scope.fields().contains(&field) {
+            continue;
+        }
+        let body = match field {
+            SearchField::Description => issue.description.as_deref(),
+            SearchField::Design => issue.design.as_deref(),
+            SearchField::AcceptanceCriteria => issue.acceptance_criteria.as_deref(),
+            SearchField::Notes => issue.notes.as_deref(),
+            SearchField::Id | SearchField::Title => None,
+        };
+        let Some(body) = body else { continue };
+        if let Some(snippet) = prose_snippet(body, regex) {
+            return Some(MatchContext { field, snippet });
+        }
+    }
+
+    if scope.fields().contains(&SearchField::Id)
+        && regex.is_match(&issue.id)
+        && !regex.is_match(&issue.title)
+    {
+        return Some(MatchContext {
+            field: SearchField::Id,
+            snippet: "ID match".to_string(),
+        });
+    }
+
+    None
+}
+
+fn prose_snippet(body: &str, regex: &Regex) -> Option<String> {
+    // Strip markdown first to ensure markers are recognized at line starts.
+    let stripped = strip_markdown(body);
+    if let Some(mat) = regex.find(&stripped) {
+        let snippet = snippet_around_match(&stripped, mat.start(), mat.end(), 32);
+        if !snippet.is_empty() {
+            return Some(snippet);
+        }
+    }
+
+    // Fallback: if the match exists in raw but not stripped, use raw snippet
+    // (some matches may disappear after stripping; better to show something than nothing)
+    if let Some(mat) = regex.find(body) {
+        let snippet = snippet_around_match(body, mat.start(), mat.end(), 32);
+        if !snippet.is_empty() {
+            return Some(snippet);
+        }
+    }
+
+    None
 }
 
 fn build_highlight_regex(query: &str) -> Option<Regex> {
@@ -1201,7 +1323,8 @@ mod tests {
             ),
             ..Issue::default()
         };
-        let snippets = build_context_snippets(&[issue], "Configuration");
+        let snippets =
+            build_context_snippets(&[issue], "Configuration", &SearchScope::default_scope());
 
         let snippet = snippets.get("bd-test").expect("snippet exists");
         // The header marker ## should be stripped even though the snippet starts with ...
@@ -1222,7 +1345,7 @@ mod tests {
             ),
             ..Issue::default()
         };
-        let snippets = build_context_snippets(&[issue], "bold");
+        let snippets = build_context_snippets(&[issue], "bold", &SearchScope::default_scope());
 
         let snippet = snippets.get("bd-test").expect("snippet exists");
         // Even though there's an unterminated backtick on an earlier line,
@@ -1243,7 +1366,7 @@ mod tests {
             ..Issue::default()
         };
         // Search for something that only matches raw markdown (the ** markers)
-        let snippets = build_context_snippets(&[issue], "**");
+        let snippets = build_context_snippets(&[issue], "**", &SearchScope::default_scope());
 
         let snippet = snippets.get("bd-test").expect("snippet exists");
         // Fallback should have produced a snippet with the raw text (** not

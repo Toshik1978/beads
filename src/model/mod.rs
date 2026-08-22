@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+pub mod search;
 pub mod sort;
 
 /// Deserialize an optional metadata string, coercing a degenerate empty (or
