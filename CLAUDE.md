@@ -54,11 +54,20 @@ rewritable once pushed.
 env -u RUSTUP_TOOLCHAIN task check
 ```
 
-It runs, in order: `toolchain:check`, `format:check`, `lint` (clippy over
-every target), and `test` (the full suite, no-fail-fast).
+It runs, in order: `toolchain:check`, `tools:check`, `format:check`, `lint`
+(clippy over every target), and `test` (the full suite, no-fail-fast).
 
-`test` needs **cargo-nextest** on your `PATH`. Install a prebuilt binary
-rather than building it from source:
+`test` needs **cargo-nextest** on your `PATH`, and that is what `tools:check`
+is there to say early: nextest is neither a rustup component nor a
+`Cargo.lock` entry, so a fresh clone builds fine and cannot test, and without
+the guard the absence surfaced only after a full clippy pass as a bare `no
+such command: nextest`. It checks rustfmt and clippy too, and installs
+nothing — CONTRIBUTING.md is the prerequisite list. CI does not run it: each
+workflow job installs exactly the tools its own step needs, so a whole-gate
+assertion would fail the format, lint and docs jobs over a runner they never
+invoke.
+
+Install a prebuilt binary rather than building it from source:
 
 ```sh
 curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
@@ -323,6 +332,7 @@ SPDX identifier; `tests/licensing.rs` pins both of those facts.
 
 ## Useful commands
 
+- `env -u RUSTUP_TOOLCHAIN task tools:check` — assert rustfmt, clippy and cargo-nextest are on `PATH`; prints the install line for whichever is missing. Runs as the second step of `task check`.
 - `env -u RUSTUP_TOOLCHAIN task build` — build the `br` binary and every test target.
 - `env -u RUSTUP_TOOLCHAIN task test` — run the full suite under nextest, then the doctests. `--workspace` reaches `test-support`'s own tests.
 - `env -u RUSTUP_TOOLCHAIN task test:lib` — unit tests only, skips the slower integration binaries.

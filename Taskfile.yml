@@ -11,8 +11,56 @@ vars:
   TEST_FAILURES: /tmp/beads-failing.txt
 
 tasks:
-  setup:ci:
-    desc: Prepare the workspace on CI
+  # `toolchain:check` below guards *which* compiler runs the gate; this guards
+  # whether the gate can run at all.
+  #
+  # cargo-nextest is the one that bites: it is not a rustup component and not
+  # in Cargo.lock, so a fresh clone has everything needed to build and nothing
+  # needed to test. Without this the absence surfaces at the `test` step —
+  # after a full clippy pass has already been paid for — as a bare
+  # `no such command: nextest` that does not say where to get it.
+  #
+  # Deliberately a check and not an installer, for the same reason
+  # `toolchain:check` detects rather than unsets: CONTRIBUTING.md is the
+  # prerequisite list, and a task that quietly curled binaries into
+  # ~/.cargo/bin would make that list a description of what someone once read
+  # rather than a contract.
+  #
+  # CI does not call this, and should not. Each workflow job installs exactly
+  # the tools its own step needs — the format, lint and docs jobs have no
+  # nextest by design — so a whole-gate assertion would fail four of them over
+  # tools they never invoke.
+  tools:check:
+    desc: Fail unless the tools `task check` needs are on PATH
+    # `silent` suppresses Task's echo of the script; the guard's own output
+    # still prints. Same reasoning as toolchain:check.
+    silent: true
+    cmd: |
+      missing=0
+      report() {
+        echo "  ${1}" >&2
+        echo "      ${2}" >&2
+        missing=1
+      }
+      case "$(uname -s)" in
+        Darwin) nextest_os=mac ;;
+        *)      nextest_os=linux ;;
+      esac
+      cargo fmt --version >/dev/null 2>&1 ||
+        report "rustfmt      — task format:check" "rustup component add rustfmt"
+      cargo clippy --version >/dev/null 2>&1 ||
+        report "clippy       — task lint" "rustup component add clippy"
+      cargo nextest --version >/dev/null 2>&1 ||
+        report "cargo-nextest — task test" \
+          "curl -LsSf https://get.nexte.st/latest/${nextest_os} | tar zxf - -C \"\${CARGO_HOME:-\$HOME/.cargo}/bin\""
+      if [ "${missing}" -ne 0 ]; then
+        echo "" >&2
+        echo "tools:check: the commands above are not on PATH." >&2
+        echo "  Prebuilt binaries only — building nextest from source is slow" >&2
+        echo "  and buys nothing. Full prerequisite list: CONTRIBUTING.md" >&2
+        exit 1
+      fi
+      echo "tools: rustfmt, clippy and cargo-nextest present"
 
   # Nothing in this repository pins a toolchain (see CLAUDE.md), so a stale
   # `RUSTUP_TOOLCHAIN` in a contributor's shell silently runs the whole gate on
@@ -336,6 +384,7 @@ tasks:
     desc: Everything CI runs
     cmds:
       - task: toolchain:check
+      - task: tools:check
       - task: format:check
       - task: lint
       - task: test

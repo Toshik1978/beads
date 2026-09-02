@@ -69,9 +69,16 @@ Run the gate. It is exactly what CI runs, and it must exit 0:
 env -u RUSTUP_TOOLCHAIN task check
 ```
 
-That is `toolchain:check`, `format:check`, `lint` (clippy over every target,
-pedantic + nursery) and `test` (the full suite under nextest, then the
-doctests). It takes a couple of minutes.
+That is `toolchain:check`, `tools:check`, `format:check`, `lint` (clippy over
+every target, pedantic + nursery) and `test` (the full suite under nextest,
+then the doctests). It takes a couple of minutes.
+
+`tools:check` is the cheap one, and it runs second so that a missing tool
+costs a second rather than the clippy pass it used to hide behind. It asserts
+rustfmt, clippy and cargo-nextest are on `PATH` and prints the install line
+for whichever is not. It installs nothing itself — the list above is the
+contract. Run `env -u RUSTUP_TOOLCHAIN task tools:check` on its own after
+setting up a new machine.
 
 The pre-push hook runs clippy and the licensing guard, so a push will catch
 those two even if you forget. Do not skip hooks and do not reach for

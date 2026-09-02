@@ -54,7 +54,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: go-task/setup-task@v2
       - uses: dtolnay/rust-toolchain@stable
-      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
       - run: env -u RUSTUP_TOOLCHAIN task format:check
 
@@ -85,7 +84,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
-      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
       # Needs a C compiler for rusqlite's bundled SQLite; both images ship one.
       - run: env -u RUSTUP_TOOLCHAIN task lint
@@ -103,7 +101,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
-      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
       - run: env -u RUSTUP_TOOLCHAIN task audit
 
@@ -135,7 +132,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
       - run: env -u RUSTUP_TOOLCHAIN task test
 
@@ -171,7 +167,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
-      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
 
       # Doctests are not instrumented: nextest cannot run them and merging

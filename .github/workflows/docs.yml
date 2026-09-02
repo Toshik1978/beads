@@ -52,7 +52,6 @@ jobs:
       - uses: go-task/setup-task@v2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: env -u RUSTUP_TOOLCHAIN task setup:ci
       - run: env -u RUSTUP_TOOLCHAIN task toolchain:check
       # The test shells out to `git ls-files`, so it needs a real repository.
       - run: env -u RUSTUP_TOOLCHAIN cargo test --test licensing
