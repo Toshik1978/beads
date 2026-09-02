@@ -129,11 +129,19 @@ container](#why-the-build-runs-in-a-container).
 
 ```sh
 git commit -am 'chore(release): v1.1.0'
-git tag v1.1.0
+git tag -m 'bump: version 1.1.0' v1.1.0
 git push origin main v1.1.0
 ```
 
 The tag push is what starts the workflow.
+
+**The `-m` is not optional.** Every tag in this repository is annotated and
+carries that message, and a bare `git tag v1.1.0` does not produce a lighter
+version of the same thing — under a `tag.gpgsign` config it fails outright with
+`fatal: no tag message?`, because signing implies annotation and annotation
+needs a message it cannot get from a non-interactive shell. Writing it out also
+keeps the tag object's message consistent with the ones before it, whatever the
+tagger's config happens to be.
 
 ## What the workflow does, in order
 

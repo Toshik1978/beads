@@ -244,7 +244,16 @@ tasks:
   build:cross:
     desc: Prove every release target builds and links with the bundled C SQLite
     vars:
-      PLATFORM: '{{.PLATFORM | default "linux/arm64"}}'
+      # The container architecture is incidental here: all four release targets
+      # are cross-compiled either way, so this is only "where the build runs".
+      # It was pinned to linux/arm64, which on an x86_64 host pulls the wrong
+      # image and dies with `exec /usr/bin/bash: exec format error` — after the
+      # pull. Derived from the host instead; override to test the other arch.
+      # (`test:linux` keeps its fixed default deliberately: varying that axis is
+      # that task's whole purpose, and `test:linux:amd64` is the counterpart.)
+      HOST_PLATFORM:
+        sh: case "$(uname -m)" in aarch64|arm64) echo linux/arm64 ;; *) echo linux/amd64 ;; esac
+      PLATFORM: '{{.PLATFORM | default .HOST_PLATFORM}}'
       IMAGE: '{{.IMAGE | default "ghcr.io/rust-cross/cargo-zigbuild:latest"}}'
       JOBS: '{{.JOBS | default "4"}}'
     cmd: |
@@ -323,7 +332,16 @@ tasks:
   release:snapshot:
     desc: Build every release archive locally, in the image the release job uses
     vars:
-      PLATFORM: '{{.PLATFORM | default "linux/arm64"}}'
+      # The container architecture is incidental here: all four release targets
+      # are cross-compiled either way, so this is only "where the build runs".
+      # It was pinned to linux/arm64, which on an x86_64 host pulls the wrong
+      # image and dies with `exec /usr/bin/bash: exec format error` — after the
+      # pull. Derived from the host instead; override to test the other arch.
+      # (`test:linux` keeps its fixed default deliberately: varying that axis is
+      # that task's whole purpose, and `test:linux:amd64` is the counterpart.)
+      HOST_PLATFORM:
+        sh: case "$(uname -m)" in aarch64|arm64) echo linux/arm64 ;; *) echo linux/amd64 ;; esac
+      PLATFORM: '{{.PLATFORM | default .HOST_PLATFORM}}'
       IMAGE: '{{.IMAGE | default "ghcr.io/rust-cross/cargo-zigbuild:0.23.0"}}'
       GORELEASER: '{{.GORELEASER | default "2.17.1"}}'
       JOBS: '{{.JOBS | default "4"}}'
