@@ -9,6 +9,66 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.8.1 — 2026-09-02
+
+A patch release: one user-visible fix, and one piece of repository hygiene
+that had been quietly doing nothing for a long time.
+
+`br show` rendered a close reason as a single long line with a literal `\n`
+wherever a paragraph break belonged. The field is prose — `br close
+--reason-file` exists precisely to accept a reason too long or too
+markdown-shaped to pass through shell quoting — but it was being rendered as a
+scalar metadata row, and metadata rows escape newlines on purpose, so that a
+value cannot forge a row or break a table. The escaping was right; the field
+was in the wrong bucket.
+
+### Highlights
+
+- **A close reason renders as prose.** `Closed:` now carries the date alone
+  and the reason follows as its own `Close Reason` section, wrapped and
+  unescaped like Design, Acceptance Criteria and Notes. Both renderers move
+  together: the Plain renderer's three hand-written prose blocks are replaced
+  by a loop over the shared field list the Rich panel already iterated, so a
+  section added in one place appears in both rather than in whichever one the
+  author remembered. Nothing machine-readable changes — the stored value
+  always held real newlines, and `--json` always emitted them; only the
+  terminal rendering escaped them.
+- **`task check` names a missing tool in the first second, instead of the last
+  step.** `cargo-nextest` is neither a rustup component nor a `Cargo.lock`
+  entry, so a fresh clone builds fine and cannot test — and that surfaced only
+  at `test`, after a full clippy pass had already been paid for, as a bare `no
+  such command: nextest` that does not say where to get it. The new
+  `tools:check` asserts rustfmt, clippy and nextest respond and prints the
+  install line for whichever does not. It takes the place of `setup:ci`, which
+  had been a task with a description and no body since the initial commit,
+  invoked by six CI steps to do nothing at all.
+
+### What this deliberately does not do
+
+- **Titles, owners and labels keep their inline escaping.** "Render newlines
+  properly everywhere" is the wrong rule: a newline in a title or a label
+  forges a row in `br show` and breaks every table that prints one. Only the
+  fields that accept prose moved, and `close_reason` was the only one on the
+  wrong side of that line.
+- **`tools:check` installs nothing, and CI does not call it.**
+  CONTRIBUTING.md is the prerequisite list, and a task that quietly curled
+  binaries into `~/.cargo/bin` would make that list a description of what
+  someone once read rather than a contract — the same reasoning that has
+  `toolchain:check` detect a stale toolchain rather than unset it. CI stays
+  out because each workflow job installs exactly the tools its own step needs:
+  the format, lint, audit and docs jobs have no nextest by design, and a
+  whole-gate assertion would fail all four over a runner they never invoke.
+
+### Bug Fixes
+
+- [e96e4dc](https://github.com/Toshik1978/beads/commit/e96e4dc61b99f104b024305d2dfa1123de8525d6) fix(show): render a close reason as prose, not a metadata row
+
+### Others
+
+- [0e56a28](https://github.com/Toshik1978/beads/commit/0e56a28e2bf821f7998bd2042a7ba525ba266b9f) build(taskfile): replace the empty setup:ci with a real tools:check
+
+---
+
 ## v1.8.0 — 2026-08-22
 
 `br search` stops understating its own scope. It matched `title`, `description`
