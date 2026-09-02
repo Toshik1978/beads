@@ -10,6 +10,7 @@ use crate::error::{BeadsError, Result};
 use crate::format::{
     IssueDetails, IssueWithDependencyMetadata, format_priority_label, format_status_icon_colored,
     format_status_label, format_type_label, sanitize_terminal_inline, sanitize_terminal_text,
+    show_fields,
 };
 use crate::model::{Dependency, Issue, Priority, Status};
 use crate::output::{IssuePanel, OutputContext, OutputMode};
@@ -1142,13 +1143,7 @@ fn format_issue_details(details: &IssueDetails, use_color: bool, wrap: bool) -> 
     }
 
     if let Some(closed) = &issue.closed_at {
-        let reason_str = issue.close_reason.as_deref().unwrap_or("closed");
-        let _ = writeln!(
-            output,
-            "Closed: {} ({})",
-            to_local(*closed).format("%Y-%m-%d"),
-            sanitize_terminal_inline(reason_str)
-        );
+        let _ = writeln!(output, "Closed: {}", to_local(*closed).format("%Y-%m-%d"));
     }
 
     if let Some(desc) = &issue.description {
@@ -1160,39 +1155,16 @@ fn format_issue_details(details: &IssueDetails, use_color: bool, wrap: bool) -> 
         );
     }
 
-    if let Some(design) = &issue.design
-        && !design.is_empty()
-    {
+    // Design / Acceptance Criteria / Notes / Close Reason, straight from the
+    // shared list rather than one hand-written block each, so a section added
+    // to `show_fields` appears here as well as in the Rich panel.
+    for section in show_fields::prose_sections(issue) {
         output.push('\n');
-        let _ = writeln!(output, "Design:");
+        let _ = writeln!(output, "{}:", section.heading);
         let _ = writeln!(
             output,
             "{}",
-            wrap_body(sanitize_terminal_text(design).as_ref(), wrap_width)
-        );
-    }
-
-    if let Some(ac) = &issue.acceptance_criteria
-        && !ac.is_empty()
-    {
-        output.push('\n');
-        let _ = writeln!(output, "Acceptance Criteria:");
-        let _ = writeln!(
-            output,
-            "{}",
-            wrap_body(sanitize_terminal_text(ac).as_ref(), wrap_width)
-        );
-    }
-
-    if let Some(notes) = &issue.notes
-        && !notes.is_empty()
-    {
-        output.push('\n');
-        let _ = writeln!(output, "Notes:");
-        let _ = writeln!(
-            output,
-            "{}",
-            wrap_body(sanitize_terminal_text(notes).as_ref(), wrap_width)
+            wrap_body(sanitize_terminal_text(section.body).as_ref(), wrap_width)
         );
     }
 
@@ -1299,7 +1271,7 @@ mod tests {
             4,
             "the fixture must populate every metadata row, or this proves less than it claims"
         );
-        assert_eq!(sections.len(), 3, "the fixture must populate every section");
+        assert_eq!(sections.len(), 4, "the fixture must populate every section");
 
         let details = IssueDetails {
             issue,
@@ -1330,6 +1302,46 @@ mod tests {
                 "the Plain renderer omits the `{heading}` body. Full output:\n{rendered}"
             );
         }
+    }
+
+    /// A close reason is prose, not a scalar. It used to be parenthesised onto
+    /// the `Closed:` metadata row, where both renderers escape values with
+    /// `sanitize_terminal_inline` -- so a reason written across paragraphs came
+    /// out as one line with a literal `\n` in it, which is precisely what
+    /// `br close --reason-file` produces.
+    #[test]
+    fn close_reason_renders_as_prose_with_real_newlines() {
+        let issue = Issue {
+            id: "bd-reason".to_string(),
+            title: "Multi-paragraph close reason".to_string(),
+            status: Status::Closed,
+            closed_at: Some(Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap()),
+            close_reason: Some("First paragraph.\n\nSecond paragraph.".to_string()),
+            ..Issue::default()
+        };
+        let details = IssueDetails {
+            issue,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            comments: Vec::new(),
+            parent: None,
+        };
+
+        let rendered = format_issue_details(&details, false, false);
+
+        assert!(
+            !rendered.contains("\\n"),
+            "the close reason was escaped rather than laid out. Full output:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Close Reason:\nFirst paragraph.\n\nSecond paragraph."),
+            "the close reason is not a prose section. Full output:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Closed: 2026-01-03\n"),
+            "the Closed row should carry the date alone. Full output:\n{rendered}"
+        );
     }
 
     fn init_logging() {

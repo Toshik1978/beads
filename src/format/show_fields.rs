@@ -42,6 +42,13 @@ pub struct ProseSection<'a> {
 ///
 /// Absent and empty values are skipped, so an issue with no defer date does
 /// not render an empty `Deferred until:` row.
+///
+/// `Closed` carries the date alone. The close reason used to be parenthesised
+/// onto it, which made a prose field into a scalar one: both renderers escape
+/// metadata values with `sanitize_terminal_inline`, so a reason written across
+/// paragraphs -- exactly what `br close --reason-file` exists to accept --
+/// came out as one long line with literal `\n` in it. It is a prose section
+/// now, wrapped and unescaped like Design and Notes.
 #[must_use]
 pub fn metadata_rows(issue: &Issue) -> Vec<MetadataRow> {
     let mut rows = Vec::new();
@@ -66,11 +73,7 @@ pub fn metadata_rows(issue: &Issue) -> Vec<MetadataRow> {
         );
     }
     if let Some(closed) = issue.closed_at {
-        let reason = issue.close_reason.as_deref().unwrap_or("closed");
-        push(
-            "Closed",
-            format!("{} ({reason})", to_local(closed).format("%Y-%m-%d")),
-        );
+        push("Closed", to_local(closed).format("%Y-%m-%d").to_string());
     }
 
     rows
@@ -83,6 +86,7 @@ pub fn prose_sections(issue: &Issue) -> Vec<ProseSection<'_>> {
         ("Design", issue.design.as_deref()),
         ("Acceptance Criteria", issue.acceptance_criteria.as_deref()),
         ("Notes", issue.notes.as_deref()),
+        ("Close Reason", issue.close_reason.as_deref()),
     ]
     .into_iter()
     .filter_map(|(heading, body)| {
