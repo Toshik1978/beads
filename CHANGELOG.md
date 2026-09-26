@@ -9,6 +9,55 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.8.2 — 2026-09-26
+
+A patch release for a sync bug that lost data between clones, plus two
+related oddities it explained.
+
+An issue renamed on one clone — by `br rename`, `br detach`, or a reparent
+with `br update --parent` — never arrived on a clone that still held it under
+its old id. The renamed record keeps its `external_ref`, and without one it
+hashes like the old row, because the content hash leaves the id out; import
+matched it to the old row on either ground and folded the new id into it. The
+old id's tombstone then lost to what had just been written, the import still
+recorded the file as imported, and every later `br sync --import-only` said
+the JSONL was current. The next write on that clone exported its stale state
+back over the pulled file, dropping the renamed ids from it.
+
+### Highlights
+
+- **Renames from another clone land.** An `external_ref` or content-hash
+  match may now reach only a local issue the file does not carry under its
+  own id — a file cannot hold two records for one issue. When the file moves
+  an `external_ref` to a new id, the old row gives it up, so the new record
+  is not rejected by the uniqueness constraint when its id sorts first.
+- **Keeping a local row on import no longer switches off the export guard.**
+  When import kept a newer local row over the file's copy, it set a flag that
+  made the next write a full export with the stale-database guard disabled,
+  which is what let the stale state overwrite the file. That row is now
+  simply marked dirty and flushed like any other local edit. This is also why
+  `br sync --status` could report "Database is newer" straight after an
+  import.
+- **JSONL line order no longer depends on which writer ran last.** An
+  ordinary create appended its line to the end of the file, while a full
+  export writes in id order, so a forced full export produced a diff that
+  only moved lines. New lines now go where a full export would put them.
+
+### Recovering a clone that already hit this
+
+Upgrading does not repair a database that an earlier import already got
+wrong, because that import recorded the file as applied. Restore the JSONL
+from git if a later write overwrote it, then run
+`br sync --import-only --rebuild`.
+
+
+### Bug Fixes
+
+- [882acad](https://github.com/Toshik1978/beads/commit/882acad406cc8e9fa8af363b36bcf7b89c9cbd88) fix(release): derive the container platform from the host, and document the tag message
+- [5100c1a](https://github.com/Toshik1978/beads/commit/5100c1a203c232a3ac0a080e0f383e07f40b213f) fix(sync): land renames from another clone, and keep flushes guarded
+
+---
+
 ## v1.8.1 — 2026-09-02
 
 A patch release: one user-visible fix, and one piece of repository hygiene
