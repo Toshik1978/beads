@@ -9,6 +9,55 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.9.0 — 2026-09-26
+
+A feature release for teams working on branches. `issues.jsonl` holds one issue
+per line in id order, so git's line merge conflicted whenever two branches
+edited neighbouring issues. That is most rebases once beads travel with
+feature-branch commits. `br merge-driver` merges the file by issue id instead.
+The release also fixes one sync representation difference, and picks up the
+dependency updates made since v1.8.2, including a TLS security fix.
+
+### Highlights
+
+- **`br merge-driver`, a git merge driver for `issues.jsonl`.** Wire it up
+  once per clone with `.beads/issues.jsonl merge=beads` in `.gitattributes`
+  and `git config merge.beads.driver "br merge-driver %O %A %B"`.
+  - A change made on one side wins.
+  - When both sides changed an issue, each field comes from the side that
+    changed it, and a field both sides changed takes the later `updated_at`.
+  - Labels, dependencies and comments merge as sets, so a comment added on
+    each branch keeps both.
+  - A tombstone beats an edit on the other side, which would otherwise revive
+    a deleted or renamed-away issue. The dropped edit is reported on stderr.
+  - The output is written in id order, and an unchanged record keeps its bytes.
+  - Unreadable input makes it exit non-zero without writing anything, so git
+    reports an ordinary conflict.
+  - It never touches the database: the next command's auto-import reads the
+    merged file.
+- **Every clone exports a tombstone the same way.** `br delete` and a rename
+  tombstone an open issue without setting `closed_at`, so the clone that made
+  the tombstone exported `null`. Every clone that imported it filled the field
+  in from `updated_at` and exported that. Export now fills it in the same way,
+  so a forced full export no longer rewrites those lines for no semantic
+  change. A file written before this release changes once, at its next full
+  export.
+- **rustls 0.23.45, for RUSTSEC-2026-0285** (TLS 1.3 handshake messages
+  accepted across encryption-level boundaries, medium severity). rustls is
+  used only by `br remote`'s HTTPS client. The rest of the lockfile moved to
+  the latest compatible versions at the same time.
+
+
+### Features
+
+- [eae9a18](https://github.com/Toshik1978/beads/commit/eae9a18666de0bbe047d660fc2acfb886bbeaadc) feat(sync): add br merge-driver, a git merge driver for issues.jsonl
+
+### Bug Fixes
+
+- [2dab9bf](https://github.com/Toshik1978/beads/commit/2dab9bfafc2a2ca70face75fc7831a699c6bcd92) fix(sync): export a tombstone's closed_at the same way from every clone
+
+---
+
 ## v1.8.2 — 2026-09-26
 
 A patch release for a sync bug that lost data between clones, plus two
