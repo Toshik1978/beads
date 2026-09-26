@@ -107,6 +107,7 @@ All 28 top-level commands. Flags, subcommands, and exit codes are in
 | `types` | Print the issue-type vocabulary this project accepts |
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
+| `merge-driver` | Git merge driver for `.beads/issues.jsonl`: `git config merge.beads.driver "br merge-driver %O %A %B"` plus `.beads/issues.jsonl merge=beads` in `.gitattributes` |
 | `config` | Configuration management |
 | `remote` | Mirror this workspace into an external tracker: `init` provisions the project, `status` reports without writing, `push`/`pull`/`sync` execute it (`--dry-run` on all four; `push`/`sync` need `--confirm-initial` on a first run). The only `br` command that touches the network — see `CLI_REFERENCE.md` and `AGENT_INTEGRATION.md` for the field/asymmetry details |
 | `stats` | Show project statistics |

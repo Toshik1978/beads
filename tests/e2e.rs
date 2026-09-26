@@ -69,6 +69,8 @@ mod list_comprehensive;
 mod list_priority;
 #[path = "e2e/list_scenarios.rs"]
 mod list_scenarios;
+#[path = "e2e/merge_driver.rs"]
+mod merge_driver;
 #[path = "e2e/raw_sqlite_rebuilt_lookup.rs"]
 mod raw_sqlite_rebuilt_lookup;
 #[path = "e2e/read_only_fast_open.rs"]

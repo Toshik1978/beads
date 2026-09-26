@@ -35,6 +35,7 @@ Comprehensive reference for all `br` commands.
   - [defer / undefer](#defer--undefer)
 - [Sync & Config](#sync--config)
   - [sync](#sync)
+  - [merge-driver](#merge-driver)
   - [config](#config)
   - [remote](#remote)
 - [Diagnostics & Info](#diagnostics--info)
@@ -1534,6 +1535,40 @@ br remote push
 br remote pull
 br remote sync
 ```
+
+---
+
+### merge-driver
+
+Three-way git merge driver for `.beads/issues.jsonl`. Git calls it with the
+common ancestor, ours and theirs, and takes the file left at ours as the
+result.
+
+```bash
+br merge-driver <BASE> <OURS> <THEIRS>
+```
+
+**Setup (once per clone):**
+```bash
+echo '.beads/issues.jsonl merge=beads' >> .gitattributes
+git config merge.beads.driver "br merge-driver %O %A %B"
+```
+
+**Semantics:**
+- Records are matched by id and parsed as import parses them.
+- A change on one side wins. When both sides changed an issue, each field comes
+  from the side that changed it; a field both changed comes from the later
+  `updated_at` (a tie goes to ours).
+- Labels, dependencies and comments of an issue both sides changed merge as
+  sets: an addition on either side survives, a removal stays removed. Comments
+  match by author, time and text, since comment ids are per-clone counters.
+- A tombstone beats a live copy on the other side; the dropped edit is reported
+  on stderr.
+- Output is sorted by id; a record taken unchanged from one side keeps its
+  bytes.
+- Exits non-zero, leaving OURS untouched, when a side has a parse error,
+  conflict markers or a duplicate id.
+- Never opens the database; the next command's auto-import reads the result.
 
 ---
 

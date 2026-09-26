@@ -73,6 +73,34 @@ Two situations where an agent should sync explicitly:
 workspace's `.beads/` (unless `--allow-external-jsonl` is explicit) — an
 agent is expected to own the actual `git add`/`git commit`.
 
+## Merging `issues.jsonl` across branches (`br merge-driver`)
+
+Git merges `issues.jsonl` line by line, and one issue per line in id order puts
+unrelated issues next to each other, so two branches that edited neighbouring
+issues conflict on rebase or merge. `br merge-driver` merges the file by issue
+id instead. Wire it up once per clone:
+
+```sh
+echo '.beads/issues.jsonl merge=beads' >> .gitattributes
+git config merge.beads.driver "br merge-driver %O %A %B"
+```
+
+`.gitattributes` is tracked and shared, but `git config` is per clone, so every
+clone needs the second line. Without it git falls back to its line merge.
+
+Per issue, a change made on one side wins. When both sides changed an issue,
+each field comes from the side that changed it, and a field both changed comes
+from the side with the later `updated_at`. Labels, dependencies and comments
+merge as sets, so an addition on either side survives and a removal stays
+removed. A tombstone beats an edit on the other side, since that edit would
+otherwise revive a deleted or renamed-away issue; the driver reports the
+dropped edit on stderr. The result is written in id order. An input it cannot
+trust (a parse error, conflict markers, a duplicate id) makes it exit non-zero
+without writing anything, and git then reports an ordinary conflict.
+
+The driver never opens the database. The next `br` command's auto-import picks
+up the merged file.
+
 ## Environment and identity
 
 | Variable | Effect |
@@ -189,6 +217,7 @@ All 28 top-level commands, for orientation. Full flags, subcommands, and
 | `types` | Print the issue-type vocabulary this project accepts |
 | `comments` | Manage comments |
 | `sync` | Sync database with JSONL file (export or import) |
+| `merge-driver` | Git merge driver for `.beads/issues.jsonl`, merging records by id — see "Merging `issues.jsonl` across branches" above |
 | `config` | Configuration management |
 | `remote` | Mirror this workspace into an external tracker: `init` provisions the remote project, `status` reports what a run would do and writes nothing, and `push`/`pull`/`sync` execute it (each takes `--dry-run`; `push` and `sync` refuse a first run without `--confirm-initial`) — see "Mirroring into an external tracker" below |
 | `stats` | Show project statistics |

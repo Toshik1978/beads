@@ -25,6 +25,7 @@ pub mod info;
 pub mod init;
 pub mod label;
 pub mod list;
+pub mod merge_driver;
 pub mod ready;
 pub mod remote;
 pub mod rename;

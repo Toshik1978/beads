@@ -9,6 +9,7 @@
 
 pub mod history;
 pub mod jsonl_format;
+pub mod merge_driver;
 pub mod path;
 
 pub use path::{

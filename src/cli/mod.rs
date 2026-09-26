@@ -859,6 +859,13 @@ EXAMPLES:
 
     /// Show version information
     Version(VersionArgs),
+
+    /// Git merge driver for .beads/issues.jsonl (merges records by id)
+    ///
+    /// Wire it up with `.beads/issues.jsonl merge=beads` in .gitattributes and
+    /// `git config merge.beads.driver "br merge-driver %O %A %B"`.
+    #[command(name = "merge-driver")]
+    MergeDriver(MergeDriverArgs),
 }
 
 /// Arguments for the completions command.
@@ -2240,6 +2247,19 @@ pub enum HistoryCommands {
         #[arg(long)]
         older_than: Option<u32>,
     },
+}
+
+/// Arguments for the merge-driver command, in git's `%O %A %B` order.
+#[derive(Args, Debug, Clone)]
+pub struct MergeDriverArgs {
+    /// The common ancestor's version (git's `%O`)
+    pub base: std::path::PathBuf,
+
+    /// Our version (git's `%A`); the merge result is written here
+    pub ours: std::path::PathBuf,
+
+    /// Their version (git's `%B`)
+    pub theirs: std::path::PathBuf,
 }
 
 /// Arguments for the version command.

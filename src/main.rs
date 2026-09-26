@@ -419,6 +419,7 @@ fn main() {
         Commands::Info(args) => commands::info::execute(&args, &overrides, &output_ctx),
         Commands::Version(args) => commands::version::execute(&args, &output_ctx),
         Commands::Completions(args) => commands::completions::execute(&args, &output_ctx),
+        Commands::MergeDriver(args) => commands::merge_driver::execute(&args),
         Commands::Stats(args) => {
             if let (Some(res), Some(beads_dir)) = (storage_result.as_ref(), ctx.beads_dir.as_ref())
             {
@@ -797,6 +798,9 @@ const fn should_auto_import(cmd: &Commands) -> bool {
         | Commands::Info(_)
         | Commands::Version(_)
         | Commands::Completions(_)
+        // A git merge driver works on the three files git hands it; the
+        // database is refreshed by the next command's own auto-import.
+        | Commands::MergeDriver(_)
         | Commands::Config { .. }
         // `statuses` and `types` read `policy.yaml`, never an issue row, so an
         // import would be pure cost.
