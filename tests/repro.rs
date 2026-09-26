@@ -70,6 +70,8 @@ mod sync_relations;
 mod three_way_merge_bug;
 #[path = "repro/time_panic.rs"]
 mod time_panic;
+#[path = "repro/tombstone_closed_at.rs"]
+mod tombstone_closed_at;
 #[path = "repro/truncate_width.rs"]
 mod truncate_width;
 #[path = "repro/tty_hangup_width.rs"]

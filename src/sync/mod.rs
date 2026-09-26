@@ -2529,6 +2529,14 @@ fn export_hashes_certified_current(
 }
 
 fn normalize_issue_for_export(issue: &mut Issue) {
+    // The same repair `normalize_issue` applies on import. `br delete` and a
+    // rename tombstone an open issue without setting `closed_at`, so without
+    // this the clone that made a tombstone exported `null` while every clone
+    // that imported it exported the repaired value.
+    if issue.status.is_terminal() && issue.closed_at.is_none() {
+        issue.closed_at = Some(issue.updated_at);
+    }
+
     if !issue.labels.is_empty() {
         issue.labels.sort_unstable();
         issue.labels.dedup();
