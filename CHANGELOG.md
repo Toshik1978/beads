@@ -9,6 +9,44 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.9.1 — 2026-09-26
+
+A patch release: comment ids are the same on every clone.
+
+A comment's id was the SQLite counter of whichever clone created it, and that
+number was written into the shared `issues.jsonl`. Two clones commenting
+independently handed out the same numbers, so a merged file could hold one id
+for two different comments. Import kept the id for whichever comment it met
+first and renumbered the other. A clone that had created the other comment
+resolved it the opposite way, so two clones exported different ids for the
+same comments. Every rebuild or forced export then rewrote records whose
+content had not changed. Where the two comments sat on one issue, which the
+v1.9.0 merge driver can produce, import rejected the file as a duplicate id.
+
+### Highlights
+
+- **A comment's id is derived from the comment.** It is the first 52 bits of a
+  SHA-256 over the comment's issue, author, time and text, so every clone gives
+  the same comment the same id. 52 bits keeps ids exact in JavaScript and
+  `jq`. Ids grow from a few digits to at most 16, about 0.3% of a typical
+  file's size.
+- **The one-time rewrite happens in one place.** The schema v20 migration
+  re-keys stored comments, and an import of a file with old counter ids marks
+  those issues dirty. Either way the next write flushes the new ids, so commit
+  that rewrite as it comes rather than having it surface later in an unrelated
+  diff.
+- **A merged file with two comments sharing an old id on one issue imports**,
+  keeping both.
+- **A rename re-keys the moved issue's comments**, since the issue is part of
+  the id.
+
+
+### Bug Fixes
+
+- [6a2015c](https://github.com/Toshik1978/beads/commit/6a2015c20da7bb6e117a7006a12a190337ae0abb) fix(sync): derive comment ids from content, not each clone's counter
+
+---
+
 ## v1.9.0 — 2026-09-26
 
 A feature release for teams working on branches. `issues.jsonl` holds one issue
