@@ -42,6 +42,8 @@ mod issue_256_update_diff_target;
 mod issue_not_found_suggestions;
 #[path = "repro/jsonl_field_removal.rs"]
 mod jsonl_field_removal;
+#[path = "repro/jsonl_line_order.rs"]
+mod jsonl_line_order;
 #[path = "repro/list_sort.rs"]
 mod list_sort;
 #[path = "repro/list_sort_alias.rs"]
@@ -54,6 +56,8 @@ mod parent_blocking;
 mod pinned_blocker;
 #[path = "repro/remote_adoption_link_deletion.rs"]
 mod remote_adoption_link_deletion;
+#[path = "repro/rename_import_over_old_id.rs"]
+mod rename_import_over_old_id;
 #[path = "repro/reparent_orphans_old_epic.rs"]
 mod reparent_orphans_old_epic;
 #[path = "repro/source_repo_path_leak.rs"]

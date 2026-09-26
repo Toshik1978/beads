@@ -2734,7 +2734,8 @@ fn finalize_incremental_auto_flush(
 struct ExistingJsonlReplacementScan {
     exported_count: usize,
     changed: bool,
-    all_replacements_seen: bool,
+    /// Replacement ids with no line in the file yet, sorted: the new records.
+    new_ids: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2800,10 +2801,17 @@ fn scan_existing_jsonl_replacements(
         exported_count += 1;
     }
 
+    let mut new_ids = replacement_lines
+        .keys()
+        .filter(|id| !seen_replacements.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    new_ids.sort();
+
     Ok(ExistingJsonlReplacementScan {
         exported_count,
         changed,
-        all_replacements_seen: seen_replacements.len() == replacement_lines.len(),
+        new_ids,
     })
 }
 
@@ -2882,22 +2890,33 @@ fn try_write_existing_jsonl_replacements_atomically(
 ) -> Result<ExistingJsonlReplacementWrite> {
     let scan = scan_existing_jsonl_replacements(output_path, replacement_lines)?;
 
-    if !scan.changed && scan.all_replacements_seen {
+    if !scan.changed && scan.new_ids.is_empty() {
         return Ok(ExistingJsonlReplacementWrite::Unchanged {
             exported_count: scan.exported_count,
         });
     }
 
-    let (content_hash, exported_count) =
-        write_existing_jsonl_replacements_atomically(replacement_lines, output_path, config)?;
+    let (content_hash, exported_count) = write_existing_jsonl_replacements_atomically(
+        replacement_lines,
+        &scan.new_ids,
+        output_path,
+        config,
+    )?;
     Ok(ExistingJsonlReplacementWrite::Written {
         content_hash,
         exported_count,
     })
 }
 
+/// Rewrite the file with `replacement_lines` swapped in, and each of `new_ids`
+/// (sorted, none already in the file) placed before the first existing line
+/// whose id sorts after it — where a full export, which writes in id order,
+/// would put it. Appending them instead made line order depend on which
+/// writer ran last, and a later full export then moved them for no reason
+/// visible in the diff.
 fn write_existing_jsonl_replacements_atomically(
     replacement_lines: &HashMap<String, String>,
+    new_ids: &[String],
     output_path: &Path,
     config: &ExportConfig,
 ) -> Result<(String, usize)> {
@@ -2906,7 +2925,7 @@ fn write_existing_jsonl_replacements_atomically(
     let mut temp_output = prepare_jsonl_temp_output(output_path, config)?;
     let mut hasher = Sha256::new();
     let mut seen_ids = HashSet::new();
-    let mut replaced_ids = HashSet::with_capacity(replacement_lines.len());
+    let mut new_ids = new_ids.iter().peekable();
     let mut expected_ids = Vec::new();
     let mut line_buf = String::new();
     let mut line_num = 0;
@@ -2937,12 +2956,20 @@ fn write_existing_jsonl_replacements_atomically(
             )));
         }
 
-        let output_line = if let Some(replacement) = replacement_lines.get(&partial.id) {
-            replaced_ids.insert(partial.id);
-            replacement.as_str()
-        } else {
-            trimmed
-        };
+        while let Some(new_id) = new_ids.next_if(|new_id| **new_id < partial.id) {
+            write_new_jsonl_line(
+                &mut temp_output.writer,
+                &mut hasher,
+                replacement_lines,
+                new_id,
+            )?;
+            expected_ids.push(new_id.clone());
+            exported_count += 1;
+        }
+
+        let output_line = replacement_lines
+            .get(&partial.id)
+            .map_or(trimmed, String::as_str);
 
         writeln!(temp_output.writer, "{output_line}")?;
         hasher.update(output_line.as_bytes());
@@ -2959,22 +2986,14 @@ fn write_existing_jsonl_replacements_atomically(
         exported_count += 1;
     }
 
-    let mut appended_ids = replacement_lines
-        .keys()
-        .filter(|id| !replaced_ids.contains(*id))
-        .collect::<Vec<_>>();
-    appended_ids.sort();
-
-    for issue_id in appended_ids {
-        let output_line = replacement_lines.get(issue_id).ok_or_else(|| {
-            BeadsError::Config(format!(
-                "Missing replacement JSON while preparing incremental auto-flush for {issue_id}"
-            ))
-        })?;
-        writeln!(temp_output.writer, "{output_line}")?;
-        hasher.update(output_line.as_bytes());
-        hasher.update(b"\n");
-        expected_ids.push(issue_id.clone());
+    for new_id in new_ids {
+        write_new_jsonl_line(
+            &mut temp_output.writer,
+            &mut hasher,
+            replacement_lines,
+            new_id,
+        )?;
+        expected_ids.push(new_id.clone());
         exported_count += 1;
     }
 
@@ -2989,6 +3008,23 @@ fn write_existing_jsonl_replacements_atomically(
     rename_jsonl_temp_output(&temp_path, temp_guard, output_path, config)?;
 
     Ok((hex_encode(&hasher.finalize()), exported_count))
+}
+
+fn write_new_jsonl_line(
+    writer: &mut BufWriter<File>,
+    hasher: &mut Sha256,
+    replacement_lines: &HashMap<String, String>,
+    issue_id: &str,
+) -> Result<()> {
+    let output_line = replacement_lines.get(issue_id).ok_or_else(|| {
+        BeadsError::Config(format!(
+            "Missing replacement JSON while preparing incremental auto-flush for {issue_id}"
+        ))
+    })?;
+    writeln!(writer, "{output_line}")?;
+    hasher.update(output_line.as_bytes());
+    hasher.update(b"\n");
+    Ok(())
 }
 
 fn write_jsonl_lines_atomically(
@@ -3408,16 +3444,31 @@ pub enum CollisionAction {
 }
 
 /// Detect collision for an incoming issue using the 4-phase algorithm with preloaded metadata maps.
+///
+/// The external-ref and content-hash phases match a record to a local issue
+/// under a *different* id, and they may do so only when the file carries no
+/// record of its own for that issue: a file cannot hold two records for one
+/// issue, so if it has one under the local id, the incoming record is some
+/// other issue. The case that made this concrete is a rename from another
+/// clone. The renamed record keeps the `external_ref`, and without one it
+/// hashes like the old row, since the hash leaves the id out; matching it to
+/// the old row folded the new id into the old one, and the tombstone the file
+/// carries for the old id then lost to what had just been written over it.
 fn detect_collision(
     incoming: &Issue,
     id_by_ext_ref: &std::collections::HashMap<String, String>,
     id_by_hash: &std::collections::HashMap<String, String>,
     meta_by_id: &std::collections::HashMap<String, crate::storage::sqlite::IssueMetadata>,
+    jsonl_ids: &HashSet<String>,
     computed_hash: &str,
 ) -> CollisionResult {
+    let accounted_for_elsewhere =
+        |existing_id: &String| existing_id != &incoming.id && jsonl_ids.contains(existing_id);
+
     // Phase 1: External reference match
     if let Some(ref external_ref) = incoming.external_ref
         && let Some(existing_id) = id_by_ext_ref.get(external_ref)
+        && !accounted_for_elsewhere(existing_id)
     {
         return CollisionResult::Match {
             existing_id: existing_id.clone(),
@@ -3432,7 +3483,9 @@ fn detect_collision(
     }
 
     // Phase 3: Content hash match
-    if let Some(existing_id) = id_by_hash.get(computed_hash) {
+    if let Some(existing_id) = id_by_hash.get(computed_hash)
+        && !accounted_for_elsewhere(existing_id)
+    {
         return CollisionResult::Match {
             existing_id: existing_id.clone(),
         };
@@ -3611,6 +3664,9 @@ struct ImportMetadataMaps {
     meta_by_id: HashMap<String, crate::storage::sqlite::IssueMetadata>,
     id_by_ext_ref: HashMap<String, String>,
     id_by_hash: HashMap<String, String>,
+    /// Every id the file carries a record for, after prefix renames. See
+    /// [`detect_collision`] for why the match phases need it.
+    jsonl_ids: HashSet<String>,
 }
 
 /// Parse one JSONL line into a validated [`Issue`].
@@ -3774,7 +3830,10 @@ fn apply_prefix_renames(issue: &mut Issue, renames: &HashMap<String, String>) {
     }
 }
 
-fn load_import_metadata_maps(storage: &SqliteStorage) -> Result<ImportMetadataMaps> {
+fn load_import_metadata_maps(
+    storage: &SqliteStorage,
+    jsonl_ids: HashSet<String>,
+) -> Result<ImportMetadataMaps> {
     let all_meta = storage.get_all_issues_metadata()?;
     let meta_len = all_meta.len();
     let mut meta_by_id = HashMap::with_capacity(meta_len);
@@ -3804,6 +3863,7 @@ fn load_import_metadata_maps(storage: &SqliteStorage) -> Result<ImportMetadataMa
         meta_by_id,
         id_by_ext_ref,
         id_by_hash,
+        jsonl_ids,
     })
 }
 
@@ -3864,6 +3924,7 @@ fn scan_import_collision_renames(
             &metadata.id_by_ext_ref,
             &metadata.id_by_hash,
             &metadata.meta_by_id,
+            &metadata.jsonl_ids,
             &computed_hash,
         );
         let _action = determine_action(
@@ -3907,6 +3968,40 @@ fn apply_collision_renames(issue: &mut Issue, renames: &HashMap<String, String>)
         if let Some(new_source) = renames.get(&comment.issue_id) {
             comment.issue_id.clone_from(new_source);
         }
+    }
+}
+
+/// Take `issue`'s `external_ref` off the local row that holds it, when the
+/// file has moved it to a different id.
+///
+/// [`detect_collision`] refuses an external-ref match to a local row the file
+/// carries under its own id, so a record reaching here with a ref held by some
+/// other row is the file saying the ref has moved — a rename is the usual
+/// cause, and the tombstone it leaves carries no ref. The holder's own record
+/// says the same thing, but the export is in id order, so when the new id
+/// sorts first its record arrives while the old row still holds the ref, and
+/// the unique index on `external_ref` would reject it.
+fn release_external_ref_moved_by_file(
+    storage: &SqliteStorage,
+    action: &CollisionAction,
+    target_id: &str,
+    issue: &Issue,
+    metadata: &ImportMetadataMaps,
+) -> Result<()> {
+    if !matches!(
+        action,
+        CollisionAction::Insert | CollisionAction::Update { .. }
+    ) {
+        return Ok(());
+    }
+    let Some(external_ref) = issue.external_ref.as_deref() else {
+        return Ok(());
+    };
+    match metadata.id_by_ext_ref.get(external_ref) {
+        Some(holder) if holder != target_id => {
+            storage.release_external_ref_for_import(holder, external_ref)
+        }
+        _ => Ok(()),
     }
 }
 
@@ -4047,6 +4142,7 @@ fn stream_import_actions_in_tx(
     let mut export_hash_batch = Vec::with_capacity(IMPORT_EXPORT_HASH_BATCH_SIZE);
     let mut export_hash_ids = HashSet::new();
     let mut uncertified_local_wins = 0usize;
+    let import_marked_at = chrono::Utc::now().to_rfc3339();
 
     progress.set_position(0);
     storage.clear_all_export_hashes_in_tx()?;
@@ -4069,6 +4165,7 @@ fn stream_import_actions_in_tx(
             &metadata.id_by_ext_ref,
             &metadata.id_by_hash,
             &metadata.meta_by_id,
+            &metadata.jsonl_ids,
             &computed_hash,
         );
         let action = determine_action(
@@ -4084,6 +4181,7 @@ fn stream_import_actions_in_tx(
 
         apply_collision_renames(&mut issue, collision_renames);
         let action = resolve_timestamp_tie(storage, action, &issue)?;
+        release_external_ref_moved_by_file(storage, &action, &target_id, &issue, metadata)?;
         process_import_action(storage, &action, &issue, &mut tx_result)?;
 
         if let Some((export_id, export_hash)) = export_hash_entry_for_import_action(
@@ -4100,6 +4198,12 @@ fn stream_import_actions_in_tx(
                 export_hash_batch.clear();
             }
         } else {
+            // The local row won and differs from the file: an unflushed local
+            // edit in all but name, so it is flushed as one. This used to set
+            // `needs_flush`, which makes the next flush a full export with the
+            // stale-database guard off — licence to drop every id the file
+            // has and the database lacks, when all that was owed was this row.
+            storage.replace_dirty_issue_marker(&target_id, &import_marked_at)?;
             uncertified_local_wins += 1;
         }
 
@@ -4114,9 +4218,8 @@ fn stream_import_actions_in_tx(
     if uncertified_local_wins > 0 {
         tracing::debug!(
             count = uncertified_local_wins,
-            "Import preserved local records that differ from JSONL; marking database for flush"
+            "Import preserved local records that differ from JSONL; marked them dirty"
         );
-        storage.set_metadata_in_tx("needs_flush", "true")?;
     }
 
     let orphans_cleaned = cleanup_import_orphans_in_tx(storage)?;
@@ -4194,7 +4297,13 @@ pub fn import_from_jsonl(
     };
 
     // Preload metadata for O(1) collision detection while streaming the input.
-    let metadata = load_import_metadata_maps(storage)?;
+    let jsonl_ids = validation_plan
+        .occupied_ids
+        .iter()
+        .chain(prefix_renames.values())
+        .cloned()
+        .collect();
+    let metadata = load_import_metadata_maps(storage, jsonl_ids)?;
 
     // Phase 1: Scan and Resolve IDs
     let collision_renames = scan_import_collision_renames(
@@ -6682,7 +6791,7 @@ mod tests {
     }
 
     #[test]
-    fn test_import_tombstone_skip_marks_flush_pending() {
+    fn test_import_tombstone_skip_marks_the_row_dirty() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("issues.jsonl");
@@ -6704,9 +6813,11 @@ mod tests {
         let result =
             import_from_jsonl(&mut storage, &path, &ImportConfig::default(), Some("bd")).unwrap();
         assert_eq!(result.tombstone_skipped, 1);
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), vec!["bd-tomb"]);
         assert_eq!(
             storage.get_metadata("needs_flush").unwrap().as_deref(),
-            Some("true")
+            Some("false"),
+            "a local win is flushed as a dirty row, not by a forced full export"
         );
         assert!(storage.get_export_hash("bd-tomb").unwrap().is_none());
 
@@ -6715,7 +6826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_import_relation_only_local_win_marks_flush_pending() {
+    fn test_import_relation_only_local_win_marks_the_row_dirty() {
         let mut storage = SqliteStorage::open_memory().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("issues.jsonl");
@@ -6735,9 +6846,11 @@ mod tests {
         let result =
             import_from_jsonl(&mut storage, &path, &ImportConfig::default(), Some("bd")).unwrap();
         assert_eq!(result.skipped_count, 1);
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), vec!["bd-rel"]);
         assert_eq!(
             storage.get_metadata("needs_flush").unwrap().as_deref(),
-            Some("true")
+            Some("false"),
+            "a local win is flushed as a dirty row, not by a forced full export"
         );
         assert!(storage.get_export_hash("bd-rel").unwrap().is_none());
         assert_eq!(storage.get_labels("bd-rel").unwrap(), vec!["local-only"]);
@@ -6769,6 +6882,7 @@ mod tests {
             &id_by_ext_ref,
             &id_by_hash,
             &meta_by_id,
+            &HashSet::new(),
             &computed_hash,
         );
         assert!(
@@ -7224,6 +7338,7 @@ mod tests {
             &id_by_ext_ref,
             &id_by_hash,
             &meta_by_id,
+            &HashSet::new(),
             &computed_hash,
         );
         assert!(
@@ -7259,6 +7374,7 @@ mod tests {
             &id_by_ext_ref,
             &id_by_hash,
             &meta_by_id,
+            &HashSet::new(),
             &computed_hash,
         );
         assert!(
@@ -7291,6 +7407,7 @@ mod tests {
             &id_by_ext_ref,
             &id_by_hash,
             &meta_by_id,
+            &HashSet::new(),
             &computed_hash,
         );
 
@@ -7333,6 +7450,7 @@ mod tests {
             &id_by_ext_ref,
             &id_by_hash,
             &meta_by_id,
+            &HashSet::new(),
             &computed_hash,
         );
 
@@ -7358,6 +7476,7 @@ mod tests {
             &id_by_ext_ref,
             &id_by_hash,
             &meta_by_id,
+            &HashSet::new(),
             &computed_hash,
         );
 

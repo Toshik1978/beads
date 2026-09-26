@@ -12073,6 +12073,27 @@ impl SqliteStorage {
         Ok(self.insert_issue_row_for_import(issue, &timestamps)? > 0)
     }
 
+    /// Clear `external_ref` on `issue_id` if it still holds `external_ref`,
+    /// so an import can give the ref to the row the file now puts it on.
+    ///
+    /// Like the rest of the import writes, this does not trigger dirty
+    /// tracking or events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub(crate) fn release_external_ref_for_import(
+        &self,
+        issue_id: &str,
+        external_ref: &str,
+    ) -> Result<()> {
+        self.conn.execute_with_params(
+            "UPDATE issues SET external_ref = NULL WHERE id = ? AND external_ref = ?",
+            &[SqliteValue::from(issue_id), SqliteValue::from(external_ref)],
+        )?;
+        Ok(())
+    }
+
     /// Check whether relation rows already exist for an imported issue ID.
     ///
     /// This is used to guard the insert-only relation fast path. A newly

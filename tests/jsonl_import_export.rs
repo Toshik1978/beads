@@ -574,6 +574,11 @@ fn import_repopulates_export_hashes() {
     assert_eq!(restored_hash, original_hash);
 }
 
+/// Two records reaching one local row is still possible through the
+/// content-hash phase: both hash like a local issue the file does not carry
+/// under its own id. (An external-ref match to a row the file *does* carry is
+/// no longer one of these — see `detect_collision`.) The export hash recorded
+/// for that row must be the one for what was finally written.
 #[test]
 fn import_deduplicates_export_hash_rebuild_when_multiple_records_target_same_issue() {
     let mut storage = SqliteStorage::open_memory().unwrap();
@@ -584,37 +589,41 @@ fn import_deduplicates_export_hash_rebuild_when_multiple_records_target_same_iss
     let mut existing = issue_with_id("test-existing", "Existing");
     existing.created_at = base_time;
     existing.updated_at = base_time;
-    existing.external_ref = Some("EXT-1".to_string());
     storage.create_issue(&existing, "tester").unwrap();
     storage
         .set_export_hashes(&[("test-existing".to_string(), "stale-hash".to_string())])
         .unwrap();
 
-    let mut by_external_ref = issue_with_id("test-remap", "Intermediate update");
-    by_external_ref.created_at = base_time + Duration::minutes(5);
-    by_external_ref.updated_at = base_time + Duration::minutes(10);
-    by_external_ref.external_ref = Some("EXT-1".to_string());
+    // Same hashed content as `existing`; `source_repo` is outside the hash
+    // and tells the two writes apart.
+    let mut first = issue_with_id("test-remap1", "Existing");
+    first.created_at = base_time + Duration::minutes(5);
+    first.updated_at = base_time + Duration::minutes(10);
+    first.source_repo = Some("first".to_string());
 
-    let mut by_id = issue_with_id("test-existing", "Final update");
-    by_id.created_at = base_time + Duration::minutes(15);
-    by_id.updated_at = base_time + Duration::minutes(20);
+    let mut second = issue_with_id("test-remap2", "Existing");
+    second.created_at = base_time + Duration::minutes(15);
+    second.updated_at = base_time + Duration::minutes(20);
+    second.source_repo = Some("second".to_string());
 
     let json = format!(
         "{}\n{}\n",
-        serde_json::to_string(&by_external_ref).unwrap(),
-        serde_json::to_string(&by_id).unwrap()
+        serde_json::to_string(&first).unwrap(),
+        serde_json::to_string(&second).unwrap()
     );
     fs::write(&path, json).unwrap();
 
     import_from_jsonl(&mut storage, &path, &ImportConfig::default(), Some("test-")).unwrap();
 
-    assert!(
-        storage.get_issue("test-remap").unwrap().is_none(),
-        "collision-matched issue should be merged into the existing record"
-    );
+    for id in ["test-remap1", "test-remap2"] {
+        assert!(
+            storage.get_issue(id).unwrap().is_none(),
+            "{id}: collision-matched issue should be merged into the existing record"
+        );
+    }
 
     let imported = storage.get_issue("test-existing").unwrap().unwrap();
-    assert_eq!(imported.title, "Final update");
+    assert_eq!(imported.source_repo.as_deref(), Some("second"));
 
     let (stored_hash, _) = storage.get_export_hash("test-existing").unwrap().unwrap();
     assert_eq!(Some(stored_hash.as_str()), imported.content_hash.as_deref());

@@ -226,13 +226,23 @@ fn changed_issue_ids(before: &[String], after: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
-fn positional_line_churn(before: &[String], after: &[String]) -> usize {
-    let common_changed = before
+/// Lines a line diff would show as changed, counting a replaced line once.
+///
+/// Measured as a diff rather than position by position: an incremental flush
+/// places a new record where a full export would, in id order, and a line
+/// inserted mid-file shifts every line after it without changing any of them.
+fn line_diff_churn(before: &[String], after: &[String]) -> usize {
+    similar::capture_diff_slices(similar::Algorithm::Myers, before, after)
         .iter()
-        .zip(after)
-        .filter(|(left, right)| left != right)
-        .count();
-    common_changed + before.len().abs_diff(after.len())
+        .map(|op| match *op {
+            similar::DiffOp::Equal { .. } => 0,
+            similar::DiffOp::Delete { old_len, .. } => old_len,
+            similar::DiffOp::Insert { new_len, .. } => new_len,
+            similar::DiffOp::Replace {
+                old_len, new_len, ..
+            } => old_len.max(new_len),
+        })
+        .sum()
 }
 
 fn assert_jsonl_is_valid_and_acyclic(workspace: &BrWorkspace, label: &str) {
@@ -265,7 +275,7 @@ fn assert_bounded_jsonl_diff(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let line_churn = positional_line_churn(before, &after);
+    let line_churn = line_diff_churn(before, &after);
     let line_count = after.len();
     let content_hash = compute_jsonl_hash(&jsonl_path).unwrap();
 
