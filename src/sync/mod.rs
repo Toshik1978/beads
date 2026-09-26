@@ -558,6 +558,10 @@ pub struct ImportResult {
     pub blocked_cache_entries: usize,
     /// Number of child-counter rows rebuilt after import.
     pub child_counter_entries: usize,
+    /// Number of issues the import marked dirty for the next flush: local rows
+    /// that won over the file's copy, and records whose comment ids were not
+    /// yet content ids.
+    pub issues_marked_dirty: usize,
 }
 
 // ============================================================================
@@ -4152,6 +4156,7 @@ fn stream_import_actions_in_tx(
     let mut export_hash_ids = HashSet::new();
     let mut uncertified_local_wins = 0usize;
     let import_marked_at = chrono::Utc::now().to_rfc3339();
+    let mut marked_dirty = HashSet::new();
 
     progress.set_position(0);
     storage.clear_all_export_hashes_in_tx()?;
@@ -4213,7 +4218,25 @@ fn stream_import_actions_in_tx(
             // stale-database guard off — licence to drop every id the file
             // has and the database lacks, when all that was owed was this row.
             storage.replace_dirty_issue_marker(&target_id, &import_marked_at)?;
+            marked_dirty.insert(target_id.clone());
             uncertified_local_wins += 1;
+        }
+
+        // The file's comment ids are ignored on import and content ids stored
+        // instead. A file written before that carries clone-local counters;
+        // flush the issue so the canonical ids land in the next write, not
+        // whenever some later full export happens to rewrite the record.
+        if issue.comments.iter().any(|comment| {
+            comment.id
+                != crate::util::comment_content_id(
+                    &target_id,
+                    &comment.author,
+                    comment.created_at,
+                    &comment.body,
+                )
+        }) {
+            storage.replace_dirty_issue_marker(&target_id, &import_marked_at)?;
+            marked_dirty.insert(target_id.clone());
         }
 
         progress.inc(1);
@@ -4224,6 +4247,7 @@ fn stream_import_actions_in_tx(
         storage.insert_export_hashes_after_clear_in_tx(&export_hash_batch)?;
     }
     tx_result.export_hashes_recorded = export_hash_ids.len();
+    tx_result.issues_marked_dirty = marked_dirty.len();
     if uncertified_local_wins > 0 {
         tracing::debug!(
             count = uncertified_local_wins,
@@ -4459,7 +4483,14 @@ fn insert_new_import_issue(storage: &SqliteStorage, issue: &Issue) -> Result<boo
 fn record_imported_relation_counts(result: &mut ImportResult, issue: &Issue) {
     result.labels_imported += issue.labels.len();
     result.dependencies_imported += issue.dependencies.len();
-    result.comments_imported += issue.comments.len();
+    // Distinct by content: two byte-identical comments on one issue share a
+    // content id and are stored once.
+    result.comments_imported += issue
+        .comments
+        .iter()
+        .map(|comment| (&comment.author, comment.created_at, &comment.body))
+        .collect::<HashSet<_>>()
+        .len();
 }
 
 /// Sync labels, dependencies, and comments for an imported issue.

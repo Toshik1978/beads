@@ -16,7 +16,8 @@ pub mod markdown_import;
 pub mod progress;
 pub mod time;
 
-pub use hash::{content_hash, content_hash_from_parts, hex_encode};
+pub(crate) use hash::comment_id_candidate;
+pub use hash::{comment_content_id, content_hash, content_hash_from_parts, hex_encode};
 pub use id::{
     IdConfig, IdGenerator, IdResolver, ParsedId, ResolvedId, ResolverConfig, child_id,
     find_matching_ids, is_valid_id_format, normalize_id, parse_id,

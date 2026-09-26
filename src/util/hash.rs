@@ -133,6 +133,56 @@ pub fn content_hash_from_parts(
     writer.finalize()
 }
 
+/// The id of a comment: the first 52 bits of a SHA-256 over its issue, author,
+/// time and text, never 0.
+///
+/// Comment ids used to be each clone's SQLite counter, and they are written
+/// into the shared JSONL, so two clones handed the same numbers to different
+/// comments and disagreed about them after every import. Derived from content
+/// instead, every clone gives a comment the same id. The issue is part of it
+/// because the same text is posted to several issues at once in practice (a
+/// scripted note, the same second); without it those would collide, and which
+/// one kept the id would depend on insertion order — the disagreement this
+/// exists to end. A rename therefore re-keys the moved issue's comments. 52
+/// bits keeps the id exact in JavaScript and `jq`, and leaves SQLite's
+/// AUTOINCREMENT room above it.
+#[must_use]
+pub fn comment_content_id(
+    issue_id: &str,
+    author: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+    text: &str,
+) -> i64 {
+    comment_id_candidate(issue_id, author, created_at, text, 0)
+}
+
+/// [`comment_content_id`], re-drawn for `attempt > 0` when the id is already
+/// held by a different comment.
+#[must_use]
+pub fn comment_id_candidate(
+    issue_id: &str,
+    author: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+    text: &str,
+    attempt: u32,
+) -> i64 {
+    let mut hasher = Sha256::new();
+    let time = created_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+    let attempt = attempt.to_string();
+    for field in [issue_id, author, time.as_str(), text, attempt.as_str()] {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    let id = u64::from_be_bytes(prefix) >> 12;
+    // `>> 12` leaves 52 bits, so the cast cannot wrap.
+    #[allow(clippy::cast_possible_wrap)]
+    let id = id as i64;
+    id.max(1)
+}
+
 struct HashFieldWriter {
     hasher: Sha256,
 }

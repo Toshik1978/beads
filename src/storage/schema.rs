@@ -7,7 +7,7 @@ use crate::error::{BeadsError, Result};
 use crate::model::{IssueType, Priority, Status};
 use crate::util::content_hash_from_parts;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 19;
+pub const CURRENT_SCHEMA_VERSION: i32 = 20;
 const ISSUES_CLOSED_AT_CHECK: &str = "CHECK ((status = 'closed' AND closed_at IS NOT NULL) OR (status = 'tombstone') OR (status NOT IN ('closed', 'tombstone') AND closed_at IS NULL))";
 
 /// The complete SQL schema for the beads database.
@@ -1589,6 +1589,16 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
         rebuild_content_hashes_for_current_format(conn)?;
     }
 
+    // v20: comment ids stop being each clone's SQLite counter. Written into the
+    // shared JSONL, those counters collided across clones, were renumbered by
+    // whichever clone imported second, and left clones exporting different ids
+    // for the same comment. Every id is now derived from the comment's content;
+    // this re-keys the stored ones and marks their issues for export.
+    if user_version < 20 && table_exists(conn, "comments") {
+        tracing::info!("Migrating database to schema version 20 (content-derived comment ids)");
+        crate::storage::sqlite::recompute_comment_ids(conn)?;
+    }
+
     // Migration: Add missing indexes for bd parity
     // These use IF NOT EXISTS so they're safe to run multiple times.
     //
@@ -2245,6 +2255,58 @@ mod tests {
         .unwrap();
     }
 
+    /// v20: comment ids stop being each clone's counter. Every stored id is
+    /// recomputed from the comment's content, and the issues whose comments
+    /// moved are marked dirty so the next flush writes the new ids.
+    #[test]
+    fn test_v20_recomputes_comment_ids_from_content() {
+        let temp = TempDir::new().expect("tempdir");
+        let db_path = temp.path().join("beads.db");
+        let conn = Connection::open(db_path.to_string_lossy().into_owned()).unwrap();
+        apply_schema(&conn).expect("Failed to apply schema");
+
+        conn.execute(
+            "INSERT INTO issues (id, content_hash, title, status, priority, issue_type, \
+             created_at, updated_at) \
+             VALUES ('bd-c20', 'h', 'Test', 'open', 2, 'task', \
+             '2026-04-02T20:00:00Z', '2026-04-03T01:00:00Z')",
+        )
+        .unwrap();
+        for (id, text) in [(1, "first"), (2, "second")] {
+            conn.execute(&format!(
+                "INSERT INTO comments (id, issue_id, author, text, created_at) \
+                 VALUES ({id}, 'bd-c20', 'tester', '{text}', '2026-04-02T21:00:0{id}Z')"
+            ))
+            .unwrap();
+        }
+        conn.execute("DELETE FROM dirty_issues").unwrap();
+        conn.execute("PRAGMA user_version = 19").unwrap();
+
+        run_migrations(&conn, false).expect("v20 migration should succeed");
+
+        let rows = conn
+            .query("SELECT id, author, text, created_at FROM comments ORDER BY text")
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let id = row.get(0).and_then(SqliteValue::as_integer).unwrap();
+            let author = row.get(1).and_then(SqliteValue::as_text).unwrap();
+            let text = row.get(2).and_then(SqliteValue::as_text).unwrap();
+            let created_at = chrono::DateTime::parse_from_rfc3339(
+                row.get(3).and_then(SqliteValue::as_text).unwrap(),
+            )
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+            assert_eq!(
+                id,
+                crate::util::comment_content_id("bd-c20", author, created_at, text),
+                "{text}"
+            );
+        }
+        let dirty = conn.query("SELECT issue_id FROM dirty_issues").unwrap();
+        assert_eq!(dirty.len(), 1, "the issue whose comment ids moved is dirty");
+    }
+
     #[test]
     fn test_v19_rebuilds_content_hashes_and_drops_dead_columns() {
         let temp = TempDir::new().expect("tempdir");
@@ -2375,8 +2437,10 @@ mod tests {
         run_migrations(&conn, false).expect("migrations on a fresh v19 database must succeed");
         run_migrations(&conn, false).expect("and must be idempotent on a second pass");
 
+        // A fresh database is stamped at the current version, so every arm up
+        // to it — v19's and v20's alike — is skipped by its own guard.
         let version = conn.query_row("PRAGMA user_version").unwrap();
-        assert_eq!(version.get(0).and_then(SqliteValue::as_integer), Some(19));
+        assert_eq!(version.get(0).and_then(SqliteValue::as_integer), Some(20));
     }
 
     /// The digest a fresh `br` writes and the digest v19 backfills into an

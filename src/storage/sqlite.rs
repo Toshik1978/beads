@@ -2822,14 +2822,12 @@ impl SqliteStorage {
 
             // Insert Comments
             for comment in &issue.comments {
-                conn.execute_with_params(
-                    "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
-                    &[
-                        SqliteValue::from(issue.id.as_str()),
-                        SqliteValue::from(comment.author.as_str()),
-                        SqliteValue::from(comment.body.as_str()),
-                        SqliteValue::from(comment.created_at.to_rfc3339()),
-                    ],
+                insert_comment_with_content_id(
+                    conn,
+                    &issue.id,
+                    &comment.author,
+                    &comment.body,
+                    comment.created_at,
                 )?;
             }
 
@@ -7243,6 +7241,11 @@ impl SqliteStorage {
                 &[SqliteValue::from(new_id), SqliteValue::from(old_id)],
             )?;
         }
+
+        // A comment's id is derived from its issue among the rest, so the
+        // moved comments take new ids. The caller marks `new_id` dirty, which
+        // exports them.
+        rekey_comments(conn, Some(new_id))?;
 
         Ok(())
     }
@@ -12379,99 +12382,19 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// The file's comment id is not used: every clone derives the id from the
+    /// comment's content, so the file's value is at best the same number and
+    /// at worst another clone's counter.
     fn insert_comment_for_import(&self, issue_id: &str, comment: &Comment) -> Result<()> {
-        let created_at = comment.created_at.to_rfc3339();
-        if comment.id <= 0 {
-            return self.insert_import_comment_without_id(issue_id, comment, &created_at);
-        }
-
-        match self.insert_import_comment_with_id(issue_id, comment, &created_at) {
-            Ok(()) => Ok(()),
-            Err(BeadsError::Database(error)) if is_import_comment_id_collision(&error) => {
-                match self.import_comment_id_owner(comment.id)? {
-                    // Whenever ANY row already owns this id — a comment on
-                    // another issue OR an earlier comment of *this* issue whose
-                    // id was AUTO-reallocated to the same value during this
-                    // import — reinsert without an explicit id so AUTOINCREMENT
-                    // assigns a fresh one. True same-issue JSONL duplicates are
-                    // rejected earlier by `validate_import_comments_for_issue`,
-                    // so this cannot silently swallow a genuine duplicate
-                    // (issue #374).
-                    Some(_) => {
-                        self.insert_import_comment_without_id(issue_id, comment, &created_at)
-                    }
-                    None => Err(BeadsError::Database(error)),
-                }
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn insert_import_comment_without_id(
-        &self,
-        issue_id: &str,
-        comment: &Comment,
-        created_at: &str,
-    ) -> Result<()> {
-        self.conn.execute_with_params(
-            "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
-            &[
-                SqliteValue::from(issue_id),
-                SqliteValue::from(comment.author.as_str()),
-                SqliteValue::from(comment.body.as_str()),
-                SqliteValue::from(created_at),
-            ],
+        insert_comment_with_content_id(
+            &self.conn,
+            issue_id,
+            &comment.author,
+            &comment.body,
+            comment.created_at,
         )?;
         Ok(())
     }
-
-    fn insert_import_comment_with_id(
-        &self,
-        issue_id: &str,
-        comment: &Comment,
-        created_at: &str,
-    ) -> Result<()> {
-        self.conn.execute_with_params(
-            "INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, ?)",
-            &[
-                SqliteValue::from(comment.id),
-                SqliteValue::from(issue_id),
-                SqliteValue::from(comment.author.as_str()),
-                SqliteValue::from(comment.body.as_str()),
-                SqliteValue::from(created_at),
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn import_comment_id_owner(&self, comment_id: i64) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_with_params(
-                "SELECT issue_id FROM comments WHERE id = ? LIMIT 1",
-                &[SqliteValue::from(comment_id)],
-            )?
-            .into_iter()
-            .next()
-            .and_then(|row| {
-                row.get(0)
-                    .and_then(SqliteValue::as_text)
-                    .map(str::to_string)
-            }))
-    }
-}
-
-fn is_import_comment_id_collision(error: &DbError) -> bool {
-    matches!(
-        error,
-        DbError::PrimaryKeyViolation | DbError::UniqueViolation { .. }
-    ) || matches!(
-        error,
-        DbError::Internal(message)
-            if message.contains("VDBE halted with code 19")
-                && (message.contains("PRIMARY KEY constraint failed")
-                    || message.contains("UNIQUE constraint failed"))
-    )
 }
 
 /// Implement the `DependencyStore` trait for `SqliteStorage`.
@@ -12495,8 +12418,11 @@ fn validate_issue_comments_for_create(issue: &Issue) -> Result<()> {
     Ok(())
 }
 
+/// A file's comment ids are not checked for duplicates: they are ignored on
+/// import (see `insert_comment_for_import`), and a merge of two branches that
+/// both commented on one issue can legitimately carry one counter id on two
+/// different comments.
 fn validate_import_comments_for_issue(issue_id: &str, comments: &[Comment]) -> Result<()> {
-    let mut seen_comment_ids = HashSet::new();
     for comment in comments {
         if comment.issue_id != issue_id {
             return Err(BeadsError::validation(
@@ -12516,41 +12442,139 @@ fn validate_import_comments_for_issue(issue_id: &str, comments: &[Comment]) -> R
         };
         CommentValidator::validate(&comment_for_validation)
             .map_err(BeadsError::from_validation_errors)?;
-
-        if comment.id > 0 && !seen_comment_ids.insert(comment.id) {
-            return Err(BeadsError::validation(
-                "comment.id",
-                format!("duplicate import comment id {}", comment.id),
-            ));
-        }
     }
 
     Ok(())
 }
 
-fn insert_comment_row(conn: &Connection, issue_id: &str, author: &str, text: &str) -> Result<i64> {
-    conn.execute_with_params(
-        "INSERT INTO comments (issue_id, author, text, created_at)
-         VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-        &[
-            SqliteValue::from(issue_id),
-            SqliteValue::from(author),
-            SqliteValue::from(text),
-        ],
-    )?;
-    let row = conn.query_row("SELECT last_insert_rowid()")?;
-    let comment_id = row
-        .get(0)
-        .and_then(SqliteValue::as_integer)
-        .ok_or_else(|| {
-            BeadsError::Config("comments insert did not return last_insert_rowid".to_string())
-        })?;
-    if comment_id <= 0 {
-        return Err(BeadsError::Config(format!(
-            "comments insert returned invalid last_insert_rowid: {comment_id}"
-        )));
+/// Re-key every stored comment to its content id, and mark the issues whose
+/// comment ids moved dirty so the next flush writes them. Schema v20.
+///
+/// # Errors
+///
+/// Returns an error if a comment row cannot be read or rewritten.
+pub(crate) fn recompute_comment_ids(conn: &Connection) -> Result<()> {
+    let moved = rekey_comments(conn, None)?;
+    let marked_at = Utc::now().to_rfc3339();
+    for issue_id in moved {
+        conn.execute_with_params(
+            "INSERT OR REPLACE INTO dirty_issues (issue_id, marked_at) VALUES (?, ?)",
+            &[
+                SqliteValue::from(issue_id.as_str()),
+                SqliteValue::from(marked_at.as_str()),
+            ],
+        )?;
     }
-    Ok(comment_id)
+    Ok(())
+}
+
+/// Re-insert comments under their content ids — every comment, or one issue's
+/// — and return the issues whose comment ids changed.
+fn rekey_comments(
+    conn: &Connection,
+    issue_id: Option<&str>,
+) -> Result<std::collections::BTreeSet<String>> {
+    const SELECT: &str = "SELECT id, issue_id, author, text, created_at FROM comments";
+    let rows = match issue_id {
+        Some(issue_id) => conn.query_with_params(
+            &format!("{SELECT} WHERE issue_id = ? ORDER BY id"),
+            &[SqliteValue::from(issue_id)],
+        )?,
+        None => conn.query(&format!("{SELECT} ORDER BY id"))?,
+    };
+    let comments = rows
+        .iter()
+        .map(comment_from_row)
+        .collect::<Result<Vec<_>>>()?;
+    match issue_id {
+        Some(issue_id) => {
+            conn.execute_with_params(
+                "DELETE FROM comments WHERE issue_id = ?",
+                &[SqliteValue::from(issue_id)],
+            )?;
+        }
+        None => {
+            conn.execute("DELETE FROM comments")?;
+        }
+    }
+
+    let mut moved = std::collections::BTreeSet::new();
+    for comment in &comments {
+        let id = insert_comment_with_content_id(
+            conn,
+            &comment.issue_id,
+            &comment.author,
+            &comment.body,
+            comment.created_at,
+        )?;
+        if id != comment.id {
+            moved.insert(comment.issue_id.clone());
+        }
+    }
+    Ok(moved)
+}
+
+fn insert_comment_row(conn: &Connection, issue_id: &str, author: &str, text: &str) -> Result<i64> {
+    // Stamped here rather than by `CURRENT_TIMESTAMP`, so the time the id is
+    // derived from and the time stored are the same instant.
+    insert_comment_with_content_id(conn, issue_id, author, text, Utc::now())
+}
+
+/// Insert a comment under its content id ([`crate::util::comment_content_id`])
+/// and return that id.
+///
+/// Every comment insert goes through here, so a comment has the same id on
+/// every clone. An id already held by the *same* comment on the same issue is
+/// that comment, and nothing is inserted. One held by a different comment is
+/// re-drawn; at 52 bits that is vanishingly rare, but it must not merge two
+/// comments into one.
+pub(crate) fn insert_comment_with_content_id(
+    conn: &Connection,
+    issue_id: &str,
+    author: &str,
+    text: &str,
+    created_at: DateTime<Utc>,
+) -> Result<i64> {
+    const ATTEMPTS: u32 = 16;
+    for attempt in 0..ATTEMPTS {
+        let id = crate::util::comment_id_candidate(issue_id, author, created_at, text, attempt);
+        let holder = match conn.query_row_with_params(
+            "SELECT id, issue_id, author, text, created_at FROM comments WHERE id = ?",
+            &[SqliteValue::from(id)],
+        ) {
+            Ok(row) => Some(comment_from_row(&row)?),
+            Err(DbError::QueryReturnedNoRows) => None,
+            Err(error) => return Err(error.into()),
+        };
+        match holder {
+            None => {
+                conn.execute_with_params(
+                    "INSERT INTO comments (id, issue_id, author, text, created_at) \
+                     VALUES (?, ?, ?, ?, ?)",
+                    &[
+                        SqliteValue::from(id),
+                        SqliteValue::from(issue_id),
+                        SqliteValue::from(author),
+                        SqliteValue::from(text),
+                        SqliteValue::from(created_at.to_rfc3339()),
+                    ],
+                )?;
+                return Ok(id);
+            }
+            Some(existing)
+                if existing.issue_id == issue_id
+                    && existing.author == author
+                    && existing.body == text
+                    && existing.created_at == created_at =>
+            {
+                return Ok(id);
+            }
+            Some(_) => {}
+        }
+    }
+    Err(BeadsError::Config(format!(
+        "no free comment id for a comment on {issue_id} after {ATTEMPTS} attempts"
+    )))
 }
 
 fn fetch_comment(conn: &Connection, comment_id: i64) -> Result<Comment> {
@@ -16733,7 +16757,10 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_comments_for_import_rejects_duplicate_comment_ids_for_same_issue() {
+    fn test_sync_comments_for_import_keeps_two_comments_that_share_a_file_id() {
+        // A merge of two branches that both commented on one issue can carry
+        // one clone-local counter id on two different comments. The file's id
+        // is ignored on import, so both land, each under its content id.
         let mut storage = SqliteStorage::open_memory().unwrap();
         let t1 = Utc.with_ymd_and_hms(2025, 7, 4, 0, 0, 0).unwrap();
 
@@ -16761,21 +16788,28 @@ mod tests {
             id: 42,
             issue_id: issue.id.clone(),
             author: "alice".to_string(),
-            body: "duplicate imported comment".to_string(),
+            body: "second imported comment".to_string(),
             created_at: t1 + chrono::Duration::minutes(1),
         };
 
-        let error = storage
-            .sync_comments_for_import(&issue.id, &[first, second])
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("duplicate import comment id 42"),
-            "duplicate same-issue import comment IDs must remain invalid: {error:?}"
-        );
-        assert_eq!(
-            storage.get_comments(&issue.id).unwrap(),
-            vec![existing_comment.clone()]
-        );
+        storage
+            .sync_comments_for_import(&issue.id, &[first.clone(), second.clone()])
+            .unwrap();
+        let ids: Vec<i64> = storage
+            .get_comments(&issue.id)
+            .unwrap()
+            .iter()
+            .map(|comment| comment.id)
+            .collect();
+        let content_id = |comment: &crate::model::Comment| {
+            crate::util::comment_content_id(
+                &comment.issue_id,
+                &comment.author,
+                comment.created_at,
+                &comment.body,
+            )
+        };
+        assert_eq!(ids, vec![content_id(&first), content_id(&second)]);
 
         let wrong_issue_comment = crate::model::Comment {
             id: 44,
@@ -16791,9 +16825,13 @@ mod tests {
             error.to_string().contains("comment.issue_id"),
             "wrong comment owner must fail validation: {error:?}"
         );
-        assert_eq!(
-            storage.get_comments(&issue.id).unwrap(),
-            vec![existing_comment]
+        assert_eq!(storage.get_comments(&issue.id).unwrap().len(), 2);
+        assert!(
+            !storage
+                .get_comments(&issue.id)
+                .unwrap()
+                .contains(&existing_comment),
+            "the import replaced the issue's comments with the file's"
         );
     }
 

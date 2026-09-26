@@ -1561,7 +1561,8 @@ git config merge.beads.driver "br merge-driver %O %A %B"
   `updated_at` (a tie goes to ours).
 - Labels, dependencies and comments of an issue both sides changed merge as
   sets: an addition on either side survives, a removal stays removed. Comments
-  match by author, time and text, since comment ids are per-clone counters.
+  match by author, time and text rather than id, because files written before
+  v1.9.1 carry per-clone counter ids.
 - A tombstone beats a live copy on the other side; the dropped edit is reported
   on stderr.
 - Output is sorted by id; a record taken unchanged from one side keeps its

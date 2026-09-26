@@ -281,8 +281,9 @@ fn dependency_key(dep: &Dependency) -> (String, String, String) {
     )
 }
 
-/// Comments are matched by what they say, not by `id`: ids are each clone's
-/// own database counter, so two branches' new comments can share one.
+/// Comments are matched by what they say, not by `id`: a file written before
+/// v1.9.1 carries each clone's database counter as the id, so two branches'
+/// new comments can share one.
 fn comment_key(comment: &Comment) -> (String, chrono::DateTime<chrono::Utc>, String) {
     (
         comment.author.clone(),

@@ -1671,8 +1671,8 @@ fn verify_rebuilt_database_postconditions(
     verify_rebuilt_table_count(
         storage,
         "dirty_issues",
-        0,
-        "dirty markers should be absent immediately after JSONL rebuild",
+        import_result.issues_marked_dirty,
+        "dirty markers set by the JSONL import (records whose comment ids were not yet content ids)",
     )?;
     verify_rebuilt_table_count(
         storage,

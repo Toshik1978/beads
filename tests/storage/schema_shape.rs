@@ -1044,7 +1044,7 @@ fn fresh_init_stamps_the_current_schema_version() {
     // migrated without the stamp being written.
     assert_eq!(
         user_version(&conn),
-        19,
+        20,
         "PRAGMA user_version on a fresh database changed"
     );
     assert_eq!(

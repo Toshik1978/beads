@@ -210,12 +210,18 @@ fn comments_with_same_timestamp_are_ordered_by_id() {
         )
         .unwrap();
 
+    // Ids are derived from content, so "ordered by id" is a fixed order every
+    // clone agrees on, not insertion order.
+    let mut expected = ["second by id", "first by id"]
+        .map(|body| beads::util::comment_content_id(&issue.id, "reviewer", created_at, body));
+    expected.sort_unstable();
+
     let comments = storage.get_comments(&issue.id).unwrap();
     let ids = comments
         .iter()
         .map(|comment| comment.id)
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec![10, 20]);
+    assert_eq!(ids, expected);
 
     let exported = storage
         .get_issue_for_export(&issue.id)
@@ -226,7 +232,7 @@ fn comments_with_same_timestamp_are_ordered_by_id() {
         .iter()
         .map(|comment| comment.id)
         .collect::<Vec<_>>();
-    assert_eq!(exported_ids, vec![10, 20]);
+    assert_eq!(exported_ids, expected);
 }
 
 #[test]
