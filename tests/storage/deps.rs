@@ -149,7 +149,7 @@ fn remove_dependency_removes_link() {
     assert!(removed);
 
     let deps = storage.get_dependencies(&blocked.id).unwrap();
-    assert!(deps.is_empty());
+    assert_eq!(deps, [] as [String; 0]);
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn get_dependencies_empty_for_new_issue() {
     storage.create_issue(&issue, "tester").unwrap();
 
     let deps = storage.get_dependencies(&issue.id).unwrap();
-    assert!(deps.is_empty());
+    assert_eq!(deps, [] as [String; 0]);
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn get_dependents_empty_for_new_issue() {
     storage.create_issue(&issue, "tester").unwrap();
 
     let dependents = storage.get_dependents(&issue.id).unwrap();
-    assert!(dependents.is_empty());
+    assert_eq!(dependents, [] as [String; 0]);
 }
 
 #[test]
@@ -457,7 +457,7 @@ fn detect_all_cycles_finds_cycles() {
         .unwrap();
 
     let cycles = all_cycle_witnesses(&storage);
-    assert!(!cycles.is_empty());
+    assert_ne!(cycles, [] as [Vec<String>; 0]);
 
     // At least one cycle should contain all three issues
     let has_full_cycle = cycles
@@ -487,7 +487,7 @@ fn detect_all_cycles_empty_when_no_cycles() {
         .unwrap();
 
     let cycles = all_cycle_witnesses(&storage);
-    assert!(cycles.is_empty());
+    assert_eq!(cycles, [] as [Vec<String>; 0]);
 }
 
 #[test]
@@ -651,8 +651,11 @@ fn dependency_cycle_report_separates_active_from_archived_and_filters_blocking()
     );
 
     let blocking_report = storage.detect_dependency_cycle_report(true).unwrap();
-    assert!(blocking_report.active_cycles.is_empty());
-    assert!(blocking_report.archived_closed_cycles.is_empty());
+    assert_eq!(blocking_report.active_cycles, [] as [Vec<String>; 0]);
+    assert_eq!(
+        blocking_report.archived_closed_cycles,
+        [] as [Vec<String>; 0]
+    );
 }
 
 // ============================================================================
@@ -733,7 +736,10 @@ fn deep_hierarchy_five_levels() {
         storage.get_dependencies(&level4.id).unwrap(),
         vec![level5.id.clone()]
     );
-    assert!(storage.get_dependencies(&level5.id).unwrap().is_empty());
+    assert_eq!(
+        storage.get_dependencies(&level5.id).unwrap(),
+        [] as [String; 0]
+    );
 
     // Would l5 -> l0 create a cycle? Yes!
     let would_cycle = storage
@@ -854,7 +860,7 @@ fn diamond_pattern_dependencies() {
 
     // No cycles currently exist
     let cycles = all_cycle_witnesses(&storage);
-    assert!(cycles.is_empty());
+    assert_eq!(cycles, [] as [Vec<String>; 0]);
 }
 
 #[test]
@@ -1050,11 +1056,11 @@ fn remove_all_dependencies_clears_all() {
 
     // main should have no outgoing deps
     let deps = storage.get_dependencies(&main.id).unwrap();
-    assert!(deps.is_empty());
+    assert_eq!(deps, [] as [String; 0]);
 
     // dependent should have no dep on main anymore
     let dependents = storage.get_dependents(&main.id).unwrap();
-    assert!(dependents.is_empty());
+    assert_eq!(dependents, [] as [String; 0]);
 }
 
 // ============================================================================

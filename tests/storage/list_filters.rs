@@ -824,7 +824,7 @@ fn filter_no_matches_returns_empty() {
     };
 
     let results = storage.list_issues(&filters).unwrap();
-    assert!(results.is_empty());
+    assert_eq!(results, [] as [beads::model::Issue; 0]);
 }
 
 #[test]

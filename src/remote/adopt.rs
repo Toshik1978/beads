@@ -785,7 +785,10 @@ mod tests {
         // Deliberately supplied child-first.
         let order = topological_order(vec![child, parent], &HashMap::new());
         assert_eq!(ids(&order), ["EM-10", "EM-11"]);
-        assert!(order.deferred.is_empty());
+        assert_eq!(
+            order.deferred,
+            [] as [crate::remote::adopt::DeferredAdoption; 0]
+        );
     }
 
     #[test]
@@ -795,7 +798,10 @@ mod tests {
         let c = candidate_with_parent("EM-3", Some("EM-2"));
         let order = topological_order(vec![c, b, a], &HashMap::new());
         assert_eq!(ids(&order), ["EM-1", "EM-2", "EM-3"]);
-        assert!(order.deferred.is_empty());
+        assert_eq!(
+            order.deferred,
+            [] as [crate::remote::adopt::DeferredAdoption; 0]
+        );
     }
 
     #[test]
@@ -806,7 +812,10 @@ mod tests {
         paired.insert("EM-10".to_string(), "bds-4r2".to_string());
         let order = topological_order(vec![child], &paired);
         assert_eq!(order.ordered.len(), 1, "a paired parent is not a blocker");
-        assert!(order.deferred.is_empty());
+        assert_eq!(
+            order.deferred,
+            [] as [crate::remote::adopt::DeferredAdoption; 0]
+        );
     }
 
     #[test]

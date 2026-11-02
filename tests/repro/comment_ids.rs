@@ -174,7 +174,7 @@ fn importing_counter_ids_flushes_content_ids_once() {
     let exported = export_to_jsonl(&storage, &path, &ExportConfig::default()).unwrap();
     finalize_export(&mut storage, &exported, Some(&exported.issue_hashes), &path).unwrap();
     import(&mut storage, &path);
-    assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+    assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
 }
 
 /// The same note posted to several issues in one go shares author, time and

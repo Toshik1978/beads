@@ -3173,7 +3173,7 @@ mod tests {
 
         // Execute status (would need to serialize manually for test)
         let dirty_ids = storage.get_dirty_issue_ids().unwrap();
-        assert!(dirty_ids.is_empty());
+        assert_eq!(dirty_ids, [] as [String; 0]);
     }
 
     #[test]
@@ -3184,7 +3184,7 @@ mod tests {
         storage.create_issue(&issue, "test").unwrap();
 
         let dirty_ids = storage.get_dirty_issue_ids().unwrap();
-        assert!(!dirty_ids.is_empty());
+        assert_ne!(dirty_ids, [] as [String; 0]);
     }
 
     #[test]
@@ -3270,14 +3270,12 @@ mod tests {
             "unexpected restore failure: {err}"
         );
         assert!(storage.get_issue("bd-delete").unwrap().is_none());
-        assert!(storage.get_labels("bd-delete").unwrap().is_empty());
-        assert!(
-            storage
-                .get_dependencies_full("bd-delete")
-                .unwrap()
-                .is_empty()
+        assert_eq!(storage.get_labels("bd-delete").unwrap(), [] as [String; 0]);
+        assert_eq!(
+            storage.get_dependencies_full("bd-delete").unwrap(),
+            [] as [crate::model::Dependency; 0]
         );
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
     }
 
     #[test]

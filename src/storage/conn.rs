@@ -2083,7 +2083,7 @@ mod tests {
         let none = stmt
             .query_with_params(&[SqliteValue::from("zz")])
             .expect("query");
-        assert!(none.is_empty());
+        assert_eq!(none, [] as [crate::storage::conn::Row; 0]);
     }
 
     // -- open flags ---------------------------------------------------------

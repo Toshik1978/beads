@@ -224,7 +224,7 @@ fn id_parsing_fixtures() {
     let parsed = parse_id("bd-abc123").unwrap();
     assert_eq!(parsed.prefix, "bd");
     assert_eq!(parsed.hash, "abc123");
-    assert!(parsed.child_path.is_empty());
+    assert_eq!(parsed.child_path, [] as [u32; 0]);
     assert!(parsed.is_root());
 
     // Child ID

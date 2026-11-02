@@ -465,7 +465,7 @@ mod tests {
     fn load_routes_empty() {
         let dir = TempDir::new().unwrap();
         let routes = load_routes(&dir.path().join("routes.jsonl")).unwrap();
-        assert!(routes.is_empty());
+        assert_eq!(routes, [] as [crate::config::routing::RouteEntry; 0]);
     }
 
     #[test]

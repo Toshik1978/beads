@@ -12905,7 +12905,10 @@ mod tests {
             let issue = storage.get_issue(id).unwrap().unwrap();
             assert_eq!(issue.status, Status::InProgress);
             assert!(issue.acceptance_criteria.is_none());
-            assert!(storage.get_comments(id).unwrap().is_empty());
+            assert_eq!(
+                storage.get_comments(id).unwrap(),
+                [] as [crate::model::Comment; 0]
+            );
         }
     }
 
@@ -13299,7 +13302,10 @@ mod tests {
         assert_eq!(warnings[0].hard_limit, Some(3));
         assert_eq!(warnings[1].capacity_kind, "group");
         assert_eq!(warnings[1].capacity_name, "active_work");
-        assert!(storage.take_capacity_warnings().is_empty());
+        assert_eq!(
+            storage.take_capacity_warnings(),
+            [] as [crate::close_policy::WorkflowCapacityWarning; 0]
+        );
     }
 
     #[test]
@@ -14275,7 +14281,7 @@ mod tests {
 
         assert_eq!(updated.priority, Priority::HIGH);
         assert_eq!(updated.updated_at, before.updated_at);
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
     }
 
     #[test]
@@ -14324,7 +14330,7 @@ mod tests {
         assert_eq!(after.deleted_at, tombstone.deleted_at);
         assert_eq!(after.deleted_by, tombstone.deleted_by);
         assert_eq!(after.delete_reason, tombstone.delete_reason);
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
     }
 
     /*
@@ -14650,7 +14656,10 @@ mod tests {
             .add_label("bd-l-invalid", "bad label")
             .expect_err("invalid labels must be rejected at storage boundary");
         assert!(err.to_string().contains("invalid characters"));
-        assert!(storage.get_labels("bd-l-invalid").unwrap().is_empty());
+        assert_eq!(
+            storage.get_labels("bd-l-invalid").unwrap(),
+            [] as [String; 0]
+        );
     }
 
     #[test]
@@ -14803,7 +14812,7 @@ mod tests {
                 .contains(&"label-extra".to_string()),
             "bulk validation should avoid partially labeling earlier targets"
         );
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
     }
 
     #[test]
@@ -14828,8 +14837,11 @@ mod tests {
             err.to_string()
                 .contains("cannot add label to tombstone issue: bd-bulk-tomb")
         );
-        assert!(storage.get_labels("bd-bulk-active").unwrap().is_empty());
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(
+            storage.get_labels("bd-bulk-active").unwrap(),
+            [] as [String; 0]
+        );
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
     }
 
     #[test]
@@ -14946,7 +14958,7 @@ mod tests {
             storage.get_labels("bd-bulk-remove-active").unwrap(),
             vec!["bulk-removed".to_string()]
         );
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
     }
 
     #[test]
@@ -15383,7 +15395,7 @@ mod tests {
         let removed = storage.remove_dependency("bd-a1", "bd-b1").unwrap();
         assert!(removed);
         let deps = storage.get_dependencies("bd-a1").unwrap();
-        assert!(deps.is_empty());
+        assert_eq!(deps, [] as [String; 0]);
     }
 
     #[test]
@@ -15469,17 +15481,13 @@ mod tests {
             matches!(error, BeadsError::DependencyCycle { .. }),
             "unexpected bulk cycle error: {error:?}"
         );
-        assert!(
-            storage
-                .get_dependencies("bd-bulk-cycle-b")
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            storage.get_dependencies("bd-bulk-cycle-b").unwrap(),
+            [] as [String; 0]
         );
-        assert!(
-            storage
-                .get_dependencies("bd-bulk-cycle-c")
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            storage.get_dependencies("bd-bulk-cycle-c").unwrap(),
+            [] as [String; 0]
         );
     }
 
@@ -15846,7 +15854,7 @@ mod tests {
                 .as_deref(),
             Some("bd-parent-noop-parent")
         );
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
     }
 
     #[test]
@@ -16026,7 +16034,7 @@ mod tests {
             .expect("issue exists");
         assert_eq!(after.updated_at, before.updated_at);
         assert_eq!(storage.get_parent_id("bd-parent-clear-noop").unwrap(), None);
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
     }
 
     #[test]
@@ -16336,17 +16344,13 @@ mod tests {
         storage.add_dependency("bd-rel-cy2", "bd-rel-cy1", "related", "tester")?;
 
         // `related` edges form a cycle in the full graph but not the blocking one.
-        assert!(
-            !storage
-                .detect_dependency_cycle_report(false)?
-                .active_cycles
-                .is_empty()
+        assert_ne!(
+            storage.detect_dependency_cycle_report(false)?.active_cycles,
+            [] as [Vec<String>; 0]
         );
-        assert!(
-            storage
-                .detect_dependency_cycle_report(true)?
-                .active_cycles
-                .is_empty()
+        assert_eq!(
+            storage.detect_dependency_cycle_report(true)?.active_cycles,
+            [] as [Vec<String>; 0]
         );
         Ok(())
     }
@@ -16668,11 +16672,9 @@ mod tests {
             "unexpected embedded comment validation error: {err:?}"
         );
         assert!(storage.get_issue("bd-c-create-invalid").unwrap().is_none());
-        assert!(
-            storage
-                .get_comments("bd-c-create-invalid")
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            storage.get_comments("bd-c-create-invalid").unwrap(),
+            [] as [crate::model::Comment; 0]
         );
     }
 
@@ -17458,8 +17460,14 @@ mod tests {
             parent_blockers,
             vec!["bd-parent.1".to_string(), "bd-parent.2".to_string()]
         );
-        assert!(storage.get_blockers("bd-parent.1").unwrap().is_empty());
-        assert!(storage.get_blockers("bd-parent.2").unwrap().is_empty());
+        assert_eq!(
+            storage.get_blockers("bd-parent.1").unwrap(),
+            [] as [String; 0]
+        );
+        assert_eq!(
+            storage.get_blockers("bd-parent.2").unwrap(),
+            [] as [String; 0]
+        );
         assert_eq!(
             storage.get_blockers("bd-unrelated").unwrap(),
             vec!["bd-unrelated-blocker".to_string()]
@@ -20002,12 +20010,12 @@ mod tests {
             }),
             vec!["bd-s-label-a"]
         );
-        assert!(
+        assert_eq!(
             ids_for(ListFilters {
                 labels: Some(vec!["missing".to_string()]),
                 ..ListFilters::default()
-            })
-            .is_empty()
+            }),
+            [] as [String; 0]
         );
     }
 
@@ -20499,7 +20507,7 @@ mod tests {
         let generic_no_match = storage.search_issues("absent", &generic_filters).unwrap();
 
         assert_eq!(fast_no_match, generic_no_match);
-        assert!(fast_no_match.is_empty());
+        assert_eq!(fast_no_match, [] as [crate::model::Issue; 0]);
     }
 
     /// A corpus spanning every dimension the search `WHERE` clause filters on,
@@ -21494,7 +21502,7 @@ mod tests {
             .get_ready_issues(&ReadyFilters::default(), ReadySortPolicy::Priority)
             .unwrap();
 
-        assert!(ready.is_empty());
+        assert_eq!(ready, [] as [crate::model::Issue; 0]);
         assert!(
             storage.blocked_cache_marked_stale().unwrap(),
             "read-only ready query must not refresh or clear stale blocked-cache metadata"

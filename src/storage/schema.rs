@@ -4118,9 +4118,9 @@ mod tests {
 
     #[test]
     fn test_split_empty_input() {
-        assert!(split_sql_statements("").is_empty());
-        assert!(split_sql_statements("   ").is_empty());
-        assert!(split_sql_statements("  ;  ;  ").is_empty());
+        assert_eq!(split_sql_statements(""), [] as [&str; 0]);
+        assert_eq!(split_sql_statements("   "), [] as [&str; 0]);
+        assert_eq!(split_sql_statements("  ;  ;  "), [] as [&str; 0]);
     }
 
     #[test]

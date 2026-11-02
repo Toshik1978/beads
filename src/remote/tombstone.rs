@@ -265,7 +265,10 @@ mod tests {
             title: "live".into(),
             ..Issue::default()
         }];
-        assert!(plan_tombstones(&beads).is_empty());
+        assert_eq!(
+            plan_tombstones(&beads),
+            [] as [(String, crate::remote::tombstone::TombstoneAction); 0]
+        );
     }
 
     /// Whether `text` contains a `.delete(...)` call whose `entity` argument

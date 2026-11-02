@@ -229,17 +229,19 @@ fn e2e_remote_status_json_reports_the_plan_and_a_zero_write_count() {
         "the read-only verb must report no writes: {}",
         run.stdout
     );
-    assert!(
+    assert_eq!(
         payload["plan"]["creates"]
             .as_array()
             .expect("creates")
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
-    assert!(
+    assert_eq!(
         payload["plan"]["field_changes"]
             .as_array()
             .expect("field_changes")
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
     let notes = payload["plan"]["notes"].as_array().expect("notes");
     assert!(

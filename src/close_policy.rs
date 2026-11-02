@@ -1331,10 +1331,9 @@ mod tests {
             workflow.required_fields_for(Some("open"), "in_review"),
             vec![TransitionRequiredField::TransitionComment]
         );
-        assert!(
-            workflow
-                .required_fields_for(Some("open"), "closed")
-                .is_empty()
+        assert_eq!(
+            workflow.required_fields_for(Some("open"), "closed"),
+            [] as [crate::close_policy::TransitionRequiredField; 0]
         );
     }
 
@@ -1379,7 +1378,7 @@ mod tests {
             "Verified"
         );
 
-        assert!(
+        assert_eq!(
             evaluate_transition_required_fields(
                 &workflow,
                 "bd-1",
@@ -1387,8 +1386,8 @@ mod tests {
                 "in_review",
                 Some("- [x] Built\n- [X] Verified\n"),
                 Some("Ready for a fresh review"),
-            )
-            .is_empty()
+            ),
+            [] as [crate::close_policy::PolicyViolation; 0]
         );
     }
 
@@ -1823,7 +1822,7 @@ workflow:
   statuses: ["open", "closed"]
 "#;
         let raw: serde_yml::Value = serde_yml::from_str(yaml).unwrap();
-        assert!(detect_unknown_policy_fields(&raw).is_empty());
+        assert_eq!(detect_unknown_policy_fields(&raw), [] as [String; 0]);
     }
 
     #[test]
@@ -2210,7 +2209,7 @@ workflow:
     open: [in_progress]
 ";
         let raw: serde_yml::Value = serde_yml::from_str(yaml).unwrap();
-        assert!(detect_unknown_policy_fields(&raw).is_empty());
+        assert_eq!(detect_unknown_policy_fields(&raw), [] as [String; 0]);
     }
 
     // =========================================================================

@@ -5534,7 +5534,7 @@ routing:
         // or we need to verify the fallback mechanism
         let actor = resolve_actor(&layer);
         // Should be either USER env value or "unknown"
-        assert!(!actor.is_empty());
+        assert_ne!(actor, "");
     }
 
     #[test]

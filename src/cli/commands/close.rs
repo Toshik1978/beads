@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn test_close_args_default() {
         let args = CloseArgs::default();
-        assert!(args.ids.is_empty());
+        assert_eq!(args.ids, [] as [String; 0]);
         assert!(args.reason.is_none());
         assert!(args.transition_comment.is_none());
         assert!(!args.force);

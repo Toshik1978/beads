@@ -312,7 +312,7 @@ mod tests {
         std::fs::write(&jsonl_path, "{\"id\":\"test-1\"}\n").unwrap();
 
         let anomalies = classify_file_state(&db_path, &jsonl_path);
-        assert!(anomalies.is_empty());
+        assert_eq!(anomalies, [] as [crate::health::AnomalyClass; 0]);
         assert_eq!(worst_severity(&anomalies), WorkspaceHealth::Healthy);
     }
 

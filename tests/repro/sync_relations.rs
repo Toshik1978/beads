@@ -33,7 +33,7 @@ fn test_relation_updates_bump_timestamp_and_sync() {
     // Verify sync baseline
     let _target_issue = target_db.get_issue(&issue.id).unwrap().unwrap();
     let target_labels = target_db.get_labels(&issue.id).unwrap();
-    assert!(target_labels.is_empty());
+    assert_eq!(target_labels, [] as [String; 0]);
 
     // 3. Modify Source: Add Label
     // Sleep to ensure timestamp would advance if we updated it

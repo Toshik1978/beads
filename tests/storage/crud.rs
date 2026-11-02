@@ -175,9 +175,9 @@ fn get_issue_for_export_includes_relations() {
         .unwrap()
         .expect("issue exists");
 
-    assert!(!exported.dependencies.is_empty());
-    assert!(!exported.labels.is_empty());
-    assert!(!exported.comments.is_empty());
+    assert_ne!(exported.dependencies, [] as [beads::model::Dependency; 0]);
+    assert_ne!(exported.labels, [] as [String; 0]);
+    assert_ne!(exported.comments, [] as [beads::model::Comment; 0]);
     assert!(exported.labels.contains(&"test-label".to_string()));
 }
 
@@ -315,7 +315,7 @@ fn update_issue_empty_update_is_noop() {
 
     // Should NOT mark dirty since nothing changed
     let dirty_after = storage.get_dirty_issue_ids().unwrap();
-    assert!(dirty_after.is_empty());
+    assert_eq!(dirty_after, [] as [String; 0]);
 }
 
 #[test]

@@ -1073,7 +1073,7 @@ mod tests {
 
     #[test]
     fn test_strip_markdown_empty() {
-        assert!(strip_markdown("").is_empty());
+        assert_eq!(strip_markdown(""), "");
     }
 
     #[test]
@@ -1108,8 +1108,14 @@ mod tests {
 
     #[test]
     fn split_blocks_handles_empty_and_whitespace_input() {
-        assert!(split_blocks("").is_empty());
-        assert!(split_blocks("   \n\n  \n").is_empty());
+        assert_eq!(
+            split_blocks(""),
+            [] as [crate::format::markdown::Block<'_>; 0]
+        );
+        assert_eq!(
+            split_blocks("   \n\n  \n"),
+            [] as [crate::format::markdown::Block<'_>; 0]
+        );
     }
 
     #[test]

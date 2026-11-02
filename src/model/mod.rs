@@ -803,9 +803,9 @@ mod tests {
         }"#;
         let issue: Issue = serde_json::from_str(json).unwrap();
         assert!(issue.description.is_none());
-        assert!(issue.labels.is_empty());
-        assert!(issue.dependencies.is_empty());
-        assert!(issue.comments.is_empty());
+        assert_eq!(issue.labels, [] as [String; 0]);
+        assert_eq!(issue.dependencies, [] as [crate::model::Dependency; 0]);
+        assert_eq!(issue.comments, [] as [crate::model::Comment; 0]);
     }
 
     #[test]

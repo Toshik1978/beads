@@ -1294,7 +1294,7 @@ mod tests {
         assert_eq!(schema.schema_version, "1");
         assert_eq!(schema.tables, vec!["issues".to_string()]);
         assert!(schema.config.is_none());
-        assert!(schema.sample_issue_ids.is_empty());
+        assert_eq!(schema.sample_issue_ids, [] as [String; 0]);
     }
 
     #[test]

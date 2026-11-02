@@ -1191,7 +1191,7 @@ mod tests {
             DatasetIntegrityGuard::new(KnownDataset::ThisRepo).expect("should create guard");
 
         assert_eq!(guard.dataset_name(), "beads");
-        assert!(!guard.original_hash().is_empty());
+        assert_ne!(guard.original_hash(), "");
         assert!(!guard.fully_verified()); // Not yet verified
     }
 
