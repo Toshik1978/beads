@@ -1104,10 +1104,13 @@ mod tests {
             "a reconciled project must issue zero writes, got {:?}",
             server.write_requests()
         );
-        assert!(report.prototypes_created.is_empty());
-        assert!(report.fields_attached.is_empty());
-        assert!(report.values_added.is_empty());
-        assert!(report.defaults_changed.is_empty());
+        assert_eq!(report.prototypes_created, [] as [String; 0]);
+        assert_eq!(report.fields_attached, [] as [String; 0]);
+        assert_eq!(report.values_added, [] as [(String, Vec<String>); 0]);
+        assert_eq!(
+            report.defaults_changed,
+            [] as [crate::remote::youtrack::init::DefaultChange; 0]
+        );
         assert_eq!(report.projects_seen, ["EM"]);
     }
 
@@ -1843,7 +1846,10 @@ mod tests {
         )
         .expect("init");
 
-        assert!(report.defaults_changed.is_empty());
+        assert_eq!(
+            report.defaults_changed,
+            [] as [crate::remote::youtrack::init::DefaultChange; 0]
+        );
         assert!(
             server.write_requests().is_empty(),
             "{:?}",

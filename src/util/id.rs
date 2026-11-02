@@ -1050,7 +1050,7 @@ mod tests {
     fn test_find_matching_ids_no_match() {
         let ids = mock_db();
         let matches = find_matching_ids(&ids, "zzz");
-        assert!(matches.is_empty());
+        assert_eq!(matches, [] as [String; 0]);
     }
 
     // ========================================================================
@@ -1090,7 +1090,7 @@ mod tests {
         let parsed = parse_id("bd-abc123").unwrap();
         assert_eq!(parsed.prefix, "bd");
         assert_eq!(parsed.hash, "abc123");
-        assert!(parsed.child_path.is_empty());
+        assert_eq!(parsed.child_path, [] as [u32; 0]);
         assert!(parsed.is_root());
         assert_eq!(parsed.child_path.len(), 0);
     }
@@ -1100,7 +1100,7 @@ mod tests {
         let parsed = parse_id("bead-me-up-3e9").unwrap();
         assert_eq!(parsed.prefix, "bead-me-up");
         assert_eq!(parsed.hash, "3e9");
-        assert!(parsed.child_path.is_empty());
+        assert_eq!(parsed.child_path, [] as [u32; 0]);
 
         let parsed2 = parse_id("document-intelligence-0sa.2").unwrap();
         assert_eq!(parsed2.prefix, "document-intelligence");

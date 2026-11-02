@@ -862,9 +862,9 @@ mod golden_snapshot_tests {
 
         let diff = TextDiff::compare(&snap1, &snap2);
         assert!(diff.matches);
-        assert!(diff.missing_lines.is_empty());
-        assert!(diff.extra_lines.is_empty());
-        assert!(diff.different_lines.is_empty());
+        assert_eq!(diff.missing_lines, [] as [String; 0]);
+        assert_eq!(diff.extra_lines, [] as [String; 0]);
+        assert_eq!(diff.different_lines, [] as [(String, String); 0]);
     }
 
     #[test]

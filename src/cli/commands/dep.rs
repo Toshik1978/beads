@@ -2376,7 +2376,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(deps.is_empty());
+        assert_eq!(
+            deps,
+            [] as [crate::storage::sqlite::BulkDependencyInsert; 0]
+        );
     }
 
     #[test]

@@ -5685,7 +5685,7 @@ mod tests {
         let result = export_to_jsonl(&storage, &output_path, &config).unwrap();
 
         assert_eq!(result.exported_count, 0);
-        assert!(result.exported_ids.is_empty());
+        assert_eq!(result.exported_ids, [] as [String; 0]);
         assert!(output_path.exists());
     }
 
@@ -6677,7 +6677,7 @@ mod tests {
         normalize_issue(&mut issue);
 
         assert!(issue.content_hash.is_some());
-        assert!(!issue.content_hash.as_ref().unwrap().is_empty());
+        assert_ne!(issue.content_hash.as_ref().unwrap(), "");
     }
 
     #[test]
@@ -7038,7 +7038,7 @@ mod tests {
         let result = export_to_jsonl(&storage, &output_path, &config).unwrap();
 
         // Result should include a non-empty content hash
-        assert!(!result.content_hash.is_empty());
+        assert_ne!(result.content_hash, "");
         // Hash should be hex (64 chars for SHA256)
         assert_eq!(result.content_hash.len(), 64);
     }
@@ -7854,7 +7854,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
         assert!(
             storage
                 .get_metadata(METADATA_JSONL_CONTENT_HASH)
@@ -7929,7 +7929,7 @@ mod tests {
             !second.flushed,
             "byte-identical dirty markers should not rewrite JSONL"
         );
-        assert!(storage.get_dirty_issue_ids().unwrap().is_empty());
+        assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
         assert_eq!(fs::read_to_string(&output_path).unwrap(), before);
     }
 
@@ -9219,8 +9219,11 @@ mod tests {
 
         // Should keep bd-001 (in all three), bd-002 (local only), bd-003 (external only)
         assert_eq!(report.kept.len(), 3);
-        assert!(report.conflicts.is_empty());
-        assert!(report.deleted.is_empty());
+        assert_eq!(
+            report.conflicts,
+            [] as [(String, crate::sync::ConflictType); 0]
+        );
+        assert_eq!(report.deleted, [] as [String; 0]);
     }
 
     #[test]
@@ -9247,7 +9250,7 @@ mod tests {
         let report = three_way_merge(&context, ConflictResolution::PreferNewer, Some(&tombstones));
 
         // Should NOT keep the tombstoned issue
-        assert!(report.kept.is_empty());
+        assert_eq!(report.kept, [] as [crate::model::Issue; 0]);
         assert_eq!(report.tombstone_protected.len(), 1);
         assert!(report.tombstone_protected.contains(&"bd-tomb".to_string()));
     }
@@ -9275,7 +9278,7 @@ mod tests {
 
         // Should keep local even if tombstoned
         assert_eq!(report.kept.len(), 1);
-        assert!(report.tombstone_protected.is_empty());
+        assert_eq!(report.tombstone_protected, [] as [String; 0]);
     }
 
     #[test]
@@ -9307,7 +9310,10 @@ mod tests {
             Some(&tombstones),
         );
 
-        assert!(report.conflicts.is_empty());
+        assert_eq!(
+            report.conflicts,
+            [] as [(String, crate::sync::ConflictType); 0]
+        );
         assert_eq!(report.tombstone_protected, vec!["bd-tomb".to_string()]);
         assert_eq!(report.kept.len(), 1);
         assert_eq!(report.kept[0].status, crate::model::Status::Tombstone);
@@ -9329,7 +9335,7 @@ mod tests {
         let context = MergeContext::new(base, left, right);
         let report = three_way_merge(&context, ConflictResolution::PreferNewer, None);
 
-        assert!(report.kept.is_empty());
+        assert_eq!(report.kept, [] as [crate::model::Issue; 0]);
         assert_eq!(report.deleted.len(), 1);
         assert!(report.deleted.contains(&"bd-del".to_string()));
     }
@@ -9339,11 +9345,14 @@ mod tests {
         let context = MergeContext::default();
         let report = three_way_merge(&context, ConflictResolution::PreferNewer, None);
 
-        assert!(report.kept.is_empty());
-        assert!(report.deleted.is_empty());
-        assert!(report.conflicts.is_empty());
-        assert!(report.tombstone_protected.is_empty());
-        assert!(report.notes.is_empty());
+        assert_eq!(report.kept, [] as [crate::model::Issue; 0]);
+        assert_eq!(report.deleted, [] as [String; 0]);
+        assert_eq!(
+            report.conflicts,
+            [] as [(String, crate::sync::ConflictType); 0]
+        );
+        assert_eq!(report.tombstone_protected, [] as [String; 0]);
+        assert_eq!(report.notes, [] as [(String, String); 0]);
     }
 
     #[test]

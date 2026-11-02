@@ -2295,7 +2295,7 @@ mod tests {
         assert_eq!(value["created_at"], "NORMALIZED_TIMESTAMP");
         assert_eq!(value["updated_at"], "NORMALIZED_TIMESTAMP");
         assert_eq!(value["id"], "bd-HASH"); // invariant: NormalizationRules placeholder, not ID-pinning
-        assert!(!log.is_empty());
+        assert_ne!(log, [] as [String; 0]);
     }
 
     #[test]
@@ -2620,7 +2620,7 @@ mod tests {
         // Nested strings should also have CRLF normalized
         assert_eq!(value["issues"][0]["description"], "First\nitem");
         assert_eq!(value["issues"][1]["description"], "Second\nitem");
-        assert!(!log.is_empty());
+        assert_ne!(log, [] as [String; 0]);
     }
 
     #[test]
@@ -2903,7 +2903,7 @@ mod tests {
         let issues = check_timestamp_tolerance(&br, &bd, &rules);
 
         // 5 seconds is within 10 second tolerance
-        assert!(issues.is_empty());
+        assert_eq!(issues, [] as [String; 0]);
     }
 
     #[test]
@@ -2924,7 +2924,7 @@ mod tests {
         let issues = check_timestamp_tolerance(&br, &bd, &rules);
 
         // 10 seconds exceeds 5 second tolerance
-        assert!(!issues.is_empty());
+        assert_ne!(issues, [] as [String; 0]);
         assert!(issues[0].contains("timestamp drift"));
     }
 
@@ -3042,7 +3042,7 @@ mod tests {
 
         // After normalization (masking timestamps and IDs), should match
         assert!(comparison.matched);
-        assert!(!log.is_empty());
+        assert_ne!(log, [] as [String; 0]);
     }
 
     #[test]

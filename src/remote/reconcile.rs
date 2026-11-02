@@ -197,7 +197,10 @@ mod tests {
         let pairing = pair_workspace(&config(), &beads, vec![remote("EM-4")]);
         assert_eq!(pairing.paired.len(), 1);
         assert_eq!(pairing.paired[0].bead_id, "bds-1");
-        assert!(pairing.unpaired_remote.is_empty());
+        assert_eq!(
+            pairing.unpaired_remote,
+            [] as [crate::remote::model::RemoteIssue; 0]
+        );
     }
 
     #[test]

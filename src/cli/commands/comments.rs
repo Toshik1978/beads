@@ -547,7 +547,7 @@ mod tests {
         // Since we can't easily control env, just test that it doesn't panic
         // and returns something non-empty
         let result = resolve_author(None, Some(""));
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
         info!("test_resolve_author_empty_actor_falls_through: assertions passed");
     }
 

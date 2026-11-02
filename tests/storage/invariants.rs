@@ -951,7 +951,7 @@ fn list_filters_empty_result() {
         ..Default::default()
     };
     let issues = storage.list_issues(&filters).unwrap();
-    assert!(issues.is_empty());
+    assert_eq!(issues, [] as [beads::model::Issue; 0]);
 }
 
 #[test]

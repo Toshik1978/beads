@@ -492,7 +492,7 @@ fn export_produces_deterministic_content_hash() {
 
     // Hashes should be identical
     assert_eq!(result1.content_hash, result2.content_hash);
-    assert!(!result1.content_hash.is_empty());
+    assert_ne!(result1.content_hash, "");
 }
 
 // ===== Empty Lines Handling Tests =====

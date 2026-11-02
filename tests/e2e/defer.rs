@@ -216,7 +216,7 @@ fn defer_json_output() {
     let result: Value = serde_json::from_str(&payload).expect("valid json");
 
     let deferred = result.as_array().expect("update json is an array");
-    assert!(!deferred.is_empty());
+    assert_ne!(deferred.as_slice(), [] as [Value; 0]);
 
     let first = &deferred[0];
     assert!(first.get("id").is_some(), "deferred item should have id");

@@ -1659,7 +1659,7 @@ mod tests {
             let result = reject_terminal_status_transition(Some(terminal));
             assert!(result.is_err(), "status {terminal} must be rejected");
             let err = result.unwrap_err();
-            assert!(!err.to_string().is_empty());
+            assert_ne!(err.to_string(), "");
         }
     }
 
@@ -2135,19 +2135,19 @@ mod tests {
 
         let reopened =
             config::open_storage_with_cli(&beads_dir, &CliOverrides::default()).expect("reopen");
-        assert!(
+        assert_eq!(
             reopened
                 .storage
                 .get_labels("bd-bulk-remove-a")
-                .expect("labels a")
-                .is_empty()
+                .expect("labels a"),
+            [] as [String; 0]
         );
-        assert!(
+        assert_eq!(
             reopened
                 .storage
                 .get_labels("bd-bulk-remove-b")
-                .expect("labels b")
-                .is_empty()
+                .expect("labels b"),
+            [] as [String; 0]
         );
         let mut dirty = reopened.storage.get_dirty_issue_ids().expect("dirty ids");
         dirty.sort();

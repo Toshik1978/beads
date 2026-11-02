@@ -658,7 +658,7 @@ fn e2e_history_restore_requires_force_when_exists() {
     sync_flush(&workspace);
 
     let backups = list_backup_files(&workspace);
-    assert!(!backups.is_empty());
+    assert_ne!(backups, [] as [String; 0]);
     let backup_file = &backups[0];
 
     // Try restore without --force
@@ -690,7 +690,7 @@ fn e2e_history_restore_succeeds_without_force_when_missing() {
     sync_flush(&workspace);
 
     let backups = list_backup_files(&workspace);
-    assert!(!backups.is_empty());
+    assert_ne!(backups, [] as [String; 0]);
     let backup_file = &backups[0];
 
     // Delete the current issues.jsonl
@@ -760,7 +760,7 @@ fn e2e_history_restore_quiet_mode() {
     sync_flush(&workspace);
 
     let backups = list_backup_files(&workspace);
-    assert!(!backups.is_empty());
+    assert_ne!(backups, [] as [String; 0]);
     let backup_file = &backups[0];
 
     // Restore with --quiet

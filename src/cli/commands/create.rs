@@ -548,9 +548,8 @@ fn generate_new_id(
                     ));
                 }
             }
-        } else {
-            Ok(candidate)
         }
+        Ok(candidate)
     } else {
         // Standard ID generation for non-child issues
         let id_gen = IdGenerator::new(input.id_config.clone());

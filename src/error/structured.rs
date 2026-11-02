@@ -1017,7 +1017,7 @@ mod tests {
         ];
 
         let suggestions = find_similar_ids("bd-abc12", &existing, 3);
-        assert!(!suggestions.is_empty());
+        assert_ne!(suggestions, [] as [String; 0]);
         // bd-abc123 and bd-abc124 should be closest (distance 1)
         assert!(suggestions.contains(&"bd-abc123".to_string()));
     }
@@ -1044,7 +1044,7 @@ mod tests {
 
         // Nothing within one edit: no suggestion at all, so the caller falls
         // back to the `br list` hint rather than inventing candidates.
-        assert!(find_similar_ids("bds-q42", &existing, 3).is_empty());
+        assert_eq!(find_similar_ids("bds-q42", &existing, 3), [] as [String; 0]);
     }
 
     /// Transpositions are the reason the distance is Damerau rather than plain

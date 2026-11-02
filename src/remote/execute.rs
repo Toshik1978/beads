@@ -1505,7 +1505,10 @@ mod tests {
             Some("EM-9")
         );
         assert_eq!(orphans.recoverable.len(), 1, "{orphans:?}");
-        assert!(orphans.ambiguous.is_empty());
+        assert_eq!(
+            orphans.ambiguous,
+            [] as [crate::remote::execute::AmbiguousStamp; 0]
+        );
     }
 
     #[test]
@@ -1519,7 +1522,10 @@ mod tests {
         };
         let orphans = orphaned_creates(&plan);
         assert!(orphans.recoverable.is_empty());
-        assert!(orphans.ambiguous.is_empty());
+        assert_eq!(
+            orphans.ambiguous,
+            [] as [crate::remote::execute::AmbiguousStamp; 0]
+        );
     }
 
     #[test]

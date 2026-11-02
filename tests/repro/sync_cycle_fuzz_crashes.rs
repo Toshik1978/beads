@@ -193,7 +193,7 @@ fn repro_sync_cycle_crash_mangled_binary() {
     let staleness = compute_staleness(&storage, &jsonl_path);
     match staleness {
         Ok(_) => {}
-        Err(err) => assert!(!err.to_string().trim().is_empty()),
+        Err(err) => assert_ne!(err.to_string().trim(), ""),
     }
 }
 
@@ -244,7 +244,7 @@ fn repro_sync_cycle_crlf_jsonl() {
     );
     match import_result {
         Ok(_) => {}
-        Err(err) => assert!(!err.to_string().trim().is_empty()),
+        Err(err) => assert_ne!(err.to_string().trim(), ""),
     }
 }
 
@@ -290,7 +290,7 @@ fn repro_sync_cycle_empty_jsonl() {
     );
     match import_result {
         Ok(_) => {}
-        Err(err) => assert!(!err.to_string().trim().is_empty()),
+        Err(err) => assert_ne!(err.to_string().trim(), ""),
     }
 }
 
@@ -331,10 +331,10 @@ fn repro_sync_cycle_stale_wal_shm() {
                 export_to_jsonl(&storage, &jsonl_path, &default_export_config(&beads_dir));
             match export_result {
                 Ok(_) => {}
-                Err(err) => assert!(!err.to_string().trim().is_empty()),
+                Err(err) => assert_ne!(err.to_string().trim(), ""),
             }
         }
-        Err(err) => assert!(!err.to_string().trim().is_empty()),
+        Err(err) => assert_ne!(err.to_string().trim(), ""),
     }
 }
 
@@ -349,7 +349,7 @@ fn repro_sync_cycle_preflight_malformed() {
         preflight_import(&jsonl_path, &default_import_config(&beads_dir), Some("bd"));
     match preflight_result {
         Ok(_) => {}
-        Err(err) => assert!(!err.to_string().trim().is_empty()),
+        Err(err) => assert_ne!(err.to_string().trim(), ""),
     }
 }
 

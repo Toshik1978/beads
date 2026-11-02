@@ -614,9 +614,9 @@ mod tests {
         let args = BlockedArgs::default();
         assert_eq!(args.limit, 0); // Rust Default, not clap default
         assert!(!args.detailed);
-        assert!(args.type_.is_empty());
-        assert!(args.priority.is_empty());
-        assert!(args.label.is_empty());
+        assert_eq!(args.type_, [] as [String; 0]);
+        assert_eq!(args.priority, [] as [String; 0]);
+        assert_eq!(args.label, [] as [String; 0]);
         info!("test_blocked_args_defaults: assertions passed");
     }
 

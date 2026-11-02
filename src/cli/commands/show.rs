@@ -1703,9 +1703,15 @@ mod tests {
         assert_eq!(child_details.parent.as_deref(), Some("bd-parent"));
         assert_eq!(child_details.labels, vec!["backend".to_string()]);
         assert_eq!(child_details.comments.len(), 1);
-        assert!(child_details.issue.labels.is_empty());
-        assert!(child_details.issue.dependencies.is_empty());
-        assert!(child_details.issue.comments.is_empty());
+        assert_eq!(child_details.issue.labels, [] as [String; 0]);
+        assert_eq!(
+            child_details.issue.dependencies,
+            [] as [crate::model::Dependency; 0]
+        );
+        assert_eq!(
+            child_details.issue.comments,
+            [] as [crate::model::Comment; 0]
+        );
 
         let parent_details = build_issue_details_from_jsonl(&parent, &issues_by_id).unwrap();
         assert_eq!(parent_details.dependents.len(), 1);

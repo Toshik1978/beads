@@ -771,7 +771,7 @@ mod tests {
             partial.applied,
             vec!["bd-1".to_string(), "bd-2".to_string()]
         );
-        assert!(partial.uncertain.is_empty());
+        assert_eq!(partial.uncertain, [] as [String; 0]);
         assert_eq!(
             partial.not_applied,
             vec!["bd-3".to_string(), "bd-4".to_string()]
@@ -828,7 +828,7 @@ mod tests {
             panic!("expected a partial-application error, got: {error}");
         };
         assert_eq!(partial.applied, vec!["bd-2".to_string()]);
-        assert!(partial.uncertain.is_empty());
+        assert_eq!(partial.uncertain, [] as [String; 0]);
         assert_eq!(
             partial.not_applied,
             vec!["bd-1".to_string(), "bd-3".to_string()],
