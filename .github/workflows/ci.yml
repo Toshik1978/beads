@@ -25,6 +25,13 @@ on:
       - 'docs/ARCHITECTURE.md'
       - 'docs/RELEASING.md'
       - 'docs/TESTING.md'
+  # Weekly, against main with no commit: CI installs `@stable` and `cargo audit`
+  # reads a live advisory database, so main can go red without a change here —
+  # a Rust release adds a clippy lint, a crate gets an advisory. Without this
+  # run the first job to notice is whichever PR happens to come next (usually a
+  # Dependabot one), which then fails for a reason that is not its own.
+  schedule:
+    - cron: '17 4 * * 1'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -65,7 +72,7 @@ jobs:
         # macOS bills at 10x Linux and most PRs here are Dependabot bumps, so
         # the second leg is added only for pushes to main. Every commit that
         # lands is still gated on both.
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        os: ${{ github.event_name != 'pull_request' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       # ~25GB of unused toolchains, which is the difference between running out
@@ -110,7 +117,7 @@ jobs:
       fail-fast: false
       matrix:
         # See the note on `lint`.
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        os: ${{ github.event_name != 'pull_request' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Reclaim runner disk
@@ -268,7 +275,7 @@ jobs:
       fail-fast: false
       matrix:
         # See the note on `lint`.
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        os: ${{ github.event_name != 'pull_request' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

@@ -16,6 +16,15 @@ updates:
         update-types:
           - minor
           - patch
+      # Security updates are a repository setting, not something this file can
+      # switch on; it only shapes their PRs. One advisory often lands on several
+      # crates of one stack at once (rustls, rustls-webpki, webpki-roots), and
+      # separate PRs each fail `cargo audit` on the others' advisories, so they
+      # are grouped into a single PR that can actually go green.
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Actions referenced by workflows under .github/workflows/.
   - package-ecosystem: github-actions
