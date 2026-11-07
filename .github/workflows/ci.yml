@@ -48,6 +48,9 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
+permissions:
+  contents: read
+
 jobs:
   # There is no rust-toolchain.toml (see CLAUDE.md), so every job installs
   # stable explicitly rather than trusting the runner image. Matrix jobs run

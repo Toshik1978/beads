@@ -18,6 +18,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   # A separate job so a bad tag fails in seconds, before the build job pulls its
   # 1GB+ cross-compilation image.
