@@ -3786,3 +3786,105 @@ fn e2e_unguessable_priority_still_explains_the_range() {
         "hint should still explain the range, got: {hint}"
     );
 }
+
+fn dirty_count(workspace: &BrWorkspace, label: &str) -> u64 {
+    let status = run_br(workspace, ["sync", "--status", "--json"], label);
+    assert!(status.status.success(), "status failed: {}", status.stderr);
+    let json: Value =
+        serde_json::from_str(&extract_json_payload(&status.stdout)).expect("parse status json");
+    json["dirty_count"].as_u64().expect("dirty_count")
+}
+
+#[test]
+fn rebuild_from_an_older_jsonl_leaves_no_dirty_rows() {
+    // The DB agrees with a JSONL that carries the flushed tombstone `t1`.
+    // Rebuilding from an older JSONL that predates `t1` must not restore it:
+    // a restored tombstone is re-marked dirty and wedges the workspace.
+    let _log = common::test_log("rebuild_from_an_older_jsonl_leaves_no_dirty_rows");
+    let workspace = BrWorkspace::new();
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+    let keep = run_br(&workspace, ["create", "Keep"], "create_keep");
+    assert!(keep.status.success(), "create keep: {}", keep.stderr);
+    let keep_id = parse_created_id(&keep.stdout);
+    assert!(
+        run_br(&workspace, ["sync", "--flush-only"], "flush_old")
+            .status
+            .success()
+    );
+    let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
+    let older_jsonl = fs::read_to_string(&jsonl_path).expect("read older jsonl");
+
+    let t1 = run_br(&workspace, ["create", "T1"], "create_t1");
+    assert!(t1.status.success(), "create t1: {}", t1.stderr);
+    let t1_id = parse_created_id(&t1.stdout);
+    let del = run_br(&workspace, ["delete", &t1_id, "--force"], "delete_t1");
+    assert!(del.status.success(), "delete t1: {}", del.stderr);
+    assert!(
+        run_br(&workspace, ["sync", "--flush-only"], "flush_new")
+            .status
+            .success()
+    );
+    assert_eq!(dirty_count(&workspace, "status_before"), 0);
+
+    fs::write(&jsonl_path, older_jsonl).expect("restore older jsonl");
+    let rebuild = run_br(
+        &workspace,
+        ["sync", "--import-only", "--rebuild", "--json"],
+        "rebuild_older",
+    );
+    assert!(rebuild.status.success(), "rebuild: {}", rebuild.stderr);
+
+    assert_eq!(
+        dirty_count(&workspace, "status_after"),
+        0,
+        "rebuild from an older JSONL must leave no dirty rows"
+    );
+    let show_t1 = run_br(&workspace, ["show", &t1_id, "--json"], "show_t1");
+    assert!(
+        !show_t1.status.success(),
+        "t1 must be absent after rebuilding from a JSONL that lacks it: {}",
+        show_t1.stdout
+    );
+    let show_keep = run_br(&workspace, ["show", &keep_id, "--json"], "show_keep");
+    assert!(show_keep.status.success(), "keep: {}", show_keep.stderr);
+}
+
+#[test]
+fn rebuild_keeps_an_unflushed_deletion() {
+    // A deletion that was never flushed is dirty; it must survive a rebuild
+    // from the very same JSONL and stay dirty so the next flush exports it.
+    let _log = common::test_log("rebuild_keeps_an_unflushed_deletion");
+    let workspace = BrWorkspace::new();
+    assert!(run_br(&workspace, ["init"], "init").status.success());
+    let x = run_br(&workspace, ["create", "X"], "create_x");
+    assert!(x.status.success(), "create x: {}", x.stderr);
+    let x_id = parse_created_id(&x.stdout);
+    assert!(
+        run_br(&workspace, ["sync", "--flush-only"], "flush")
+            .status
+            .success()
+    );
+    let del = run_br(
+        &workspace,
+        ["delete", &x_id, "--force", "--no-auto-flush"],
+        "delete_x",
+    );
+    assert!(del.status.success(), "delete x: {}", del.stderr);
+    assert_eq!(dirty_count(&workspace, "status_before"), 1);
+
+    let rebuild = run_br(
+        &workspace,
+        ["sync", "--import-only", "--rebuild", "--json"],
+        "rebuild_same",
+    );
+    assert!(rebuild.status.success(), "rebuild: {}", rebuild.stderr);
+
+    let show = run_br(&workspace, ["show", &x_id, "--json"], "show_x");
+    assert!(show.status.success(), "show x: {}", show.stderr);
+    assert!(
+        show.stdout.contains("\"tombstone\""),
+        "x must still be a tombstone: {}",
+        show.stdout
+    );
+    assert_eq!(dirty_count(&workspace, "status_after"), 1);
+}

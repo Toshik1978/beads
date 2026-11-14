@@ -4898,6 +4898,23 @@ pub(crate) struct PreservedTombstone {
     pub(crate) comments: Option<Vec<Comment>>,
 }
 
+/// The ids of issues with an unflushed local change, read before a rebuild
+/// wipes the data tables. Best-effort like `snapshot_tombstones`: on a read
+/// failure it logs and returns an empty set, so nothing is preserved.
+#[must_use]
+pub(crate) fn dirty_issue_id_set(storage: &SqliteStorage) -> HashSet<String> {
+    match storage.get_dirty_issue_ids() {
+        Ok(ids) => ids.into_iter().collect(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "Failed to read dirty issues before rebuild; no tombstones will be preserved"
+            );
+            HashSet::new()
+        }
+    }
+}
+
 /// Snapshot every tombstoned issue in the database, including its labels,
 /// dependencies, and comments, so a rebuild can restore deletion-retention
 /// state that is not present in the JSONL export.
@@ -5106,12 +5123,18 @@ pub(crate) struct JsonlTombstoneFilter {
 ///    deleted issue live again; the operator must reopen it explicitly.
 ///
 /// 3. JSONL doesn't have this ID at all: the deletion has never been
-///    flushed anywhere. Always preserve — otherwise this path would
-///    silently lose the local delete.
+///    flushed anywhere. Preserve it, so this path does not silently lose
+///    the local delete.
+///
+/// On top of those, only tombstones whose id is in `dirty_ids` survive at
+/// all: a tombstone that is not dirty was already flushed, so a rebuild from
+/// an older JSONL that lacks it is entitled to drop it. Restoring it would
+/// re-mark it dirty and leave the workspace disagreeing with its JSONL.
 #[must_use]
 pub(crate) fn tombstones_missing_from_jsonl_tombstones(
     tombstones: Vec<PreservedTombstone>,
     jsonl_filter: &JsonlTombstoneFilter,
+    dirty_ids: &HashSet<String>,
 ) -> Vec<PreservedTombstone> {
     let original_count = tombstones.len();
     let mut skipped_already_flushed = 0usize;
@@ -5120,6 +5143,9 @@ pub(crate) fn tombstones_missing_from_jsonl_tombstones(
         .into_iter()
         .filter(|tombstone| {
             let id = &tombstone.issue.id;
+            if !dirty_ids.contains(id) {
+                return false;
+            }
             if jsonl_filter.tombstone_ids.contains(id) {
                 skipped_already_flushed += 1;
                 return false;

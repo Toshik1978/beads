@@ -415,6 +415,7 @@ fn maybe_delegate_rebuild(
     let preserved_pre_delegation_tombstones = tombstones_missing_from_jsonl_tombstones(
         snapshot_tombstones(&open_result.storage),
         &jsonl_filter,
+        &crate::sync::dirty_issue_id_set(&open_result.storage),
     );
     // `recover_database_from_jsonl` sets `auto_rebuilt = true` on success,
     // which is what gates the short-circuit inside `execute_import` below.
@@ -1640,8 +1641,11 @@ fn repair_import_integrity_if_needed(
     );
 
     let jsonl_filter = scan_jsonl_for_tombstone_filter(jsonl_path)?;
-    let preserved_tombstones =
-        tombstones_missing_from_jsonl_tombstones(snapshot_tombstones(storage), &jsonl_filter);
+    let preserved_tombstones = tombstones_missing_from_jsonl_tombstones(
+        snapshot_tombstones(storage),
+        &jsonl_filter,
+        &crate::sync::dirty_issue_id_set(storage),
+    );
 
     // Close the dirty connection before rebuilding the same file path.
     let placeholder = crate::storage::SqliteStorage::open_memory()?;
@@ -1684,8 +1688,11 @@ fn repair_import_integrity_with_import_config(
     );
 
     let jsonl_filter = scan_jsonl_for_tombstone_filter(jsonl_path)?;
-    let preserved_tombstones =
-        tombstones_missing_from_jsonl_tombstones(snapshot_tombstones(storage), &jsonl_filter);
+    let preserved_tombstones = tombstones_missing_from_jsonl_tombstones(
+        snapshot_tombstones(storage),
+        &jsonl_filter,
+        &crate::sync::dirty_issue_id_set(storage),
+    );
 
     let placeholder = crate::storage::SqliteStorage::open_memory()?;
     let dirty_storage = std::mem::replace(storage, placeholder);
@@ -1994,6 +2001,7 @@ fn execute_import(
             jsonl_filter
                 .as_ref()
                 .expect("force/rebuild imports should precompute JSONL tombstone filter"),
+            &crate::sync::dirty_issue_id_set(storage),
         )
     } else {
         Vec::new()
@@ -3312,8 +3320,11 @@ mod tests {
             tombstone_ids: HashSet::from(["bd-in-jsonl".to_string()]),
             non_tombstone_updated_at: std::collections::HashMap::new(),
         };
-        let filtered =
-            tombstones_missing_from_jsonl_tombstones(vec![in_jsonl, missing.clone()], &filter);
+        let filtered = tombstones_missing_from_jsonl_tombstones(
+            vec![in_jsonl, missing.clone()],
+            &filter,
+            &HashSet::from(["bd-in-jsonl".to_string(), "bd-missing".to_string()]),
+        );
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].issue.id, "bd-missing");
@@ -3364,6 +3375,10 @@ mod tests {
         let filtered = tombstones_missing_from_jsonl_tombstones(
             vec![old_local_preserved, new_local_preserved],
             &filter,
+            &HashSet::from([
+                "bd-contested-older".to_string(),
+                "bd-contested-newer".to_string(),
+            ]),
         );
 
         assert_eq!(filtered.len(), 2);

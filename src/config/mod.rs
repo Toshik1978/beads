@@ -1119,7 +1119,11 @@ fn preserved_unflushed_tombstones(
     } else {
         JsonlTombstoneFilter::default()
     };
-    tombstones_missing_from_jsonl_tombstones(snapshot, &jsonl_filter)
+    tombstones_missing_from_jsonl_tombstones(
+        snapshot,
+        &jsonl_filter,
+        &crate::sync::dirty_issue_id_set(storage),
+    )
 }
 
 pub(crate) fn repair_database_from_jsonl(

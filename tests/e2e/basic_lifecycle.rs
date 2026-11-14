@@ -1709,27 +1709,34 @@ fn e2e_sync_tombstone_protection() {
     let init = run_br(&workspace, ["init"], "init");
     assert!(init.status.success(), "init failed: {}", init.stderr);
 
-    // Create and delete an issue
     let create = run_br(&workspace, ["create", "Protected issue"], "create");
     assert!(create.status.success(), "create failed: {}", create.stderr);
     let id = parse_created_id(&create.stdout);
 
-    let delete = run_br(
-        &workspace,
-        ["delete", &id, "--force", "--reason", "Tombstone test"],
-        "delete",
-    );
-    assert!(delete.status.success(), "delete failed: {}", delete.stderr);
-
-    // Export tombstone to JSONL
+    // Flush the issue as open, then delete it WITHOUT flushing: the
+    // tombstone is an unflushed local deletion (dirty). Only such a
+    // tombstone survives a force import; a flushed one is the JSONL's call.
     let flush = run_br(&workspace, ["sync", "--flush-only"], "sync_flush");
     assert!(
         flush.status.success(),
         "sync flush failed: {}",
         flush.stderr
     );
+    let delete = run_br(
+        &workspace,
+        [
+            "delete",
+            &id,
+            "--force",
+            "--reason",
+            "Tombstone test",
+            "--no-auto-flush",
+        ],
+        "delete",
+    );
+    assert!(delete.status.success(), "delete failed: {}", delete.stderr);
 
-    // Modify JSONL to try to resurrect the tombstone (change status to open)
+    // Modify JSONL so the issue is open with a newer timestamp
     let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
     let contents = fs::read_to_string(&jsonl_path).expect("read jsonl");
     let mut modified_lines = Vec::new();
@@ -1738,7 +1745,7 @@ fn e2e_sync_tombstone_protection() {
             continue;
         }
         let mut issue: Value = serde_json::from_str(line).expect("parse issue");
-        if issue["status"] == "tombstone" {
+        if issue["id"] == id.as_str() {
             // Try to resurrect it
             issue["status"] = Value::String("open".to_string());
             issue["updated_at"] = Value::String(Utc::now().to_rfc3339());
