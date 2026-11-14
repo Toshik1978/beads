@@ -2294,49 +2294,15 @@ fn compute_jsonl_newer_impl(storage: &SqliteStorage, jsonl_path: &Path) -> Resul
         });
     }
 
-    let last_import_time = storage.get_metadata(METADATA_LAST_IMPORT_TIME)?;
-    let last_export_time = storage.get_metadata(METADATA_LAST_EXPORT_TIME)?;
-
-    // Get the latest known sync time (either import or export)
-    let mut latest_sync_ts: Option<chrono::DateTime<Utc>> = None;
-
-    if let Some(import_time) = &last_import_time
-        && let Ok(ts) = chrono::DateTime::parse_from_rfc3339(import_time)
-    {
-        latest_sync_ts = Some(ts.with_timezone(&Utc));
-    }
-
-    if let Some(export_time) = &last_export_time
-        && let Ok(ts) = chrono::DateTime::parse_from_rfc3339(export_time)
-    {
-        let ts_utc = ts.with_timezone(&Utc);
-        if latest_sync_ts.is_none_or(|latest| ts_utc > latest) {
-            latest_sync_ts = Some(ts_utc);
-        }
-    }
-
-    // JSONL is newer if it was modified after the latest sync.
-    // If metadata is missing or invalid, assume JSONL is newer (safe default).
-    let mtime_newer = latest_sync_ts.is_none_or(|sync_ts| {
-        let sync_sys_time = std::time::SystemTime::from(sync_ts);
-        observed.mtime > sync_sys_time
+    // The witness differs from the stored one, so only a full hash match may
+    // conclude "unchanged"; the file's mtime says nothing about its content.
+    // The witness is refreshed only after that match.
+    let jsonl_newer = stored_hash.as_ref().is_none_or(|stored_hash| {
+        compute_jsonl_hash(jsonl_path).map_or(true, |current_hash| &current_hash != stored_hash)
     });
 
-    let jsonl_newer = if mtime_newer {
-        stored_hash.as_ref().is_none_or(|stored_hash| {
-            compute_jsonl_hash(jsonl_path).map_or(true, |current_hash| &current_hash != stored_hash)
-        })
-    } else {
-        false
-    };
-
-    if !jsonl_newer && stored_hash.is_some() {
-        let stored_size_matches =
-            stored_size.as_deref().and_then(parse_jsonl_size_witness) == Some(observed.size);
-        if stored_mtime.as_deref() != Some(observed.mtime_witness.as_str()) || !stored_size_matches
-        {
-            refresh_witness = Some(observed.clone());
-        }
+    if !jsonl_newer {
+        refresh_witness = Some(observed.clone());
     }
 
     Ok(JsonlNewerProbe {
@@ -6063,6 +6029,90 @@ mod tests {
                 || message.contains("must be a regular file"),
             "unexpected error: {err}"
         );
+    }
+
+    fn agree_on(storage: &mut SqliteStorage, dir: &Path, jsonl: &Path, body: &str) {
+        fs::write(jsonl, body).unwrap();
+        crate::sync::agreement::record_agreement(storage, jsonl, dir, AgreementSource::Export)
+            .unwrap();
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_older_mtime_with_different_bytes_is_changed() {
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let dir = TempDir::new().unwrap();
+        let jsonl = dir.path().join("issues.jsonl");
+        agree_on(&mut storage, dir.path(), &jsonl, "{\"id\":\"bd-1\"}\n");
+        let witness_before = storage.get_metadata(METADATA_JSONL_MTIME).unwrap();
+
+        fs::write(&jsonl, "{\"id\":\"bd-2\"}\n").unwrap();
+        let last_export = storage
+            .get_metadata(METADATA_LAST_EXPORT_TIME)
+            .unwrap()
+            .unwrap();
+        let export_time = std::time::SystemTime::from(
+            chrono::DateTime::parse_from_rfc3339(&last_export)
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        set_mtime(&jsonl, export_time - std::time::Duration::from_secs(3600));
+
+        let staleness = compute_staleness_refreshing_witnesses(&mut storage, &jsonl).unwrap();
+        assert!(staleness.jsonl_newer);
+        assert_eq!(
+            storage.get_metadata(METADATA_JSONL_MTIME).unwrap(),
+            witness_before
+        );
+    }
+
+    #[test]
+    fn identical_bytes_with_a_new_mtime_refresh_the_witness() {
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let dir = TempDir::new().unwrap();
+        let jsonl = dir.path().join("issues.jsonl");
+        let body = "{\"id\":\"bd-1\"}\n";
+        agree_on(&mut storage, dir.path(), &jsonl, body);
+        let witness_before = storage.get_metadata(METADATA_JSONL_MTIME).unwrap();
+
+        fs::write(&jsonl, body).unwrap();
+        set_mtime(
+            &jsonl,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(7200),
+        );
+        let (_, new_witness) = observed_jsonl_mtime(&jsonl).unwrap();
+        assert_ne!(Some(new_witness.clone()), witness_before);
+
+        let staleness = compute_staleness_refreshing_witnesses(&mut storage, &jsonl).unwrap();
+        assert!(!staleness.jsonl_newer);
+        assert_eq!(
+            storage.get_metadata(METADATA_JSONL_MTIME).unwrap(),
+            Some(new_witness)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_matching_witness_never_reads_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut storage = SqliteStorage::open_memory().unwrap();
+        let dir = TempDir::new().unwrap();
+        let jsonl = dir.path().join("issues.jsonl");
+        agree_on(&mut storage, dir.path(), &jsonl, "{\"id\":\"bd-1\"}\n");
+
+        fs::set_permissions(&jsonl, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = compute_staleness(&storage, &jsonl);
+        fs::set_permissions(&jsonl, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(!result.unwrap().jsonl_newer);
     }
 
     #[test]
