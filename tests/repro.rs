@@ -56,6 +56,8 @@ mod mergereport_determinism;
 mod parent_blocking;
 #[path = "repro/pinned_blocker.rs"]
 mod pinned_blocker;
+#[path = "repro/rebase_onto_older_jsonl.rs"]
+mod rebase_onto_older_jsonl;
 #[path = "repro/remote_adoption_link_deletion.rs"]
 mod remote_adoption_link_deletion;
 #[path = "repro/rename_import_over_old_id.rs"]
