@@ -16,6 +16,7 @@ use crate::model::{IssueType, Priority};
 use crate::storage::SqliteStorage;
 use crate::storage::conn::DbError;
 use crate::storage::conn::SqliteValue;
+use crate::sync::agreement::ExportAgreement;
 use crate::sync::path::validate_sync_path_with_external;
 use crate::sync::{
     ExportConfig, ImportConfig, ImportResult, JsonlTombstoneFilter, PreservedTombstone, auto_flush,
@@ -2473,6 +2474,8 @@ impl OpenStorageResult {
             &export_result,
             Some(&export_result.issue_hashes),
             &self.paths.jsonl_path,
+            &self.paths.beads_dir,
+            ExportAgreement::Skip,
         )?;
         self.loaded_jsonl_hash = Some(export_result.content_hash);
 
@@ -2726,6 +2729,9 @@ fn open_storage_with_startup_config_impl(
                 allow_external_jsonl,
             );
             import_config.skip_prefix_validation = true;
+            // The in-memory database is discarded at exit; never touch the
+            // on-disk base for it.
+            import_config.skip_agreement = true;
             import_from_jsonl(
                 &mut storage,
                 &paths.jsonl_path,

@@ -8,6 +8,7 @@ use crate::config;
 use crate::error::{BeadsError, Result};
 use crate::health::{Anomaly, AnomalyClass};
 use crate::output::OutputContext;
+use crate::sync::agreement::{AgreementSource, ExportAgreement, record_agreement_if_hash_matches};
 use crate::sync::history::HistoryConfig;
 use crate::sync::path::symlink_escape_for_existing_ancestor;
 use crate::sync::{
@@ -16,10 +17,9 @@ use crate::sync::{
     METADATA_LAST_IMPORT_TIME, MergeContext, PathValidation, analyze_jsonl, compute_jsonl_hash,
     compute_staleness, export_temp_path, export_to_jsonl_with_policy, finalize_export,
     get_issue_ids_from_jsonl, id_matches_expected_prefix, import_from_jsonl, load_base_snapshot,
-    read_issues_from_jsonl, refresh_base_snapshot_from_flushed_jsonl,
-    require_safe_sync_overwrite_path, restore_tombstones_after_rebuild,
-    save_base_snapshot_from_jsonl, scan_jsonl_for_tombstone_filter, snapshot_tombstones,
-    three_way_merge, tombstones_missing_from_jsonl_tombstones, validate_no_git_path,
+    read_issues_from_jsonl, require_safe_sync_overwrite_path, restore_tombstones_after_rebuild,
+    scan_jsonl_for_tombstone_filter, snapshot_tombstones, three_way_merge,
+    tombstones_missing_from_jsonl_tombstones, validate_no_git_path,
     validate_sync_path_with_external,
 };
 use crate::util::id::split_prefix_remainder;
@@ -1180,22 +1180,18 @@ fn execute_flush(
             }
         }
 
-        // Even with nothing to export, materialize a MISSING merge anchor
-        // from the clean JSONL (issue #378). The guards above already proved
-        // the JSONL is conflict-marker-free and not stale relative to the DB,
-        // so it is exactly the state the anchor should capture. This makes
-        // `br sync --flush-only` an idempotent way to restore a missing
-        // anchor. Best-effort: a
-        // failed anchor write must not fail an otherwise successful no-op
-        // flush.
-        if fs::symlink_metadata(path_policy.beads_dir.join("beads.base.jsonl")).is_err()
-            && let Err(error) =
-                refresh_base_snapshot_from_flushed_jsonl(jsonl_path, &path_policy.beads_dir)
-        {
-            warn!(
-                error = %error,
-                "Failed to materialize missing merge anchor during no-op flush"
-            );
+        // No dirty rows and no `needs_flush` here. When the JSONL's hash
+        // already equals the recorded one, it is the state the DB agreed to,
+        // so record the full agreement (restoring a missing base, issue
+        // #378). Otherwise leave the state alone: this flush has not compared
+        // that file with the DB. Best-effort: it must not fail a no-op flush.
+        if let Err(error) = record_agreement_if_hash_matches(
+            storage,
+            jsonl_path,
+            &path_policy.beads_dir,
+            AgreementSource::Export,
+        ) {
+            warn!(error = %error, "Failed to record sync agreement during no-op flush");
         }
 
         if use_json {
@@ -1253,27 +1249,14 @@ fn execute_flush(
         &export_result,
         Some(&export_result.issue_hashes),
         jsonl_path,
+        &path_policy.beads_dir,
+        if report.has_errors() {
+            ExportAgreement::WithoutBase
+        } else {
+            ExportAgreement::Full
+        },
     )?;
     info!("Export complete, cleared dirty flags");
-
-    // A clean flush leaves DB == JSONL, so the JSONL that just reached disk
-    // is the new common state future 3-way merges should diff against.
-    // Refresh the merge anchor to match (issue #378): historically only the
-    // merge path wrote `beads.base.jsonl`, leaving flush-only workspaces
-    // permanently anchor-less while `br sync --status` reported "In sync".
-    // Skip when the export had per-record errors — a
-    // partial export must not become the merge base. Best-effort: a failed
-    // anchor write must not fail an otherwise durable flush.
-    if !report.has_errors()
-        && let Err(error) =
-            refresh_base_snapshot_from_flushed_jsonl(jsonl_path, &path_policy.beads_dir)
-    {
-        warn!(
-            error = %error,
-            "Failed to refresh merge anchor after flush; the next 3-way merge will \
-             diff against a stale base"
-        );
-    }
 
     // Write manifest if requested (atomic: temp + fsync + durable_rename)
     let manifest_path = if args.manifest {
@@ -1979,6 +1962,7 @@ fn execute_import(
         beads_dir: Some(path_policy.beads_dir.clone()),
         allow_external_jsonl: path_policy.allow_external_jsonl,
         show_progress,
+        skip_agreement: false,
     };
 
     // For force/rebuild imports we read the JSONL twice before
@@ -2133,13 +2117,9 @@ fn execute_import(
         import_result.tombstone_skipped += preserved_resurrection_attempts;
     }
 
-    // Update the source JSONL content hash before post-import maintenance.
-    // Metadata table/index writes are part of the same B-tree surface that
-    // triggered frankentorch-dbp, so compaction must be the final storage
-    // mutation in this path.
-    let content_hash = compute_jsonl_hash(jsonl_path)?;
-    storage.set_metadata(METADATA_JSONL_CONTENT_HASH, &content_hash)?;
-
+    // `import_from_jsonl` already recorded the agreement (content hash,
+    // witness, base) in its own transaction, so compaction below is the final
+    // storage mutation in this path.
     // Post-import VACUUM + REINDEX to eliminate B-tree/index corruption
     // artifacts that the previous engine's bulk-insert and metadata-update paths
     // can leave behind.  This mirrors what `rebuild_database_family` (used by
@@ -2540,8 +2520,9 @@ fn execute_merge(
         &export_result,
         Some(&export_result.issue_hashes),
         jsonl_path,
+        &path_policy.beads_dir,
+        ExportAgreement::Full,
     )?;
-    save_base_snapshot_from_jsonl(jsonl_path, beads_dir)?;
 
     // Output success message
     if use_json {

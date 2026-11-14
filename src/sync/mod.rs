@@ -7,6 +7,7 @@
 //! - Collision detection during imports
 //! - Path validation and allowlist enforcement
 
+pub mod agreement;
 pub mod history;
 pub mod jsonl_format;
 pub mod merge_driver;
@@ -22,6 +23,11 @@ use crate::error::{BeadsError, Result};
 use crate::model::{Comment, Dependency, Issue};
 use crate::storage::SqliteStorage;
 use crate::storage::conn::{DbError, SqliteValue};
+use crate::sync::agreement::{
+    AgreementSource, BASE_SNAPSHOT_FILE, ExportAgreement, JsonlWitness, PreparedAgreement,
+    commit_agreement_in_tx, observed_jsonl_witness, prepare_agreement, prepare_export_agreement,
+    refresh_observed_witness,
+};
 use crate::sync::history::HistoryConfig;
 use crate::util::id::{IdConfig, IdGenerator, parse_id};
 use crate::util::progress::{create_progress_bar, create_spinner};
@@ -527,6 +533,9 @@ pub struct ImportConfig {
     pub allow_external_jsonl: bool,
     /// Show progress indicators for long-running operations.
     pub show_progress: bool,
+    /// Record no agreement: the storage is not the workspace database
+    /// (`--no-db`), so the base snapshot on disk must not be touched.
+    pub skip_agreement: bool,
 }
 
 /// Result of a JSONL import.
@@ -2110,13 +2119,6 @@ pub const METADATA_LAST_EXPORT_TIME: &str = "last_export_time";
 /// Metadata key for the last import time.
 pub const METADATA_LAST_IMPORT_TIME: &str = "last_import_time";
 
-#[derive(Debug, Clone)]
-struct JsonlWitness {
-    mtime: std::time::SystemTime,
-    mtime_witness: String,
-    size: u64,
-}
-
 /// Result of a staleness check between JSONL and DB.
 #[derive(Debug, Clone, Copy)]
 pub struct StalenessCheck {
@@ -2351,39 +2353,8 @@ fn observed_jsonl_mtime(jsonl_path: &Path) -> Result<(std::time::SystemTime, Str
     Ok((observed.mtime, observed.mtime_witness))
 }
 
-fn observed_jsonl_witness(jsonl_path: &Path) -> Result<JsonlWitness> {
-    let metadata = fs::symlink_metadata(jsonl_path)?;
-    let jsonl_mtime = metadata.modified()?;
-    Ok(JsonlWitness {
-        mtime: jsonl_mtime,
-        mtime_witness: chrono::DateTime::<Utc>::from(jsonl_mtime).to_rfc3339(),
-        size: metadata.len(),
-    })
-}
-
 fn parse_jsonl_size_witness(value: &str) -> Option<u64> {
     value.parse().ok()
-}
-
-fn record_observed_jsonl_witness_in_tx(
-    storage: &SqliteStorage,
-    observed: &JsonlWitness,
-) -> Result<()> {
-    storage.set_metadata_in_tx(METADATA_JSONL_MTIME, &observed.mtime_witness)?;
-    storage.set_metadata_in_tx(METADATA_JSONL_SIZE, &observed.size.to_string())
-}
-
-fn maybe_refresh_jsonl_witness(
-    storage: &mut SqliteStorage,
-    jsonl_path: &Path,
-    observed: &JsonlWitness,
-) -> Result<()> {
-    let current = observed_jsonl_witness(jsonl_path)?;
-    if current.mtime != observed.mtime || current.size != observed.size {
-        return Ok(());
-    }
-
-    storage.with_write_transaction(|storage| record_observed_jsonl_witness_in_tx(storage, &current))
 }
 
 fn refresh_jsonl_witness_best_effort(
@@ -2391,7 +2362,7 @@ fn refresh_jsonl_witness_best_effort(
     jsonl_path: &Path,
     observed: &JsonlWitness,
 ) {
-    if let Err(error) = maybe_refresh_jsonl_witness(storage, jsonl_path, observed) {
+    if let Err(error) = refresh_observed_witness(storage, jsonl_path, observed) {
         tracing::debug!(
             path = %jsonl_path.display(),
             error = %error,
@@ -2481,20 +2452,21 @@ pub fn auto_import_if_stale(
 /// It performs the following updates:
 /// - Clears dirty flags for the exported issue IDs
 /// - Records export hashes for each exported issue (for incremental export)
-/// - Updates `jsonl_content_hash` metadata with the export hash
-/// - Updates `last_export_time` metadata with the current timestamp
+/// - Records the agreement as `agreement` says (see [`ExportAgreement`])
 ///
 /// # Errors
 ///
-/// Returns an error if database updates fail.
+/// Returns an error if database updates fail or the agreement cannot be
+/// prepared.
 pub fn finalize_export(
     storage: &mut SqliteStorage,
     result: &ExportResult,
     issue_hashes: Option<&[(String, String)]>,
     jsonl_path: &Path,
+    beads_dir: &Path,
+    agreement: ExportAgreement,
 ) -> Result<()> {
-    use chrono::Utc;
-    let observed_jsonl = observed_jsonl_witness(jsonl_path)?;
+    let prepared = prepare_export_agreement(jsonl_path, beads_dir, agreement)?;
     let prior_content_hash = storage.get_metadata(METADATA_JSONL_CONTENT_HASH)?;
     let export_hashes_current =
         export_hashes_certified_current(result, prior_content_hash.as_deref());
@@ -2511,10 +2483,9 @@ pub fn finalize_export(
             storage.set_changed_export_hashes_in_tx(hashes)?;
         }
 
-        // Update metadata
-        storage.set_metadata_in_tx(METADATA_JSONL_CONTENT_HASH, &result.content_hash)?;
-        storage.set_metadata_in_tx(METADATA_LAST_EXPORT_TIME, &Utc::now().to_rfc3339())?;
-        record_observed_jsonl_witness_in_tx(storage, &observed_jsonl)?;
+        if let Some(prepared) = &prepared {
+            commit_agreement_in_tx(storage, prepared, AgreementSource::Export)?;
+        }
 
         // Keep the row stable and clear the flag in place so ordinary export
         // cycles avoid delete+insert churn on the metadata B-tree.
@@ -2706,21 +2677,11 @@ fn finalize_incremental_auto_flush(
     clear_dirty_metadata: &[(String, String)],
     removed_hash_ids: &[String],
     issue_hashes: &[(String, String)],
-    content_hash: Option<&str>,
-    jsonl_path: Option<&Path>,
+    agreement_source: Option<(&Path, &Path)>,
 ) -> Result<()> {
-    use chrono::Utc;
-    let export_metadata = match content_hash {
-        Some(content_hash) => {
-            let jsonl_path = jsonl_path.ok_or_else(|| {
-                BeadsError::Config(
-                    "incremental auto-flush metadata update requires a JSONL path".to_string(),
-                )
-            })?;
-            Some((content_hash, observed_jsonl_witness(jsonl_path)?))
-        }
-        None => None,
-    };
+    let prepared: Option<PreparedAgreement> = agreement_source
+        .map(|(jsonl_path, beads_dir)| prepare_agreement(jsonl_path, beads_dir))
+        .transpose()?;
 
     storage.with_write_transaction(|storage| -> Result<()> {
         if !clear_dirty_metadata.is_empty() {
@@ -2732,10 +2693,8 @@ fn finalize_incremental_auto_flush(
         if !issue_hashes.is_empty() {
             storage.set_changed_export_hashes_in_tx(issue_hashes)?;
         }
-        if let Some((content_hash, observed_jsonl)) = &export_metadata {
-            storage.set_metadata_in_tx(METADATA_JSONL_CONTENT_HASH, content_hash)?;
-            storage.set_metadata_in_tx(METADATA_LAST_EXPORT_TIME, &Utc::now().to_rfc3339())?;
-            record_observed_jsonl_witness_in_tx(storage, observed_jsonl)?;
+        if let Some(prepared) = &prepared {
+            commit_agreement_in_tx(storage, prepared, AgreementSource::Export)?;
         }
         storage.set_metadata_in_tx("needs_flush", "false")?;
         Ok(())
@@ -3127,6 +3086,7 @@ fn collect_incremental_auto_flush_changes(
 
 fn try_existing_line_auto_flush(
     storage: &mut SqliteStorage,
+    beads_dir: &Path,
     jsonl_path: &Path,
     export_config: &ExportConfig,
     changes: &IncrementalAutoFlushChanges,
@@ -3149,21 +3109,16 @@ fn try_existing_line_auto_flush(
                 &changes.removed_hash_ids,
                 &changes.issue_hashes,
                 None,
-                None,
             )?;
             Ok(Some(AutoFlushResult::default()))
         }
-        ExistingJsonlReplacementWrite::Written {
-            content_hash,
-            exported_count,
-        } => {
+        ExistingJsonlReplacementWrite::Written { exported_count, .. } => {
             finalize_incremental_auto_flush(
                 storage,
                 &changes.dirty_metadata,
                 &changes.removed_hash_ids,
                 &changes.issue_hashes,
-                Some(&content_hash),
-                Some(jsonl_path),
+                Some((jsonl_path, beads_dir)),
             )?;
             Ok(Some(AutoFlushResult {
                 flushed: true,
@@ -3214,7 +3169,7 @@ fn try_incremental_auto_flush(
     };
 
     if let Some(result) =
-        try_existing_line_auto_flush(storage, jsonl_path, &export_config, &changes)?
+        try_existing_line_auto_flush(storage, beads_dir, jsonl_path, &export_config, &changes)?
     {
         return Ok(Some(result));
     }
@@ -3229,19 +3184,17 @@ fn try_incremental_auto_flush(
             &changes.removed_hash_ids,
             &changes.issue_hashes,
             None,
-            None,
         )?;
         return Ok(Some(AutoFlushResult::default()));
     }
 
-    let content_hash = write_jsonl_lines_atomically(&lines_by_id, jsonl_path, &export_config)?;
+    write_jsonl_lines_atomically(&lines_by_id, jsonl_path, &export_config)?;
     finalize_incremental_auto_flush(
         storage,
         &changes.dirty_metadata,
         &changes.removed_hash_ids,
         &changes.issue_hashes,
-        Some(&content_hash),
-        Some(jsonl_path),
+        Some((jsonl_path, beads_dir)),
     )?;
 
     Ok(Some(AutoFlushResult {
@@ -3363,6 +3316,8 @@ pub fn auto_flush(
         &export_result,
         Some(&export_result.issue_hashes),
         jsonl_path,
+        beads_dir,
+        ExportAgreement::Full,
     )?;
 
     tracing::info!(
@@ -4348,8 +4303,19 @@ pub fn import_from_jsonl(
         validation_plan.record_count,
     )?;
 
-    let jsonl_hash = compute_jsonl_hash(input_path)?;
-    let observed_jsonl = observed_jsonl_witness(input_path)?;
+    // The base is written before the transaction and the metadata committed
+    // inside it, so a failed import leaves the old metadata and an untrusted
+    // base.
+    let agreement_dir = config
+        .beads_dir
+        .as_deref()
+        .or_else(|| input_path.parent())
+        .unwrap_or_else(|| Path::new("."));
+    let prepared_agreement = if config.skip_agreement {
+        None
+    } else {
+        Some(prepare_agreement(input_path, agreement_dir)?)
+    };
 
     // Phase 2: Execute Actions
     //
@@ -4381,9 +4347,9 @@ pub fn import_from_jsonl(
             &progress,
         )?;
 
-        storage.set_metadata_in_tx(METADATA_LAST_IMPORT_TIME, &chrono::Utc::now().to_rfc3339())?;
-        storage.set_metadata_in_tx(METADATA_JSONL_CONTENT_HASH, &jsonl_hash)?;
-        record_observed_jsonl_witness_in_tx(storage, &observed_jsonl)?;
+        if let Some(prepared) = &prepared_agreement {
+            commit_agreement_in_tx(storage, prepared, AgreementSource::Import)?;
+        }
 
         Ok(tx_result)
     });
@@ -4903,109 +4869,6 @@ pub fn three_way_merge(
     report
 }
 
-/// Save the base snapshot to a file.
-///
-/// This is used after a successful merge to record the common state.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be written.
-pub fn save_base_snapshot<S: ::std::hash::BuildHasher>(
-    issues: &std::collections::HashMap<String, Issue, S>,
-    jsonl_dir: &Path,
-) -> Result<()> {
-    let snapshot_path = jsonl_dir.join("beads.base.jsonl");
-    let (temp_path, temp_file) = create_base_snapshot_temp_file(&snapshot_path, jsonl_dir)?;
-    let mut temp_guard = TempFileGuard::new(temp_path.clone());
-    let mut writer = BufWriter::new(temp_file);
-
-    let mut ordered_issues: Vec<_> = issues.values().collect();
-    ordered_issues.sort_by(|left, right| left.id.cmp(&right.id));
-
-    let mut buffer = Vec::new();
-    for issue in ordered_issues {
-        buffer.clear();
-        // The base snapshot is an ordinary JSONL file that the three-way merge
-        // reads back.
-        jsonl_format::write_line(&mut buffer, issue).map_err(|e| {
-            BeadsError::Config(format!("Failed to serialize issue {}: {}", issue.id, e))
-        })?;
-        writer.write_all(&buffer).map_err(BeadsError::Io)?;
-        writer.write_all(b"\n").map_err(BeadsError::Io)?;
-    }
-    writer.flush()?;
-    writer
-        .into_inner()
-        .map_err(|e| BeadsError::Io(e.into_error()))?
-        .sync_all()?;
-    require_safe_sync_overwrite_path(&temp_path, jsonl_dir, false, "rename base snapshot")?;
-    require_safe_sync_overwrite_path(&snapshot_path, jsonl_dir, false, "overwrite base snapshot")?;
-    crate::util::durable_rename(&temp_path, &snapshot_path)?;
-    temp_guard.persist();
-    Ok(())
-}
-
-/// Save the base snapshot from a finalized JSONL export.
-///
-/// This is used after a successful merge export so `beads.base.jsonl` reflects
-/// the exact JSONL state that reached disk, including DB-side merge notes or
-/// other derived fields added after the merge report was calculated.
-///
-/// # Errors
-///
-/// Returns an error if the finalized JSONL cannot be read or the base snapshot
-/// cannot be written.
-pub fn save_base_snapshot_from_jsonl(jsonl_path: &Path, jsonl_dir: &Path) -> Result<()> {
-    ensure_no_conflict_markers(jsonl_path)?;
-    let issues: std::collections::HashMap<String, Issue> = read_issues_from_jsonl(jsonl_path)?
-        .into_iter()
-        .map(|issue| (issue.id.clone(), issue))
-        .collect();
-    save_base_snapshot(&issues, jsonl_dir)
-}
-
-/// Refresh `beads.base.jsonl` with the exact bytes of a finalized flush
-/// export (issue #378).
-///
-/// After a clean `br sync --flush-only`, the database and the JSONL agree, so
-/// the JSONL that just reached disk IS the new common state future 3-way
-/// merges should diff against. Historically only the merge path wrote the
-/// anchor, which left flush-only workspaces (the common agent workflow)
-/// permanently anchor-less, which upstream's `br doctor` reported as
-/// `base_jsonl.missing_post_flush` forever while `br sync --status` said
-/// "In sync". This fork has no `doctor`, so the inconsistency would now be
-/// silent -- which is a reason to keep the anchor correct, not to stop.
-///
-/// This is a byte copy (not a parse + re-serialize) so the anchor matches the
-/// on-disk export exactly. The write goes through the same validated
-/// temp-file + durable-rename machinery as [`save_base_snapshot`], and a
-/// symlinked anchor is refused rather than followed.
-///
-/// # Errors
-///
-/// Returns an error if the finalized JSONL cannot be read, the anchor path is
-/// unsafe (symlink / escapes the workspace), or the snapshot cannot be
-/// written durably.
-pub fn refresh_base_snapshot_from_flushed_jsonl(jsonl_path: &Path, jsonl_dir: &Path) -> Result<()> {
-    ensure_no_conflict_markers(jsonl_path)?;
-    let bytes = fs::read(jsonl_path)?;
-    let snapshot_path = jsonl_dir.join("beads.base.jsonl");
-    let (temp_path, temp_file) = create_base_snapshot_temp_file(&snapshot_path, jsonl_dir)?;
-    let mut temp_guard = TempFileGuard::new(temp_path.clone());
-    let mut writer = BufWriter::new(temp_file);
-    writer.write_all(&bytes).map_err(BeadsError::Io)?;
-    writer.flush()?;
-    writer
-        .into_inner()
-        .map_err(|e| BeadsError::Io(e.into_error()))?
-        .sync_all()?;
-    require_safe_sync_overwrite_path(&temp_path, jsonl_dir, false, "rename base snapshot")?;
-    require_safe_sync_overwrite_path(&snapshot_path, jsonl_dir, false, "overwrite base snapshot")?;
-    crate::util::durable_rename(&temp_path, &snapshot_path)?;
-    temp_guard.persist();
-    Ok(())
-}
-
 /// Load the base snapshot from a file.
 ///
 /// Returns an empty map if the snapshot does not exist.
@@ -5014,7 +4877,7 @@ pub fn refresh_base_snapshot_from_flushed_jsonl(jsonl_path: &Path, jsonl_dir: &P
 ///
 /// Returns an error if the file exists but cannot be read or parsed.
 pub fn load_base_snapshot(jsonl_dir: &Path) -> Result<std::collections::HashMap<String, Issue>> {
-    let snapshot_path = jsonl_dir.join("beads.base.jsonl");
+    let snapshot_path = jsonl_dir.join(BASE_SNAPSHOT_FILE);
     let mut base = std::collections::HashMap::new();
 
     if !snapshot_path.exists() {
@@ -5687,170 +5550,6 @@ mod tests {
         assert_eq!(result.exported_count, 0);
         assert_eq!(result.exported_ids, [] as [String; 0]);
         assert!(output_path.exists());
-    }
-
-    #[test]
-    fn test_save_base_snapshot_skips_stale_regular_temp_file() {
-        let temp = TempDir::new().unwrap();
-        let beads_dir = temp.path().join(".beads");
-        fs::create_dir_all(&beads_dir).unwrap();
-
-        let snapshot_path = beads_dir.join("beads.base.jsonl");
-        fs::write(&snapshot_path, "old-snapshot\n").unwrap();
-        let stale_temp_path = export_temp_path_for_attempt(&snapshot_path, 0);
-        let retry_temp_path = export_temp_path_for_attempt(&snapshot_path, 1);
-        fs::write(&stale_temp_path, "stale temp\n").unwrap();
-
-        let mut issues = HashMap::new();
-        issues.insert(
-            "bd-base".to_string(),
-            Issue {
-                id: "bd-base".to_string(),
-                title: "New base snapshot".to_string(),
-                ..Issue::default()
-            },
-        );
-
-        save_base_snapshot(&issues, &beads_dir).unwrap();
-
-        let snapshot = fs::read_to_string(&snapshot_path).unwrap();
-        assert!(
-            snapshot.contains("\"id\":\"bd-base\""),
-            "base snapshot should be rewritten with the requested issue: {snapshot}"
-        );
-        assert_eq!(
-            fs::read_to_string(&stale_temp_path).unwrap(),
-            "stale temp\n",
-            "stale regular temp file should be left untouched"
-        );
-        assert!(
-            !retry_temp_path.exists(),
-            "successful retry temp path should be renamed away"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_save_base_snapshot_rejects_existing_temp_symlink() {
-        let temp = TempDir::new().unwrap();
-        let beads_dir = temp.path().join(".beads");
-        let outside_dir = temp.path().join("outside");
-        fs::create_dir_all(&beads_dir).unwrap();
-        fs::create_dir_all(&outside_dir).unwrap();
-
-        let snapshot_path = beads_dir.join("beads.base.jsonl");
-        fs::write(&snapshot_path, "old-snapshot\n").unwrap();
-
-        let temp_target = outside_dir.join("captured.txt");
-        fs::write(&temp_target, "do-not-touch").unwrap();
-        let pid = std::process::id();
-        symlink(
-            &temp_target,
-            beads_dir.join(format!("beads.base.jsonl.{pid}.tmp")),
-        )
-        .unwrap();
-
-        let mut issues = HashMap::new();
-        issues.insert(
-            "bd-base".to_string(),
-            Issue {
-                id: "bd-base".to_string(),
-                title: "New base snapshot".to_string(),
-                ..Issue::default()
-            },
-        );
-
-        let err = save_base_snapshot(&issues, &beads_dir).unwrap_err();
-        let message = err.to_string();
-        assert!(
-            message.contains("regular file")
-                || message.contains("Temporary base snapshot file")
-                || message.contains("Symlink")
-                || message.contains("Path"),
-            "unexpected error: {message}"
-        );
-        assert_eq!(
-            fs::read_to_string(&snapshot_path).unwrap(),
-            "old-snapshot\n",
-            "existing base snapshot should remain unchanged on failure"
-        );
-        assert_eq!(
-            fs::read_to_string(&temp_target).unwrap(),
-            "do-not-touch",
-            "symlink target should not be overwritten"
-        );
-    }
-
-    #[test]
-    fn test_save_base_snapshot_sorts_issues_deterministically() {
-        let temp = TempDir::new().unwrap();
-        let beads_dir = temp.path().join(".beads");
-        fs::create_dir_all(&beads_dir).unwrap();
-
-        let mut issues = HashMap::new();
-        issues.insert(
-            "bd-z".to_string(),
-            Issue {
-                id: "bd-z".to_string(),
-                title: "Last".to_string(),
-                ..Issue::default()
-            },
-        );
-        issues.insert(
-            "bd-a".to_string(),
-            Issue {
-                id: "bd-a".to_string(),
-                title: "First".to_string(),
-                ..Issue::default()
-            },
-        );
-
-        save_base_snapshot(&issues, &beads_dir).unwrap();
-
-        let lines: Vec<_> = fs::read_to_string(beads_dir.join("beads.base.jsonl"))
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect();
-        assert_eq!(lines.len(), 2);
-
-        let first: Issue = serde_json::from_str(&lines[0]).unwrap();
-        let second: Issue = serde_json::from_str(&lines[1]).unwrap();
-        assert_eq!(first.id, "bd-a");
-        assert_eq!(second.id, "bd-z");
-    }
-
-    #[test]
-    fn test_save_base_snapshot_from_jsonl_uses_finalized_export_contents() {
-        let temp = TempDir::new().unwrap();
-        let beads_dir = temp.path().join(".beads");
-        fs::create_dir_all(&beads_dir).unwrap();
-
-        let jsonl_path = beads_dir.join("issues.jsonl");
-        let issue = Issue {
-            id: "bd-final".to_string(),
-            title: "Finalized".to_string(),
-            comments: vec![Comment {
-                id: 1,
-                issue_id: "bd-final".to_string(),
-                author: "br-sync".to_string(),
-                body: "merge note written after report".to_string(),
-                created_at: Utc::now(),
-            }],
-            ..Issue::default()
-        };
-        fs::write(
-            &jsonl_path,
-            format!("{}\n", serde_json::to_string(&issue).unwrap()),
-        )
-        .unwrap();
-
-        save_base_snapshot_from_jsonl(&jsonl_path, &beads_dir).unwrap();
-
-        let base = load_base_snapshot(&beads_dir).unwrap();
-        let saved = base.get("bd-final").expect("saved base issue");
-        assert_eq!(saved.comments.len(), 1);
-        assert_eq!(saved.comments[0].body, "merge note written after report");
     }
 
     #[cfg(unix)]
@@ -7851,6 +7550,8 @@ mod tests {
             &result,
             Some(&result.issue_hashes),
             &output_path,
+            temp_dir.path(),
+            ExportAgreement::Full,
         )
         .unwrap();
 
@@ -7978,6 +7679,8 @@ mod tests {
             &result,
             Some(&invalid_issue_hashes),
             &output_path,
+            temp_dir.path(),
+            ExportAgreement::Full,
         )
         .unwrap_err();
         assert!(

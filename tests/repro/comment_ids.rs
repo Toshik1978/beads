@@ -172,7 +172,15 @@ fn importing_counter_ids_flushes_content_ids_once() {
 
     // And once canonical, importing it again leaves nothing to flush.
     let exported = export_to_jsonl(&storage, &path, &ExportConfig::default()).unwrap();
-    finalize_export(&mut storage, &exported, Some(&exported.issue_hashes), &path).unwrap();
+    finalize_export(
+        &mut storage,
+        &exported,
+        Some(&exported.issue_hashes),
+        &path,
+        path.parent().unwrap(),
+        beads::sync::agreement::ExportAgreement::Full,
+    )
+    .unwrap();
     import(&mut storage, &path);
     assert_eq!(storage.get_dirty_issue_ids().unwrap(), [] as [String; 0]);
 }

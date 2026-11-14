@@ -15,6 +15,8 @@
 
 extern crate test_support as common;
 
+#[path = "storage/agreement_writers.rs"]
+mod agreement_writers;
 #[path = "storage/blocked_cache.rs"]
 mod blocked_cache;
 #[path = "storage/crud.rs"]

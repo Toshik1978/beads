@@ -34,7 +34,15 @@ fn an_incremental_flush_writes_what_a_full_export_would() {
         storage.create_issue(&issue(id), "tester").unwrap();
     }
     let exported = export_to_jsonl(&storage, &path, &ExportConfig::default()).unwrap();
-    finalize_export(&mut storage, &exported, Some(&exported.issue_hashes), &path).unwrap();
+    finalize_export(
+        &mut storage,
+        &exported,
+        Some(&exported.issue_hashes),
+        &path,
+        path.parent().unwrap(),
+        beads::sync::agreement::ExportAgreement::Full,
+    )
+    .unwrap();
 
     for id in ["bd-b", "bd-d", "bd-f"] {
         storage.create_issue(&issue(id), "tester").unwrap();

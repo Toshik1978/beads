@@ -556,6 +556,8 @@ fn import_repopulates_export_hashes() {
         &export_result,
         Some(&export_result.issue_hashes),
         &path,
+        temp.path(),
+        beads::sync::agreement::ExportAgreement::Full,
     )
     .unwrap();
     let original_hash = export_result.issue_hashes[0].1.clone();
