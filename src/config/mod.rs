@@ -1135,12 +1135,40 @@ pub(crate) fn repair_database_from_jsonl(
     show_progress: bool,
     allow_external_jsonl: bool,
 ) -> Result<(SqliteStorage, ImportResult, Vec<RecoveryBackupVerification>)> {
+    repair_database_from_jsonl_with_backup_suffix(
+        beads_dir,
+        db_path,
+        jsonl_path,
+        lock_timeout,
+        bootstrap_layer,
+        show_progress,
+        allow_external_jsonl,
+        RECOVERY_BACKUP_SUFFIX,
+    )
+}
+
+/// Backup suffix for the database family moved aside by corruption recovery.
+const RECOVERY_BACKUP_SUFFIX: &str = "bak";
+/// Backup suffix for a rebuild the user asked for on a healthy database.
+const REQUESTED_REBUILD_BACKUP_SUFFIX: &str = "rebuild.bak";
+
+#[allow(clippy::too_many_arguments)]
+fn repair_database_from_jsonl_with_backup_suffix(
+    beads_dir: &Path,
+    db_path: &Path,
+    jsonl_path: &Path,
+    lock_timeout: Option<u64>,
+    bootstrap_layer: &ConfigLayer,
+    show_progress: bool,
+    allow_external_jsonl: bool,
+    backup_suffix: &str,
+) -> Result<(SqliteStorage, ImportResult, Vec<RecoveryBackupVerification>)> {
     let mut import_config =
         import_config_for_resolved_jsonl(beads_dir, db_path, jsonl_path, allow_external_jsonl);
     import_config.show_progress = show_progress;
     import_config.skip_prefix_validation = true;
 
-    repair_database_from_jsonl_with_import_config(
+    repair_database_from_jsonl_with_import_config_and_suffix(
         beads_dir,
         db_path,
         jsonl_path,
@@ -1148,6 +1176,7 @@ pub(crate) fn repair_database_from_jsonl(
         bootstrap_layer,
         show_progress,
         import_config,
+        backup_suffix,
     )
 }
 
@@ -1158,7 +1187,30 @@ pub(crate) fn repair_database_from_jsonl_with_import_config(
     lock_timeout: Option<u64>,
     bootstrap_layer: &ConfigLayer,
     show_progress: bool,
+    import_config: ImportConfig,
+) -> Result<(SqliteStorage, ImportResult, Vec<RecoveryBackupVerification>)> {
+    repair_database_from_jsonl_with_import_config_and_suffix(
+        beads_dir,
+        db_path,
+        jsonl_path,
+        lock_timeout,
+        bootstrap_layer,
+        show_progress,
+        import_config,
+        RECOVERY_BACKUP_SUFFIX,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repair_database_from_jsonl_with_import_config_and_suffix(
+    beads_dir: &Path,
+    db_path: &Path,
+    jsonl_path: &Path,
+    lock_timeout: Option<u64>,
+    bootstrap_layer: &ConfigLayer,
+    show_progress: bool,
     mut import_config: ImportConfig,
+    backup_suffix: &str,
 ) -> Result<(SqliteStorage, ImportResult, Vec<RecoveryBackupVerification>)> {
     import_config.beads_dir = Some(beads_dir.to_path_buf());
     import_config.allow_external_jsonl |=
@@ -1182,7 +1234,7 @@ pub(crate) fn repair_database_from_jsonl_with_import_config(
     );
 
     let ((storage, import_result), backup_set) =
-        rebuild_database_family_with_backup(db_path, beads_dir, || {
+        rebuild_database_family_with_backup(db_path, beads_dir, backup_suffix, || {
             rebuild_database_family(db_path, lock_timeout, jsonl_path, &import_config, &prefix)
         })?;
     let recovery_dir = backup_set.recovery_dir.clone();
@@ -2035,12 +2087,14 @@ fn compact_database_via_vacuum_into_in_place_with_reopener(
 fn rebuild_database_family_with_backup<T, F>(
     db_path: &Path,
     beads_dir: &Path,
+    backup_suffix: &str,
     rebuild: F,
 ) -> Result<(T, RecoveryBackupSet)>
 where
     F: FnOnce() -> Result<T>,
 {
-    let backup_set = backup_database_family_for_recovery(db_path, beads_dir)?;
+    let stamp = Utc::now().format("%Y%m%d_%H%M%S_%f").to_string();
+    let backup_set = move_database_family_to_recovery(db_path, beads_dir, &stamp, backup_suffix)?;
 
     match rebuild() {
         Ok(value) => Ok((value, backup_set)),
@@ -2068,7 +2122,7 @@ fn backup_database_family_for_recovery(
     beads_dir: &Path,
 ) -> Result<RecoveryBackupSet> {
     let stamp = Utc::now().format("%Y%m%d_%H%M%S_%f").to_string();
-    move_database_family_to_recovery(db_path, beads_dir, &stamp)
+    move_database_family_to_recovery(db_path, beads_dir, &stamp, RECOVERY_BACKUP_SUFFIX)
 }
 
 fn prepare_missing_database_cleanup_for_recovery(
@@ -2092,13 +2146,15 @@ fn move_database_family_to_recovery(
     db_path: &Path,
     beads_dir: &Path,
     stamp: &str,
+    backup_suffix: &str,
 ) -> Result<RecoveryBackupSet> {
     reject_symlinked_database_path_for_recovery(db_path)?;
     let recovery_dir = recovery_dir_for_db_path(db_path, beads_dir);
     fs::create_dir_all(&recovery_dir)?;
     let (files, verified_files) = rename_existing_paths_with_backup_verification(
         database_family_paths(db_path).into_iter().map(|original| {
-            let backup = recovery_dir.join(recovery_backup_filename(&original, stamp, "bak"));
+            let backup =
+                recovery_dir.join(recovery_backup_filename(&original, stamp, backup_suffix));
             (original, backup)
         }),
         "move the database family into recovery",
@@ -2343,6 +2399,18 @@ impl OpenStorageResult {
     /// Returns an error if recovery fails or if this context is in `--no-db`
     /// mode.
     pub(crate) fn recover_database_from_jsonl(&mut self) -> Result<()> {
+        self.rebuild_database_from_jsonl_with_suffix(RECOVERY_BACKUP_SUFFIX)
+    }
+
+    /// Rebuild at the user's request on a healthy database. Identical to
+    /// [`Self::recover_database_from_jsonl`] except the backup of the old
+    /// database family is named `*.rebuild.bak`, so it is never mistaken for
+    /// the product of corruption recovery.
+    pub(crate) fn rebuild_database_from_jsonl_on_request(&mut self) -> Result<()> {
+        self.rebuild_database_from_jsonl_with_suffix(REQUESTED_REBUILD_BACKUP_SUFFIX)
+    }
+
+    fn rebuild_database_from_jsonl_with_suffix(&mut self, backup_suffix: &str) -> Result<()> {
         if self.no_db {
             return Err(BeadsError::Config(
                 "cannot rebuild SQLite database from JSONL while --no-db mode is active"
@@ -2358,7 +2426,7 @@ impl OpenStorageResult {
         // BusySnapshot conflicts.
         self.storage = SqliteStorage::open_memory()?;
 
-        let (storage, _, _) = repair_database_from_jsonl(
+        let (storage, _, _) = repair_database_from_jsonl_with_backup_suffix(
             &self.paths.beads_dir,
             &self.paths.db_path,
             &self.paths.jsonl_path,
@@ -2366,6 +2434,7 @@ impl OpenStorageResult {
             &self.bootstrap_layer,
             false,
             self.allow_external_jsonl,
+            backup_suffix,
         )?;
         self.storage = storage;
         self.storage.set_workflow_policy(preserved_workflow_policy);
@@ -8020,8 +8089,9 @@ routing:
         fs::write(&db_path, b"db bytes").expect("write db");
         fs::write(&wal_path, b"wal bytes").expect("write wal");
 
-        let backup_set = move_database_family_to_recovery(&db_path, &beads_dir, "fixed-stamp")
-            .expect("backup set");
+        let backup_set =
+            move_database_family_to_recovery(&db_path, &beads_dir, "fixed-stamp", "bak")
+                .expect("backup set");
 
         assert_eq!(backup_set.files.len(), 2);
         assert_eq!(backup_set.verified_files.len(), 2);
@@ -8086,8 +8156,8 @@ routing:
             recovery_dir.join(recovery_backup_filename(&wal_path, stamp, "bak"));
         fs::create_dir_all(&conflicting_wal_backup).expect("create conflicting wal backup dir");
 
-        let err =
-            move_database_family_to_recovery(&db_path, &beads_dir, stamp).expect_err("should fail");
+        let err = move_database_family_to_recovery(&db_path, &beads_dir, stamp, "bak")
+            .expect_err("should fail");
         assert!(matches!(err, BeadsError::Io(_)));
 
         assert!(db_path.is_file(), "db should be restored after rollback");
@@ -8181,8 +8251,8 @@ routing:
         symlink("missing-wal-target", &wal_path).expect("create dangling wal symlink");
 
         let stamp = "fixed-stamp";
-        let backup_set =
-            move_database_family_to_recovery(&db_path, &beads_dir, stamp).expect("backup set");
+        let backup_set = move_database_family_to_recovery(&db_path, &beads_dir, stamp, "bak")
+            .expect("backup set");
 
         assert!(
             fs::symlink_metadata(&wal_path).is_err(),

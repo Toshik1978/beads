@@ -424,7 +424,7 @@ fn maybe_delegate_rebuild(
     );
     // `recover_database_from_jsonl` sets `auto_rebuilt = true` on success,
     // which is what gates the short-circuit inside `execute_import` below.
-    open_result.recover_database_from_jsonl()?;
+    open_result.rebuild_database_from_jsonl_on_request()?;
     let restore_count = preserved_pre_delegation_tombstones.len();
     restore_tombstones_after_rebuild(
         &mut open_result.storage,
@@ -1832,6 +1832,7 @@ fn jsonl_contains_duplicate_external_refs(jsonl_path: &Path) -> Result<bool> {
 fn emit_auto_rebuild_import_result(
     storage: &crate::storage::SqliteStorage,
     use_json: bool,
+    requested_rebuild: bool,
     ctx: &OutputContext,
 ) -> Result<()> {
     let created = storage.count_all_issues()?;
@@ -1849,7 +1850,11 @@ fn emit_auto_rebuild_import_result(
         if ctx.is_rich() {
             render_import_result_rich(&result, ctx);
         } else {
-            println!("Imported from JSONL (via automatic recovery):");
+            if requested_rebuild {
+                println!("Rebuilt from JSONL:");
+            } else {
+                println!("Imported from JSONL (via automatic recovery):");
+            }
             println!("  Created: {} issues", result.created);
             println!("  Rebuilt blocked cache");
         }
@@ -1952,7 +1957,7 @@ fn execute_import(
             rebuild = args.rebuild,
             "Skipping import body: database was rebuilt from JSONL during open"
         );
-        emit_auto_rebuild_import_result(storage, use_json, ctx)?;
+        emit_auto_rebuild_import_result(storage, use_json, args.rebuild || args.force, ctx)?;
         return Ok(());
     }
 

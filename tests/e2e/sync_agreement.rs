@@ -276,3 +276,70 @@ fn a_fresh_workspace_flushes_without_a_prior_agreement() {
     let id = parse_created_id(&run.stdout);
     assert_eq!(jsonl_title(&ws, &id).as_deref(), Some("a"));
 }
+
+fn recovery_files(ws: &BrWorkspace) -> Vec<String> {
+    let dir = ws.root.join(".beads").join(".br_recovery");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn requested_rebuild_does_not_claim_recovery() {
+    let ws = BrWorkspace::new();
+    init(&ws);
+    create(&ws, "a", "create_a");
+
+    let run = run_br(&ws, ["sync", "--import-only", "--rebuild"], "rebuild");
+    assert!(run.status.success(), "rebuild failed: {}", run.stderr);
+    assert!(
+        run.stdout.contains("Rebuilt from JSONL:"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("automatic recovery") && !run.stderr.contains("automatic recovery"),
+        "stdout: {} stderr: {}",
+        run.stdout,
+        run.stderr
+    );
+    let files = recovery_files(&ws);
+    assert!(
+        files.iter().any(|f| f.ends_with(".rebuild.bak")),
+        "recovery files: {files:?}"
+    );
+    assert!(
+        files.iter().all(|f| f.ends_with(".rebuild.bak")),
+        "recovery files: {files:?}"
+    );
+}
+
+#[test]
+fn corruption_recovery_still_says_so() {
+    let ws = BrWorkspace::new();
+    init(&ws);
+    create(&ws, "a", "create_a");
+    fs::write(
+        ws.root.join(".beads").join("beads.db"),
+        b"garbage not sqlite",
+    )
+    .expect("corrupt db");
+
+    let run = run_br(&ws, ["list"], "list_corrupt");
+    assert!(run.status.success(), "list failed: {}", run.stderr);
+    let files = recovery_files(&ws);
+    assert!(
+        files
+            .iter()
+            .any(|f| f.contains(".bak") && !f.contains(".rebuild.bak")),
+        "corruption keeps the plain .bak suffix: {files:?}"
+    );
+    let all = format!("{}{}", run.stdout, run.stderr);
+    assert!(
+        all.to_lowercase().contains("recover"),
+        "recovery must be reported: {all}"
+    );
+}
