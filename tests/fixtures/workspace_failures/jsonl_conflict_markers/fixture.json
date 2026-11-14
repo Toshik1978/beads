@@ -6,11 +6,11 @@
   "expected_command_outcomes": [
     {
       "surface": "startup/open",
-      "outcome": "success"
+      "outcome": "success_served_stale"
     },
     {
       "surface": "create",
-      "outcome": "success"
+      "outcome": "fails_sync_conflict"
     },
     {
       "surface": "sync --status",
@@ -23,6 +23,7 @@
   ],
   "source_hint": "Derived from the conflict-marker rejection tests in tests/e2e_sync_fuzz_edge_cases.rs.",
   "notes": [
+    "The database holds local changes and there is no trusted base, so the changed JSONL can be neither imported nor merged: reads serve the database with a warning naming `br sync --merge`, and writes refuse with SYNC_CONFLICT.",
     "This case is syntactically broken by design and should never be treated as silently importable.",
     "The database remains healthy so the fixture can distinguish interchange failure from primary-store failure."
   ]

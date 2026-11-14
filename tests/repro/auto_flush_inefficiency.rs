@@ -172,8 +172,37 @@ fn test_auto_flush_preserves_unrelated_existing_jsonl_lines() {
         )
         .unwrap();
 
-    let result = auto_flush(&mut storage, &beads_dir, &jsonl_path, false).unwrap();
-    assert!(result.flushed);
+    // The JSONL gained a line the database never saw: the flush refuses
+    // rather than splicing around it, and leaves the file as it found it.
+    let before = fs::read_to_string(&jsonl_path).unwrap();
+    let err = auto_flush(&mut storage, &beads_dir, &jsonl_path, false).unwrap_err();
+    assert!(
+        matches!(err, beads::BeadsError::SyncConflict { .. }),
+        "unexpected error: {err}"
+    );
+    assert_eq!(fs::read_to_string(&jsonl_path).unwrap(), before);
+
+    // The next command's reconcile merges both sides.
+    let outcome = beads::sync::reconcile::reconcile_before_command(
+        &mut storage,
+        &beads_dir,
+        &jsonl_path,
+        &beads::sync::reconcile::ReconcileOptions {
+            expected_prefix: None,
+            allow_external_jsonl: false,
+            read_only: false,
+            retention_days: None,
+            history: beads::sync::history::HistoryConfig::default(),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            beads::sync::reconcile::ReconcileOutcome::Merged { .. }
+        ),
+        "{outcome:?}"
+    );
 
     let issues = beads::sync::read_issues_from_jsonl(&jsonl_path).unwrap();
     let ids = issues

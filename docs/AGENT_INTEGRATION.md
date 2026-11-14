@@ -59,6 +59,16 @@ agent that just runs commands normally, without any explicit sync step, stays
 converged with git across a `pull`/`push` cycle. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for why the design is shaped this way.
 
+A changed `issues.jsonl` is never silently skipped. If the database also has
+local changes the JSONL has not seen, the next command merges the two; if they
+conflict (or there is no trusted base to merge against), a write command fails
+with `SYNC_CONFLICT` and a read command answers from the database with a
+`SYNC_SERVED_STALE` warning on stderr. Either way the fix is `br sync --merge`
+(add `--force-db` or `--force-jsonl` to pick a side on conflicts). Writing
+with `--allow-stale` or `--no-auto-import` does not settle the difference:
+the automatic export refuses to overwrite the changed JSONL, and the next
+plain command reconciles it.
+
 Two situations where an agent should sync explicitly:
 
 - **Before committing**, run `br sync --flush-only` as an idempotent final

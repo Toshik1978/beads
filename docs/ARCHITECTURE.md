@@ -22,6 +22,14 @@ the rest of the design:
   `--no-auto-flush`), and auto-imports a newer JSONL before it runs (see
   `--no-auto-import`), so the two stay converged across `git pull`/`git push`
   without an explicit sync step in the common case.
+- A changed JSONL is never skipped. Before a command runs, a JSONL that
+  differs from the last recorded agreement is imported when the database has
+  no local changes, and three-way merged against the base when it does; a
+  conflict, or local changes with no trusted base, makes a write command
+  refuse (`SYNC_CONFLICT`, naming `br sync --merge`) and a read command answer
+  from the database with a warning. Auto-flush and `br sync --flush-only`
+  (without `--force`) hold to the same rule, so nothing writes over a JSONL
+  the database has not agreed with — see `src/sync/reconcile.rs`.
 - `br sync --merge` exists because both sides *can* diverge (concurrent
   processes, a `git pull` that lands mid-session) — it does a three-way merge
   against `.beads/beads.base.jsonl` as the common ancestor, with

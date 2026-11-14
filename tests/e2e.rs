@@ -111,6 +111,8 @@ mod sort_multi_key;
 mod stale;
 #[path = "e2e/stats.rs"]
 mod stats;
+#[path = "e2e/sync_agreement.rs"]
+mod sync_agreement;
 #[path = "e2e/sync_artifacts.rs"]
 mod sync_artifacts;
 #[path = "e2e/sync_failure_injection.rs"]

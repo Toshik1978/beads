@@ -12,6 +12,7 @@ pub mod history;
 pub mod jsonl_format;
 pub mod merge_driver;
 pub mod path;
+pub mod reconcile;
 
 pub use path::{
     ALLOWED_EXACT_NAMES, ALLOWED_EXTENSIONS, PathValidation, require_safe_sync_overwrite_path,
@@ -60,21 +61,63 @@ const MAX_JSONL_TEMP_PATH_ATTEMPTS: u32 = 64;
 /// `lock_timeout_ms` uses the same millisecond setting as `--lock-timeout`.
 /// When unset, a 30s default prevents a stuck writer from parking every
 /// subsequent mutating command indefinitely.
-#[allow(clippy::incompatible_msrv)]
 pub fn blocking_write_lock_with_timeout(
     beads_dir: &Path,
     lock_timeout_ms: Option<u64>,
 ) -> Result<File> {
-    let lock_path = beads_dir.join(".write.lock");
+    blocking_lock_with_timeout(
+        &beads_dir.join(".write.lock"),
+        "write",
+        lock_timeout_ms,
+        write_lock_timeout_error,
+    )
+}
+
+/// Acquire a bounded exclusive lock on `.beads/.sync.lock`, waiting for a
+/// concurrent reconcile or flush to finish instead of skipping one's own.
+///
+/// `lock_timeout_ms` is the `--lock-timeout` setting, as for
+/// [`blocking_write_lock_with_timeout`]. A timeout is a `SyncConflict`: the
+/// command cannot establish that the database and JSONL agree.
+///
+/// # Errors
+///
+/// Returns an error if the lock file cannot be opened or locked, or
+/// `SyncConflict` if the wait times out.
+pub fn blocking_sync_lock_with_timeout(
+    beads_dir: &Path,
+    lock_timeout_ms: Option<u64>,
+) -> Result<File> {
+    blocking_lock_with_timeout(
+        &beads_dir.join(".sync.lock"),
+        "sync",
+        lock_timeout_ms,
+        |lock_path, timeout_ms| BeadsError::SyncConflict {
+            message: format!(
+                "Timed out after {timeout_ms}ms waiting for sync lock at {}. Another br \
+                 process is reconciling or flushing the JSONL; retry after it exits.",
+                lock_path.display()
+            ),
+        },
+    )
+}
+
+#[allow(clippy::incompatible_msrv)]
+fn blocking_lock_with_timeout(
+    lock_path: &Path,
+    lock_name: &str,
+    lock_timeout_ms: Option<u64>,
+    timeout_error: impl Fn(&Path, u64) -> BeadsError,
+) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(|err| {
             BeadsError::Config(format!(
-                "Failed to open write lock at {}: {err}",
+                "Failed to open {lock_name} lock at {}: {err}",
                 lock_path.display()
             ))
         })?;
@@ -85,7 +128,7 @@ pub fn blocking_write_lock_with_timeout(
         Err(TryLockError::WouldBlock) => {}
         Err(TryLockError::Error(err)) => {
             return Err(BeadsError::Config(format!(
-                "Failed to acquire write lock at {}: {err}",
+                "Failed to acquire {lock_name} lock at {}: {err}",
                 lock_path.display()
             )));
         }
@@ -97,12 +140,12 @@ pub fn blocking_write_lock_with_timeout(
     tracing::debug!(
         timeout_ms,
         lock_path = %lock_path.display(),
-        ".write.lock is held by another process; waiting with timeout"
+        "lock is held by another process; waiting with timeout"
     );
 
     loop {
         if start.elapsed() >= timeout {
-            return Err(write_lock_timeout_error(&lock_path, timeout_ms));
+            return Err(timeout_error(lock_path, timeout_ms));
         }
 
         let remaining = timeout.saturating_sub(start.elapsed());
@@ -112,9 +155,9 @@ pub fn blocking_write_lock_with_timeout(
             Ok(()) => return Ok(file),
             Err(TryLockError::WouldBlock) => {}
             Err(TryLockError::Error(err)) => {
-                tracing::debug!("failed to acquire .write.lock: {err}");
+                tracing::debug!("failed to acquire {lock_name} lock: {err}");
                 return Err(BeadsError::Config(format!(
-                    "Failed to acquire write lock at {}: {err}",
+                    "Failed to acquire {lock_name} lock at {}: {err}",
                     lock_path.display()
                 )));
             }
@@ -133,37 +176,6 @@ fn write_lock_timeout_error(lock_path: &Path, timeout_ms: u64) -> BeadsError {
 #[must_use]
 pub const fn default_write_lock_timeout_ms() -> u64 {
     DEFAULT_WRITE_LOCK_TIMEOUT_MS
-}
-
-/// Try to acquire an exclusive advisory lock on `.beads/.sync.lock`.
-///
-/// Returns the lock file on success. The lock is held until the returned
-/// `File` is dropped. If another process already holds the lock, returns
-/// `Ok(None)` (non-blocking). Lock-file open or OS lock errors are returned
-/// separately so callers do not confuse a broken lock path with contention.
-#[allow(clippy::incompatible_msrv)]
-pub fn try_sync_lock(beads_dir: &Path) -> Result<Option<File>> {
-    let lock_path = beads_dir.join(".sync.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|err| {
-            BeadsError::Config(format!(
-                "Failed to open sync lock at {}: {err}",
-                lock_path.display()
-            ))
-        })?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(TryLockError::WouldBlock) => Ok(None),
-        Err(TryLockError::Error(err)) => Err(BeadsError::Config(format!(
-            "Failed to acquire sync lock at {}: {err}",
-            lock_path.display()
-        ))),
-    }
 }
 
 struct TempFileGuard {
@@ -2337,79 +2349,37 @@ fn refresh_jsonl_witness_best_effort(
     }
 }
 
-/// Auto-import JSONL if it is newer than the DB.
+/// Reconcile a changed JSONL into the DB before a command runs.
 ///
 /// Honors `--no-auto-import` and `--allow-stale` behavior.
 /// Both flags short-circuit before any staleness probe so startup can skip the
-/// JSONL stat/hash path entirely when the caller explicitly opted out.
+/// JSONL stat/hash path entirely when the caller explicitly opted out; they
+/// record no agreement, so the next plain command still sees the change.
 ///
 /// # Errors
 ///
-/// Returns an error if staleness checks, metadata reads, or import steps fail.
+/// Returns an error if staleness checks, metadata reads, or import steps fail,
+/// or if the reconcile is refused (see [`reconcile::reconcile_before_command`]).
 pub fn auto_import_if_stale(
     storage: &mut SqliteStorage,
     beads_dir: &Path,
     jsonl_path: &Path,
-    expected_prefix: Option<&str>,
-    allow_external_jsonl: bool,
+    opts: &reconcile::ReconcileOptions,
     allow_stale: bool,
     no_auto_import: bool,
-) -> Result<()> {
+) -> Result<reconcile::ReconcileOutcome> {
     if allow_stale || no_auto_import {
         tracing::debug!(
             allow_stale,
             no_auto_import,
             "Skipping auto-import staleness probe due to startup override"
         );
-        return Ok(());
+        return Ok(reconcile::ReconcileOutcome::Unchanged);
     }
 
-    if jsonl_path.exists() {
-        validate_sync_path_with_external(jsonl_path, beads_dir, allow_external_jsonl)?;
-    }
-    let staleness = compute_staleness_refreshing_witnesses(storage, jsonl_path)?;
-    if !staleness.jsonl_newer {
-        return Ok(());
-    }
-
-    // When both JSONL and DB have changed, skip the auto-import with a
-    // warning instead of failing the command.  This prevents spurious
-    // SyncConflict errors when ≥3 concurrent `br` processes race: one
-    // process flushes JSONL while another has pending local writes,
-    // causing both `jsonl_newer` and `db_newer` to be true.
-    //
-    // Explicit `br sync --merge` still detects this as a hard conflict so the
-    // user can reconcile manually.
-    if staleness.db_newer && !allow_stale {
-        tracing::warn!(
-            dirty_count = staleness.dirty_count,
-            jsonl_mtime = ?staleness.jsonl_mtime,
-            "Skipping auto-import: JSONL changed externally while {} local change(s) are pending. \
-             Run `br sync --merge` to reconcile.",
-            staleness.dirty_count,
-        );
-        return Ok(());
-    }
-
-    let import_config = ImportConfig {
-        // The configured prefix is the default for new IDs, not a project-wide
-        // invariant. Auto-import should preserve mixed-prefix workspaces.
-        skip_prefix_validation: true,
-        beads_dir: Some(beads_dir.to_path_buf()),
-        allow_external_jsonl,
-        show_progress: false,
-        ..Default::default()
-    };
-
-    let result = import_from_jsonl(storage, jsonl_path, &import_config, expected_prefix)?;
-
-    tracing::debug!(
-        imported_count = result.imported_count,
-        jsonl_path = %jsonl_path.display(),
-        "Auto-import completed"
-    );
-
-    Ok(())
+    let outcome = reconcile::reconcile_before_command(storage, beads_dir, jsonl_path, opts)?;
+    tracing::debug!(?outcome, "Auto-import reconcile completed");
+    Ok(outcome)
 }
 
 /// Finalize an export by updating metadata, clearing dirty flags, and recording export hashes.
@@ -3213,6 +3183,23 @@ pub fn auto_flush(
     }
 
     validate_sync_path_with_external(jsonl_path, beads_dir, allow_external_jsonl)?;
+
+    // The write precondition: never write over a JSONL the database has not
+    // agreed with. Splicing or force-exporting here would silently drop the
+    // file's changes (a `git pull`, another clone's flush) and then record an
+    // agreement over the loss. The next plain command reconciles instead.
+    if jsonl_exists
+        && compute_staleness_refreshing_witnesses(storage, jsonl_path)?.jsonl_newer
+        && !reconcile::never_agreed_over_an_empty_jsonl(storage, jsonl_path)?
+    {
+        return Err(BeadsError::SyncConflict {
+            message: format!(
+                "The JSONL changed since the database last agreed with it, so the automatic \
+                 export did not overwrite it.\n{}",
+                reconcile::RESOLVE_HINT
+            ),
+        });
+    }
 
     // Refuse to auto-flush over a JSONL that still holds unresolved
     // merge-conflict markers. The downstream export path would otherwise
@@ -5324,12 +5311,12 @@ mod tests {
     }
 
     #[test]
-    fn try_sync_lock_errors_when_lock_path_cannot_open() {
+    fn sync_lock_errors_when_lock_path_cannot_open() {
         let temp_dir = TempDir::new().unwrap();
         let beads_dir = temp_dir.path().join(".beads");
         fs::create_dir_all(beads_dir.join(".sync.lock")).unwrap();
 
-        let err = try_sync_lock(&beads_dir).unwrap_err();
+        let err = blocking_sync_lock_with_timeout(&beads_dir, Some(25)).unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -5343,7 +5330,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::incompatible_msrv)]
-    fn try_sync_lock_returns_none_when_lock_is_held() {
+    fn sync_lock_waits_then_times_out_as_a_sync_conflict() {
         let temp_dir = TempDir::new().unwrap();
         let beads_dir = temp_dir.path().join(".beads");
         fs::create_dir_all(&beads_dir).unwrap();
@@ -5357,12 +5344,15 @@ mod tests {
             .expect("open held sync lock");
         held_lock.lock().expect("hold sync lock");
 
-        assert!(try_sync_lock(&beads_dir).unwrap().is_none());
+        let err = blocking_sync_lock_with_timeout(&beads_dir, Some(50)).unwrap_err();
+        assert!(
+            matches!(&err, BeadsError::SyncConflict { message } if message.contains(".sync.lock")),
+            "unexpected error: {err}"
+        );
 
         drop(held_lock);
-        let acquired = try_sync_lock(&beads_dir)
-            .expect("sync lock after release")
-            .expect("uncontended lock should be acquired");
+        let acquired =
+            blocking_sync_lock_with_timeout(&beads_dir, Some(25)).expect("sync lock after release");
         drop(acquired);
     }
 
@@ -5932,6 +5922,16 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    fn test_reconcile_options() -> reconcile::ReconcileOptions<'static> {
+        reconcile::ReconcileOptions {
+            expected_prefix: None,
+            allow_external_jsonl: false,
+            read_only: false,
+            retention_days: None,
+            history: history::HistoryConfig::default(),
+        }
+    }
+
     #[test]
     fn test_auto_import_if_stale_skips_probe_for_allow_stale() {
         let mut storage = SqliteStorage::open_memory().unwrap();
@@ -5949,8 +5949,7 @@ mod tests {
             &mut storage,
             &beads_dir,
             &jsonl_path,
-            None,
-            false,
+            &test_reconcile_options(),
             true,
             false,
         )
@@ -5979,8 +5978,7 @@ mod tests {
             &mut storage,
             &beads_dir,
             &jsonl_path,
-            None,
-            false,
+            &test_reconcile_options(),
             false,
             true,
         )
@@ -6043,8 +6041,7 @@ mod tests {
             &mut storage,
             &beads_dir,
             &external_jsonl,
-            None,
-            false,
+            &test_reconcile_options(),
             false,
             false,
         )

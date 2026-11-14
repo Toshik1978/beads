@@ -116,6 +116,9 @@ pub struct DatasetRegistry {
 pub enum WorkspaceFailureCommandOutcome {
     Success,
     SuccessWithAutoRecovery,
+    /// A read that answers from a database the JSONL disagrees with, and says
+    /// so on stderr.
+    SuccessServedStale,
     StatusInSync,
     StatusJsonlNewer,
     StatusDiverged,
@@ -123,6 +126,8 @@ pub enum WorkspaceFailureCommandOutcome {
     FailsPrefixMismatch,
     FailsConflictMarkers,
     FailsInvalidJson,
+    /// A write refused because the database and JSONL cannot be reconciled.
+    FailsSyncConflict,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

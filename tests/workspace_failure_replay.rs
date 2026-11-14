@@ -137,6 +137,10 @@ fn resolved_database_path(fixture: &FixtureWorkspace, surface: &str) -> Result<P
 }
 
 fn check_config_error(run: &BrRun, needle: &str, context: &str) -> Check {
+    check_error(run, "CONFIG_ERROR", needle, context)
+}
+
+fn check_error(run: &BrRun, code: &str, needle: &str, context: &str) -> Check {
     check!(
         !run.status.success(),
         "{context} should fail\nstdout={}\nstderr={}",
@@ -145,8 +149,8 @@ fn check_config_error(run: &BrRun, needle: &str, context: &str) -> Check {
     );
     let error_json = parse_stdout_json(run, context)?;
     check!(
-        error_json["error"]["code"].as_str() == Some("CONFIG_ERROR"),
-        "{context} should surface CONFIG_ERROR: {error_json}"
+        error_json["error"]["code"].as_str() == Some(code),
+        "{context} should surface {code}: {error_json}"
     );
     check!(
         error_json["error"]["message"]
@@ -261,6 +265,18 @@ fn check_surface_outcome(
             check!(run.status.success(), "{context} failed: {}", run.stderr);
             let _json = parse_stdout_json(&run, &context)?;
             check_sqlite_header(&resolved_database_path(fixture, "resolved_db")?, &context)?;
+        }
+        WorkspaceFailureCommandOutcome::SuccessServedStale => {
+            check!(run.status.success(), "{context} failed: {}", run.stderr);
+            let _json = parse_stdout_json(&run, &context)?;
+            check!(
+                run.stderr.contains("SYNC_SERVED_STALE") && run.stderr.contains("br sync --merge"),
+                "{context} should warn that it serves a stale database: {}",
+                run.stderr
+            );
+        }
+        WorkspaceFailureCommandOutcome::FailsSyncConflict => {
+            check_error(&run, "SYNC_CONFLICT", "br sync --merge", &context)?;
         }
         WorkspaceFailureCommandOutcome::StatusInSync => {
             check!(run.status.success(), "{context} failed: {}", run.stderr);
@@ -511,9 +527,10 @@ fn check_core_write_failure(
     create: &BrRun,
     expected_create: WorkspaceFailureCommandOutcome,
 ) -> Check {
-    let needle = match expected_create {
-        WorkspaceFailureCommandOutcome::FailsPrefixMismatch => "Prefix mismatch",
-        WorkspaceFailureCommandOutcome::FailsConflictMarkers => "conflict marker",
+    let (code, needle) = match expected_create {
+        WorkspaceFailureCommandOutcome::FailsPrefixMismatch => ("CONFIG_ERROR", "Prefix mismatch"),
+        WorkspaceFailureCommandOutcome::FailsConflictMarkers => ("CONFIG_ERROR", "conflict marker"),
+        WorkspaceFailureCommandOutcome::FailsSyncConflict => ("SYNC_CONFLICT", "br sync --merge"),
         other => {
             return Err(format!(
                 "{} has unsupported create outcome for core write replay: {other:?}",
@@ -521,8 +538,9 @@ fn check_core_write_failure(
             ));
         }
     };
-    check_config_error(
+    check_error(
         create,
+        code,
         needle,
         &format!("{} core create", fixture.metadata.name),
     )
@@ -563,7 +581,8 @@ fn check_core_read_surfaces(metadata: &WorkspaceFailureFixtureMetadata) -> Check
 
     match startup {
         WorkspaceFailureCommandOutcome::Success
-        | WorkspaceFailureCommandOutcome::SuccessWithAutoRecovery => {
+        | WorkspaceFailureCommandOutcome::SuccessWithAutoRecovery
+        | WorkspaceFailureCommandOutcome::SuccessServedStale => {
             check_core_read_success(&probe_workspace)
         }
         WorkspaceFailureCommandOutcome::FailsPrefixMismatch
@@ -600,7 +619,8 @@ fn check_core_write_surfaces(metadata: &WorkspaceFailureFixtureMetadata) -> Chec
             check_core_write_success(&workspace, &create, expected_create)
         }
         WorkspaceFailureCommandOutcome::FailsPrefixMismatch
-        | WorkspaceFailureCommandOutcome::FailsConflictMarkers => {
+        | WorkspaceFailureCommandOutcome::FailsConflictMarkers
+        | WorkspaceFailureCommandOutcome::FailsSyncConflict => {
             check_core_write_failure(&workspace, &create, expected_create)
         }
         other => Err(format!(

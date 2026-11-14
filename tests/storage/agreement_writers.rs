@@ -305,8 +305,11 @@ fn a_no_op_flush_restores_a_missing_base_when_the_hash_matches() {
     assert_eq!(fs::read(&base).unwrap(), fs::read(&jsonl).unwrap());
 }
 
+/// A flush over a JSONL that differs from the agreement imports it first
+/// (the database has no local changes), so the base it restores is the file
+/// the database now agrees with — never a file it has not read.
 #[test]
-fn a_no_op_flush_leaves_a_missing_base_missing_when_the_jsonl_differs() {
+fn a_flush_over_a_changed_jsonl_imports_it_before_restoring_the_base() {
     let workspace = cli_workspace();
     let beads = workspace.root.join(".beads");
     fs::remove_file(beads.join("beads.base.jsonl")).unwrap();
@@ -314,10 +317,20 @@ fn a_no_op_flush_leaves_a_missing_base_missing_when_the_jsonl_differs() {
     let edited = fs::read_to_string(&jsonl)
         .unwrap()
         .replace("Original title", "Edited elsewhere");
-    fs::write(&jsonl, edited).unwrap();
+    fs::write(&jsonl, &edited).unwrap();
 
-    let flush = common::cli::run_br(&workspace, ["sync", "--flush-only"], "noop_leave");
+    let flush = common::cli::run_br(&workspace, ["sync", "--flush-only"], "flush_imports");
     assert!(flush.status.success(), "flush failed: {}", flush.stderr);
 
-    assert!(!beads.join("beads.base.jsonl").exists());
+    let list = common::cli::run_br(
+        &workspace,
+        ["--allow-stale", "list", "--json"],
+        "list_after_flush",
+    );
+    assert!(list.status.success(), "list failed: {}", list.stderr);
+    assert!(list.stdout.contains("Edited elsewhere"), "{}", list.stdout);
+    assert_eq!(
+        fs::read_to_string(beads.join("beads.base.jsonl")).unwrap(),
+        fs::read_to_string(&jsonl).unwrap()
+    );
 }

@@ -523,7 +523,6 @@ fn render_reopen_rich(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::commands;
     use crate::config::CliOverrides;
     use crate::model::{Issue, IssueType, Priority, Status};
     use crate::output::OutputContext;
@@ -555,7 +554,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = TempDir::new().expect("tempdir");
         let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
+        crate::util::test_helpers::init_with_agreement(temp.path(), &ctx);
 
         let beads_dir = temp.path().join(".beads");
         let db_path = beads_dir.join("beads.db");
@@ -597,7 +596,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = TempDir::new().expect("tempdir");
         let ctx = OutputContext::from_flags(false, false, true);
-        commands::init::execute(None, false, Some(temp.path()), &ctx).expect("init");
+        crate::util::test_helpers::init_with_agreement(temp.path(), &ctx);
 
         let beads_dir = temp.path().join(".beads");
         let db_path = beads_dir.join("beads.db");

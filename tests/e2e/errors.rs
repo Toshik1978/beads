@@ -1638,23 +1638,25 @@ fn e2e_sync_export_guards() {
     let beads_dir = workspace.root.join(".beads");
     let issues_path = beads_dir.join("issues.jsonl");
 
-    // Empty DB guard: JSONL has content but DB has zero issues.
-    fs::write(&issues_path, "{\"id\":\"bd-ghost\"}\n").expect("write jsonl");
+    // A JSONL changed behind br's back is reconciled before anything is
+    // exported over it; one that cannot be imported refuses the flush and is
+    // left exactly as it was.
+    let ghost = "{\"id\":\"bd-ghost\"}\n";
+    fs::write(&issues_path, ghost).expect("write jsonl");
     let flush_guard = run_br(&workspace, ["sync", "--flush-only"], "sync_flush_guard");
     assert!(
         !flush_guard.status.success(),
-        "expected empty DB guard failure"
+        "a flush over an unimportable JSONL must fail"
     );
     assert!(
-        flush_guard
-            .stderr
-            .contains("Refusing to export empty database"),
-        "missing empty DB guard message"
+        flush_guard.stderr.contains("Invalid JSON"),
+        "missing import error: {}",
+        flush_guard.stderr
     );
+    assert_eq!(fs::read_to_string(&issues_path).expect("read jsonl"), ghost);
     // Reset JSONL to avoid guard on the seed export.
     fs::write(&issues_path, "").expect("reset jsonl");
 
-    // Stale DB guard: JSONL has an ID missing from DB.
     let create = run_br(&workspace, ["create", "Stale guard issue"], "create_stale");
     assert!(create.status.success(), "create failed: {}", create.stderr);
 
@@ -1682,18 +1684,17 @@ fn e2e_sync_export_guards() {
         create2.stderr
     );
 
-    // The flush should fail because JSONL has bd-missing but DB doesn't
+    // The flush merges the record the database never imported with the local
+    // one instead of exporting the stale database over it.
     let flush_stale = run_br(&workspace, ["sync", "--flush-only"], "sync_flush_stale");
     assert!(
-        !flush_stale.status.success(),
-        "expected stale DB guard failure"
+        flush_stale.status.success(),
+        "flush failed: {}",
+        flush_stale.stderr
     );
-    assert!(
-        flush_stale
-            .stderr
-            .contains("Refusing to export stale database"),
-        "missing stale DB guard message"
-    );
+    let merged = fs::read_to_string(&issues_path).expect("read jsonl");
+    assert!(merged.contains("\"id\":\"bd-missing\""), "{merged}");
+    assert!(merged.contains("Dirty issue"), "{merged}");
 }
 
 #[test]
@@ -3522,17 +3523,13 @@ fn e2e_error_text_json_parity_validation() {
 }
 
 #[test]
-fn e2e_sync_merge_detects_conflict_markers_in_base_snapshot() {
-    // Regression: `execute_merge` loads `beads.base.jsonl` via
-    // `load_base_snapshot` *before* scanning the main JSONL for conflict
-    // markers. If the base snapshot itself contained unresolved
-    // `<<<<<<<` / `=======` / `>>>>>>>` regions (a rare but possible state
-    // when a user commits the base snapshot against the default gitignore
-    // and then hits a botched `git merge`), the merge would fail with a
-    // cryptic "Invalid JSON in base snapshot at line 1" instead of the
-    // helpful "merge conflict markers detected" diagnostic. The fix
-    // scans the base snapshot for markers before attempting to parse.
-    let _log = common::test_log("e2e_sync_merge_detects_conflict_markers_in_base_snapshot");
+fn e2e_sync_merge_ignores_untrusted_base_snapshot_with_conflict_markers() {
+    // `execute_merge` takes its base from `trusted_base`, which only reads
+    // `beads.base.jsonl` when its hash equals the recorded one. A base
+    // snapshot damaged by a botched `git merge` (conflict markers) therefore
+    // never reaches the parser: it is treated as absent, the merge runs with
+    // an empty base, and a successful merge rewrites the base cleanly.
+    let _log = common::test_log("e2e_sync_merge_ignores_untrusted_base_snapshot");
     let workspace = BrWorkspace::new();
 
     let init = run_br(&workspace, ["init"], "init");
@@ -3541,38 +3538,26 @@ fn e2e_sync_merge_detects_conflict_markers_in_base_snapshot() {
     let create = run_br(&workspace, ["create", "Seed"], "create");
     assert!(create.status.success(), "create failed: {}", create.stderr);
 
-    // First flush so the JSONL is valid and the main sync path won't
-    // short-circuit before the merge code runs.
     let flush = run_br(&workspace, ["sync", "--flush-only"], "sync_flush");
     assert!(flush.status.success(), "flush failed: {}", flush.stderr);
 
-    // Build a base snapshot that contains merge-conflict markers as if a
-    // user committed `beads.base.jsonl` and then hit a botched `git merge`.
     let jsonl_path = workspace.root.join(".beads").join("issues.jsonl");
     let clean = fs::read_to_string(&jsonl_path).expect("read jsonl");
     let base_path = workspace.root.join(".beads").join("beads.base.jsonl");
     let conflicted = format!("<<<<<<< HEAD\n{clean}=======\n{clean}>>>>>>> branch\n");
     fs::write(&base_path, &conflicted).expect("write conflicted base snapshot");
 
-    // Merge must refuse with a conflict-markers diagnostic instead of a
-    // generic "Invalid JSON in base snapshot" parse error.
     let merge = run_br(&workspace, ["sync", "--merge"], "sync_merge");
     assert!(
-        !merge.status.success(),
-        "merge should fail when base snapshot contains conflict markers: stdout={} stderr={}",
+        merge.status.success(),
+        "merge over an untrusted base should succeed: stdout={} stderr={}",
         merge.stdout,
         merge.stderr
     );
-    let lower = merge.stderr.to_lowercase();
+    let base = fs::read_to_string(&base_path).expect("read base snapshot");
     assert!(
-        lower.contains("conflict") || lower.contains("marker"),
-        "merge error should mention conflict markers, got stderr: {}",
-        merge.stderr
-    );
-    assert!(
-        !lower.contains("invalid json in base snapshot"),
-        "merge error should surface the conflict-markers diagnostic rather than the generic JSON parse failure, got stderr: {}",
-        merge.stderr
+        !base.contains("<<<<<<<"),
+        "merge should replace the damaged base snapshot, got: {base}"
     );
 }
 

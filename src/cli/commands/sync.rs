@@ -8,24 +8,29 @@ use crate::config;
 use crate::error::{BeadsError, Result};
 use crate::health::{Anomaly, AnomalyClass};
 use crate::output::OutputContext;
-use crate::sync::agreement::{AgreementSource, ExportAgreement, record_agreement_if_hash_matches};
+use crate::sync::agreement::{
+    AgreementSource, ExportAgreement, record_agreement_if_hash_matches, trusted_base,
+};
 use crate::sync::history::HistoryConfig;
 use crate::sync::path::symlink_escape_for_existing_ancestor;
+use crate::sync::reconcile::{
+    ReconcileOptions, ReconcileOutcome, has_local_changes, merge_db_with_jsonl,
+    reconcile_before_command,
+};
 use crate::sync::{
     ConflictResolution, ExportConfig, ExportEntityType, ExportError, ExportErrorPolicy,
     ImportConfig, METADATA_JSONL_CONTENT_HASH, METADATA_LAST_EXPORT_TIME,
-    METADATA_LAST_IMPORT_TIME, MergeContext, PathValidation, analyze_jsonl, compute_jsonl_hash,
+    METADATA_LAST_IMPORT_TIME, PathValidation, analyze_jsonl, compute_jsonl_hash,
     compute_staleness, export_temp_path, export_to_jsonl_with_policy, finalize_export,
-    get_issue_ids_from_jsonl, id_matches_expected_prefix, import_from_jsonl, load_base_snapshot,
+    get_issue_ids_from_jsonl, id_matches_expected_prefix, import_from_jsonl,
     read_issues_from_jsonl, require_safe_sync_overwrite_path, restore_tombstones_after_rebuild,
-    scan_jsonl_for_tombstone_filter, snapshot_tombstones, three_way_merge,
-    tombstones_missing_from_jsonl_tombstones, validate_no_git_path,
-    validate_sync_path_with_external,
+    scan_jsonl_for_tombstone_filter, snapshot_tombstones, tombstones_missing_from_jsonl_tombstones,
+    validate_no_git_path, validate_sync_path_with_external,
 };
 use crate::util::id::split_prefix_remainder;
 use rich_rust::prelude::*;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
@@ -478,7 +483,6 @@ fn dispatch_sync_subcommand(
             options.show_progress,
             options.retention_days,
             options.history_config.clone(),
-            cli,
             ctx,
         ),
         SyncOperation::Import => execute_import(
@@ -491,6 +495,7 @@ fn dispatch_sync_subcommand(
             options.show_progress,
             open_result.auto_rebuilt,
             &options.db_path,
+            &reconcile_options(path_policy, options.retention_days, &options.history_config),
             ctx,
         ),
         SyncOperation::Unspecified => Err(BeadsError::Validation {
@@ -498,6 +503,35 @@ fn dispatch_sync_subcommand(
             reason: "Must specify one of --flush-only, --import-only, --merge, or --status"
                 .to_string(),
         }),
+    }
+}
+
+/// The precondition's inputs for an explicit sync: the same export knobs
+/// `--merge` uses, so an automatic merge writes the JSONL an explicit one would.
+fn reconcile_options(
+    path_policy: &SyncPathPolicy,
+    retention_days: Option<u64>,
+    history_config: &HistoryConfig,
+) -> ReconcileOptions<'static> {
+    ReconcileOptions {
+        expected_prefix: None,
+        allow_external_jsonl: path_policy.allow_external_jsonl,
+        read_only: false,
+        retention_days,
+        history: history_config.clone(),
+    }
+}
+
+/// Say that an explicit sync merged the changed JSONL with local changes
+/// before doing what it was asked.
+fn report_precondition_merge(outcome: &ReconcileOutcome, ctx: &OutputContext, use_json: bool) {
+    if let ReconcileOutcome::Merged { kept, deleted } = outcome {
+        info!(kept, deleted, "Merged the changed JSONL with local changes");
+        if should_render_human_sync_output(ctx, use_json) {
+            println!(
+                "Merged the changed JSONL with local changes ({kept} kept, {deleted} deleted)"
+            );
+        }
     }
 }
 
@@ -1109,12 +1143,7 @@ fn execute_flush(
         "Export configuration resolved"
     );
 
-    // Check for dirty issues
-    let dirty_ids = storage.get_dirty_issue_ids()?;
-    let needs_flush = storage.get_metadata("needs_flush")?.as_deref() == Some("true");
     let jsonl_exists = jsonl_path.exists();
-    let db_issue_count = storage.count_issues()?;
-    debug!(dirty_count = dirty_ids.len(), "Found dirty issues");
 
     // Refuse to overwrite a JSONL that still holds unresolved merge-conflict
     // markers. The main flush path below would blow away the `<<<<<<<` /
@@ -1125,6 +1154,25 @@ fn execute_flush(
     if jsonl_exists && !args.force {
         crate::sync::ensure_no_conflict_markers(jsonl_path)?;
     }
+
+    // The write precondition: a JSONL changed since the last agreement is
+    // imported or merged before anything is written over it, or the flush
+    // refuses. `--force` is the operator saying the database wins.
+    if !args.force {
+        let outcome = reconcile_before_command(
+            storage,
+            &path_policy.beads_dir,
+            jsonl_path,
+            &reconcile_options(path_policy, retention_days, &history_config),
+        )?;
+        report_precondition_merge(&outcome, ctx, use_json);
+    }
+
+    // Check for dirty issues
+    let dirty_ids = storage.get_dirty_issue_ids()?;
+    let needs_flush = storage.get_metadata("needs_flush")?.as_deref() == Some("true");
+    let db_issue_count = storage.count_issues()?;
+    debug!(dirty_count = dirty_ids.len(), "Found dirty issues");
 
     // If no dirty issues and no force, report nothing to do
     if dirty_ids.is_empty() && !needs_flush && jsonl_exists && !args.force {
@@ -1821,6 +1869,7 @@ fn execute_import(
     show_progress: bool,
     auto_rebuilt: bool,
     db_path: &std::path::Path,
+    reconcile_opts: &ReconcileOptions,
     ctx: &OutputContext,
 ) -> Result<()> {
     info!("Starting JSONL import");
@@ -1957,6 +2006,37 @@ fn execute_import(
                 return Ok(());
             }
         }
+    }
+
+    // A plain import upserts the JSONL over the database, which would drop
+    // local changes the JSONL has not seen. With local changes, go through the
+    // precondition instead: merge against the trusted base, or refuse.
+    // `--force`/`--rebuild` are the operator choosing the JSONL; a
+    // `--rename-prefix` import keeps its own semantics.
+    if !args.force && !args.rebuild && !args.rename_prefix && has_local_changes(storage)? {
+        // Markers first: they are the actionable error, whatever the merge
+        // would have said.
+        crate::sync::ensure_no_conflict_markers(jsonl_path)?;
+        let outcome =
+            reconcile_before_command(storage, &path_policy.beads_dir, jsonl_path, reconcile_opts)?;
+        report_precondition_merge(&outcome, ctx, use_json);
+        let updated = match outcome {
+            ReconcileOutcome::Merged { kept, .. } => kept,
+            _ => 0,
+        };
+        if use_json {
+            ctx.json_pretty(&ImportResultOutput {
+                created: 0,
+                updated,
+                skipped: 0,
+                tombstone_skipped: 0,
+                orphans_removed: 0,
+                blocked_cache_rebuilt: updated > 0,
+            });
+        } else if updated == 0 && should_render_human_sync_output(ctx, use_json) {
+            println!("JSONL is current (unchanged since the last agreement)");
+        }
+        return Ok(());
     }
 
     // Configure import
@@ -2373,144 +2453,19 @@ fn execute_merge(
     show_progress: bool,
     retention_days: Option<u64>,
     history_config: HistoryConfig,
-    cli: &config::CliOverrides,
     ctx: &OutputContext,
 ) -> Result<()> {
     info!("Starting 3-way merge");
     let beads_dir = &path_policy.beads_dir;
     let jsonl_path = &path_policy.jsonl_path;
 
-    // 1. Load Base State (ancestor)
-    let base = load_base_snapshot(beads_dir)?;
+    // With no trusted base every disagreement is a conflict under the manual
+    // strategy: the merge never guesses a side.
+    let base = trusted_base(storage, beads_dir)?.unwrap_or_default();
     debug!(base_count = base.len(), "Loaded base snapshot");
 
-    // 2. Load Left State (local DB)
-    let mut left_issues = storage.get_all_issues_for_export()?;
-    let all_deps = storage.get_all_dependency_records()?;
-    let all_labels = storage.get_all_labels()?;
-    let all_comments = storage.get_all_comments()?;
-
-    for issue in &mut left_issues {
-        if let Some(deps) = all_deps.get(&issue.id) {
-            issue.dependencies = deps.clone();
-        }
-        if let Some(labels) = all_labels.get(&issue.id) {
-            issue.labels = labels.clone();
-        }
-        if let Some(comments) = all_comments.get(&issue.id) {
-            issue.comments = comments.clone();
-        }
-    }
-
-    let mut left = HashMap::new();
-    for issue in left_issues {
-        left.insert(issue.id.clone(), issue);
-    }
-    debug!(left_count = left.len(), "Loaded local state (DB)");
-
-    // 3. Load Right State (external JSONL)
-    let mut right = HashMap::new();
-    if jsonl_path.exists() {
-        // `read_issues_from_jsonl` parses JSON line-by-line, which yields a
-        // generic "Invalid JSON at line 1" error when the JSONL still
-        // contains unresolved merge-conflict markers from a botched
-        // `git merge` / `git pull`. A three-way merge on top of that state
-        // would be nonsense, so scan for markers first and surface the
-        // helpful error before we try to parse.
-        crate::sync::ensure_no_conflict_markers(jsonl_path)?;
-        for issue in read_issues_from_jsonl(jsonl_path)? {
-            right.insert(issue.id.clone(), issue);
-        }
-    }
-    debug!(right_count = right.len(), "Loaded external state (JSONL)");
-
-    // 4. Perform Merge
-    let context = MergeContext::new(base, left, right);
     let strategy = merge_conflict_resolution(args);
     let resolution = merge_conflict_resolution_label(strategy);
-    let local_tombstones: HashSet<String> = context
-        .left
-        .values()
-        .filter(|issue| issue.status == crate::model::Status::Tombstone)
-        .map(|issue| issue.id.clone())
-        .collect();
-    let tombstones = if local_tombstones.is_empty() {
-        None
-    } else {
-        Some(&local_tombstones)
-    };
-
-    let report = three_way_merge(&context, strategy, tombstones);
-
-    // 5. Apply Changes to DB
-    info!(
-        kept = report.kept.len(),
-        deleted = report.deleted.len(),
-        conflicts = report.conflicts.len(),
-        resolution,
-        "Merge calculated"
-    );
-
-    if report.has_conflicts() {
-        // Require an explicit merge winner instead of guessing when both sides changed.
-        if ctx.is_rich() {
-            render_merge_conflicts_rich(&report.conflicts, ctx);
-        }
-        let mut msg = String::from("Merge conflicts detected:\n");
-        for (id, kind) in &report.conflicts {
-            use std::fmt::Write;
-            let _ = writeln!(msg, "  - {id}: {kind:?}");
-        }
-        msg.push_str("\nUse --force-db to keep local DB changes, --force-jsonl to keep JSONL changes, or --force to keep the newer timestamp.");
-        return Err(BeadsError::Config(msg));
-    }
-
-    let _actor = cli.actor.as_deref().unwrap_or("br");
-
-    // Apply deletions. Base snapshots can lag behind historical ID migrations, so a
-    // merge may legitimately request deletion of an issue that is already absent from
-    // the live database. Treat that as a no-op instead of aborting the whole merge.
-    let existing_deleted_issues = storage.get_issues_by_ids(&report.deleted)?;
-    let existing_deleted_ids: std::collections::HashSet<String> =
-        existing_deleted_issues.into_iter().map(|i| i.id).collect();
-
-    for id in &report.deleted {
-        if existing_deleted_ids.contains(id) {
-            storage.delete_issue(id, "system", "merge deletion", Some(chrono::Utc::now()))?;
-        } else {
-            tracing::debug!(
-                issue_id = %id,
-                "Skipping merge deletion for issue already absent from local database"
-            );
-        }
-    }
-
-    // Apply updates/creates (upsert)
-    // We need to retrieve the actual Issue objects to upsert.
-    for issue in &report.kept {
-        storage.upsert_issue_for_import(issue)?;
-        storage.sync_labels_for_import(&issue.id, &issue.labels)?;
-        storage.sync_dependencies_for_import(&issue.id, &issue.dependencies)?;
-        storage.sync_comments_for_import(&issue.id, &issue.comments)?;
-    }
-
-    // Add merge notes as comments
-    for (id, note) in &report.notes {
-        if let Err(e) = storage.add_comment(id, "br-sync", note) {
-            tracing::warn!(issue_id = %id, error = %e, "Failed to add merge note to issue");
-        } else {
-            tracing::info!(issue_id = %id, note = %note, "Added merge resolution note");
-        }
-    }
-
-    // Rebuild cache
-    storage.rebuild_blocked_cache(true)?;
-    // Merge can introduce hierarchical IDs via upsert; refresh counters before
-    // the next child-ID allocation trusts them.
-    storage.rebuild_child_counters_in_tx()?;
-
-    // Force Export to update JSONL (ensure sync)
-    info!(path = %jsonl_path.display(), "Writing merged issues.jsonl");
     let export_config = ExportConfig {
         force: true, // Force export to ensure JSONL matches DB
         error_policy: ExportErrorPolicy::Strict,
@@ -2521,16 +2476,23 @@ fn execute_merge(
         history: history_config,
         max_parallel_workers: args.export_parallelism.unwrap_or(0),
     };
-
-    let (export_result, _) = export_to_jsonl_with_policy(storage, jsonl_path, &export_config)?;
-    finalize_export(
+    let report = merge_db_with_jsonl(
         storage,
-        &export_result,
-        Some(&export_result.issue_hashes),
+        beads_dir,
         jsonl_path,
-        &path_policy.beads_dir,
-        ExportAgreement::Full,
-    )?;
+        base,
+        strategy,
+        &export_config,
+    )
+    .map_err(|err| match err {
+        BeadsError::SyncConflict { message } => BeadsError::SyncConflict {
+            message: format!(
+                "{message}\nUse --force-db to keep local DB changes, --force-jsonl to keep \
+                 JSONL changes, or --force to keep the newer timestamp."
+            ),
+        },
+        other => other,
+    })?;
 
     // Output success message
     if use_json {
@@ -2562,45 +2524,6 @@ fn execute_merge(
     }
 
     Ok(())
-}
-
-/// Render merge conflicts with rich formatting.
-fn render_merge_conflicts_rich(
-    conflicts: &[(String, crate::sync::ConflictType)],
-    ctx: &OutputContext,
-) {
-    let console = crate::output::console();
-    let theme = ctx.theme();
-
-    let mut text = Text::new("");
-    text.append_styled("⚠ ", theme.error.clone());
-    text.append_styled(
-        &format!("{} merge conflict(s) detected:\n\n", conflicts.len()),
-        theme.error.clone(),
-    );
-
-    for (i, (id, kind)) in conflicts.iter().enumerate() {
-        let prefix = if i == conflicts.len() - 1 {
-            "└──"
-        } else {
-            "├──"
-        };
-        text.append_styled(prefix, theme.muted.clone());
-        text.append(" ");
-        text.append_styled(id, theme.issue_id.clone());
-        text.append(": ");
-        text.append_styled(&format!("{kind:?}"), theme.error.clone());
-        text.append("\n");
-    }
-
-    text.append("\n");
-    text.append_styled("Hint: ", theme.dimmed.clone());
-    text.append("Use --force-db to keep local DB changes, --force-jsonl to keep JSONL changes, or --force to keep the newer timestamp.");
-
-    let panel = Panel::from_rich_text(&text, ctx.width())
-        .title(Text::new("Merge Conflicts"))
-        .box_style(theme.box_style);
-    console.print_renderable(&panel);
 }
 
 /// Render merge result with rich formatting.

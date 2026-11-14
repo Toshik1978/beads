@@ -206,12 +206,39 @@ fn a_local_win_on_import_is_flushed_without_dropping_file_ids() {
     let pulled_line = beads::sync::jsonl_format::to_line(&pulled).unwrap();
     std::fs::write(&path, format!("{line}\n{pulled_line}\n")).unwrap();
 
-    auto_flush(&mut storage, &beads_dir, &path, false).unwrap();
+    // The flush refuses to write over a file it has not seen, rather than
+    // dropping the pulled record; the next command's reconcile merges it with
+    // the local win and writes both.
+    let err = auto_flush(&mut storage, &beads_dir, &path, false).unwrap_err();
+    assert!(
+        matches!(err, beads::BeadsError::SyncConflict { .. }),
+        "unexpected error: {err}"
+    );
+    let outcome = beads::sync::reconcile::reconcile_before_command(
+        &mut storage,
+        &beads_dir,
+        &path,
+        &beads::sync::reconcile::ReconcileOptions {
+            expected_prefix: None,
+            allow_external_jsonl: false,
+            read_only: false,
+            retention_days: None,
+            history: beads::sync::history::HistoryConfig::default(),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            beads::sync::reconcile::ReconcileOutcome::Merged { .. }
+        ),
+        "{outcome:?}"
+    );
 
     let written = std::fs::read_to_string(&path).unwrap();
     assert!(
         written.contains("\"id\":\"bd-pulled\""),
-        "the flush dropped a record the database had not imported:\n{written}"
+        "the merge dropped a record the database had not imported:\n{written}"
     );
     assert!(written.contains("Newer local title"), "{written}");
 }

@@ -6,11 +6,11 @@
   "expected_command_outcomes": [
     {
       "surface": "startup/open",
-      "outcome": "success"
+      "outcome": "success_served_stale"
     },
     {
       "surface": "create",
-      "outcome": "success"
+      "outcome": "fails_sync_conflict"
     },
     {
       "surface": "sync --status",
@@ -18,11 +18,12 @@
     },
     {
       "surface": "sync --import-only",
-      "outcome": "success"
+      "outcome": "fails_sync_conflict"
     }
   ],
   "source_hint": "Models the DB/JSONL mismatch class called out in rsei.2.1.",
   "notes": [
+    "The database holds local changes and there is no trusted base, so the changed JSONL can be neither imported nor merged: reads serve the database with a warning naming `br sync --merge`, and writes (and `sync --import-only`) refuse with SYNC_CONFLICT.",
     "Useful for future replay tests that need to distinguish stale export drift from hard corruption.",
     "The JSONL payload stays syntactically valid so classification depends on cross-store comparison."
   ]

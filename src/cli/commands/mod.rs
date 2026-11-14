@@ -171,6 +171,37 @@ pub fn report_auto_flush_failure(
     eprintln!("{}", sanitize_terminal_text(&warning));
 }
 
+/// Tell the user a read command is answering from a database that does not
+/// agree with the JSONL (the startup reconcile could not import or merge it).
+///
+/// Printed rather than logged, so it reaches stderr at the default log level.
+pub fn report_served_stale(ctx: &OutputContext, reason: &str) {
+    if ctx.is_quiet() {
+        return;
+    }
+    let message = "The database does not agree with the JSONL; showing the database as it is.";
+    if ctx.is_json() {
+        let payload = serde_json::json!({
+            "warning": {
+                "code": "SYNC_SERVED_STALE",
+                "message": message,
+                "reason": reason,
+            }
+        });
+        eprintln!(
+            "{}",
+            serde_json::to_string(&payload).unwrap_or_else(|_| {
+                "{\"warning\":{\"code\":\"SYNC_SERVED_STALE\"}}".to_string()
+            })
+        );
+        return;
+    }
+    eprintln!(
+        "{}",
+        sanitize_terminal_text(&format!("Warning: {message}\n{reason}"))
+    );
+}
+
 /// Whether `id` names a live issue, a tombstone, or nothing at all.
 fn issue_id_existence(storage: &SqliteStorage, id: &str) -> crate::Result<IdExistence> {
     if storage.live_id_exists(id)? {
@@ -416,15 +447,22 @@ pub(super) fn auto_import_storage_ctx_if_stale(
     );
     let expected_prefix = crate::config::id_config_from_layer(&config_layer).prefix;
 
+    let opts = crate::sync::reconcile::ReconcileOptions {
+        expected_prefix: Some(expected_prefix.as_str()),
+        allow_external_jsonl,
+        read_only: false,
+        retention_days: storage_ctx.paths.metadata.deletions_retention_days,
+        history: storage_ctx.resolved_history_config(),
+    };
     auto_import_if_stale(
         &mut storage_ctx.storage,
         &storage_ctx.paths.beads_dir,
         &storage_ctx.paths.jsonl_path,
-        Some(expected_prefix.as_str()),
-        allow_external_jsonl,
+        &opts,
         cli.allow_stale.unwrap_or(false),
         no_auto_import,
-    )
+    )?;
+    Ok(())
 }
 
 pub(super) fn cli_for_routed_workspace(

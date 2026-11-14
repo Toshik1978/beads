@@ -3,6 +3,7 @@ use beads::cli::{Cli, Commands, OutputFormat};
 use beads::config;
 use beads::logging::init_logging;
 use beads::output::OutputContext;
+use beads::sync::reconcile::{ReconcileOptions, ReconcileOutcome};
 use beads::sync::{
     auto_flush, auto_import_if_stale, auto_import_probe, auto_import_probe_refreshing_witnesses,
 };
@@ -204,12 +205,13 @@ fn main() {
             }
 
             let _ = auto_import_write_lock.as_ref();
-            let sync_lock = match ctx.beads_dir.as_deref().map(beads::sync::try_sync_lock) {
-                Some(Ok(Some(lock))) => Some(lock),
-                Some(Ok(None)) => {
-                    tracing::debug!("Auto-import skipped because .sync.lock is held");
-                    None
-                }
+            // Wait for a concurrent reconcile or flush rather than skipping
+            // this one: a skipped reconcile would let the command run against
+            // a JSONL the database has not agreed with.
+            let sync_lock = match ctx.beads_dir.as_deref().map(|beads_dir| {
+                beads::sync::blocking_sync_lock_with_timeout(beads_dir, ctx.write_lock_timeout())
+            }) {
+                Some(Ok(lock)) => Some(lock),
                 Some(Err(e)) => handle_error(&e, json_error_mode, color_error_mode),
                 None => None,
             };
@@ -218,22 +220,33 @@ fn main() {
             {
                 let expected_prefix = match resolve_auto_import_expected_prefix(res, &ctx.overrides)
                 {
-                    Ok(prefix) => Some(prefix),
+                    Ok(prefix) => prefix,
                     Err(e) => {
                         handle_error(&e, json_error_mode, color_error_mode);
                     }
                 };
-                let outcome = auto_import_if_stale(
+                let opts = ReconcileOptions {
+                    expected_prefix: Some(expected_prefix.as_str()),
+                    allow_external_jsonl,
+                    // A read command serves the database it has, with a
+                    // warning; only a write must refuse to build on it.
+                    read_only: !is_mutating,
+                    retention_days: res.paths.metadata.deletions_retention_days,
+                    history: res.resolved_history_config(),
+                };
+                match auto_import_if_stale(
                     &mut res.storage,
                     &paths.beads_dir,
                     &paths.jsonl_path,
-                    expected_prefix.as_deref(),
-                    allow_external_jsonl,
+                    &opts,
                     false,
                     false,
-                );
-                if let Err(e) = outcome {
-                    handle_error(&e, json_error_mode, color_error_mode);
+                ) {
+                    Ok(ReconcileOutcome::ServedStale { reason }) => {
+                        commands::report_served_stale(&output_ctx, &reason);
+                    }
+                    Ok(_) => {}
+                    Err(e) => handle_error(&e, json_error_mode, color_error_mode),
                 }
             }
             // sync_lock drops here, releasing the advisory lock before command execution
@@ -461,21 +474,11 @@ fn main() {
         && !ctx.no_auto_flush()
         && let (Some(res), Some(paths)) = (storage_result.as_mut(), ctx.paths.as_ref())
     {
-        let sync_lock = match beads::sync::try_sync_lock(&paths.beads_dir) {
-            Ok(Some(lock)) => Some(lock),
-            Ok(None) => {
-                let err = BeadsError::Config(format!(
-                    "Automatic JSONL export skipped because sync lock at {} is held by another process",
-                    paths.beads_dir.join(".sync.lock").display()
-                ));
-                commands::report_auto_flush_failure(
-                    &output_ctx,
-                    &paths.beads_dir,
-                    &paths.jsonl_path,
-                    &err,
-                );
-                None
-            }
+        let sync_lock = match beads::sync::blocking_sync_lock_with_timeout(
+            &paths.beads_dir,
+            ctx.write_lock_timeout(),
+        ) {
+            Ok(lock) => Some(lock),
             Err(e) => {
                 commands::report_auto_flush_failure(
                     &output_ctx,

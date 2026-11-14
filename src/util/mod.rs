@@ -217,6 +217,34 @@ pub mod test_helpers {
     use std::sync::{LazyLock, Mutex};
     pub static TEST_DIR_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+    /// `br init` plus the first command's import of the (empty) JSONL, so the
+    /// database and JSONL have an agreement on record, as in a real workspace.
+    /// A test that then writes straight to the database has local changes
+    /// against a known agreement rather than against none.
+    ///
+    /// # Panics
+    ///
+    /// Panics if init or the reconcile fails.
+    pub fn init_with_agreement(dir: &Path, ctx: &crate::output::OutputContext) {
+        crate::cli::commands::init::execute(None, false, Some(dir), ctx).expect("init");
+        let beads_dir = dir.join(".beads");
+        let mut storage =
+            crate::storage::SqliteStorage::open(&beads_dir.join("beads.db")).expect("storage");
+        crate::sync::reconcile::reconcile_before_command(
+            &mut storage,
+            &beads_dir,
+            &beads_dir.join("issues.jsonl"),
+            &crate::sync::reconcile::ReconcileOptions {
+                expected_prefix: None,
+                allow_external_jsonl: false,
+                read_only: false,
+                retention_days: None,
+                history: crate::sync::history::HistoryConfig::default(),
+            },
+        )
+        .expect("reconcile after init");
+    }
+
     /// Resolve an *expected* path the way the product resolves the path it
     /// returns, so an assertion compares like with like.
     ///
