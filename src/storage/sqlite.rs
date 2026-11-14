@@ -10484,6 +10484,19 @@ impl SqliteStorage {
         Self::upsert_metadata_key_in_tx(&self.conn, key, value)
     }
 
+    /// Delete every row of a metadata key (in tx).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub(crate) fn delete_metadata_in_tx(&self, key: &str) -> Result<()> {
+        self.conn.execute_with_params(
+            "DELETE FROM metadata WHERE key = ?",
+            &[SqliteValue::from(key)],
+        )?;
+        Ok(())
+    }
+
     /// Clear all export hashes (in tx).
     ///
     /// # Errors

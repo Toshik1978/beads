@@ -7,7 +7,7 @@ use crate::error::{BeadsError, Result};
 use crate::model::{IssueType, Priority, Status};
 use crate::util::content_hash_from_parts;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 20;
+pub const CURRENT_SCHEMA_VERSION: i32 = 21;
 const ISSUES_CLOSED_AT_CHECK: &str = "CHECK ((status = 'closed' AND closed_at IS NOT NULL) OR (status = 'tombstone') OR (status NOT IN ('closed', 'tombstone') AND closed_at IS NULL))";
 
 /// The complete SQL schema for the beads database.
@@ -1599,6 +1599,25 @@ fn run_migrations(conn: &Connection, issues_rebuilt: bool) -> Result<()> {
         crate::storage::sqlite::recompute_comment_ids(conn)?;
     }
 
+    // v21: every database that reaches this arm existed before sync agreement
+    // was verified (a fresh database is stamped at the current version by
+    // `apply_schema` and never runs `run_migrations`), so whatever sync state
+    // it holds was recorded unchecked. Flag it; the first sync verifies the
+    // state and clears the flag. `metadata.key` is not unique, so replace
+    // rather than insert, leaving exactly one row.
+    if user_version < 21 && table_exists(conn, "metadata") {
+        tracing::info!("Migrating database to schema version 21 (sync state marked unverified)");
+        let key = SqliteValue::from(crate::sync::agreement::METADATA_AGREEMENT_UNVERIFIED);
+        conn.execute_with_params(
+            "DELETE FROM metadata WHERE key = ?",
+            std::slice::from_ref(&key),
+        )?;
+        conn.execute_with_params(
+            "INSERT INTO metadata (key, value) VALUES (?, 'true')",
+            std::slice::from_ref(&key),
+        )?;
+    }
+
     // Migration: Add missing indexes for bd parity
     // These use IF NOT EXISTS so they're safe to run multiple times.
     //
@@ -2440,7 +2459,82 @@ mod tests {
         // A fresh database is stamped at the current version, so every arm up
         // to it — v19's and v20's alike — is skipped by its own guard.
         let version = conn.query_row("PRAGMA user_version").unwrap();
-        assert_eq!(version.get(0).and_then(SqliteValue::as_integer), Some(20));
+        assert_eq!(version.get(0).and_then(SqliteValue::as_integer), Some(21));
+    }
+
+    fn unverified_flag(conn: &Connection) -> Vec<String> {
+        conn.query_with_params(
+            "SELECT value FROM metadata WHERE key = ?",
+            &[SqliteValue::from(
+                crate::sync::agreement::METADATA_AGREEMENT_UNVERIFIED,
+            )],
+        )
+        .unwrap()
+        .iter()
+        .filter_map(|row| {
+            row.get(0)
+                .and_then(SqliteValue::as_text)
+                .map(str::to_string)
+        })
+        .collect()
+    }
+
+    fn schema_version(conn: &Connection) -> Option<i64> {
+        conn.query_row("PRAGMA user_version")
+            .unwrap()
+            .get(0)
+            .and_then(SqliteValue::as_integer)
+    }
+
+    /// v21: a database that existed before sync-agreement verification carries
+    /// sync state nobody has checked, and the flag is how the next task finds it.
+    #[test]
+    fn upgrading_from_v20_sets_the_unverified_flag() {
+        let temp = TempDir::new().expect("tempdir");
+        let db_path = temp.path().join("beads.db");
+        let conn = Connection::open(db_path.to_string_lossy().into_owned()).unwrap();
+        apply_schema(&conn).expect("Failed to apply schema");
+        conn.execute("PRAGMA user_version = 20").unwrap();
+        assert_eq!(unverified_flag(&conn), Vec::<String>::new());
+
+        apply_schema(&conn).expect("upgrade from v20");
+
+        assert_eq!(schema_version(&conn), Some(21));
+        assert_eq!(unverified_flag(&conn), vec!["true".to_string()]);
+    }
+
+    #[test]
+    fn a_fresh_v21_database_has_no_flag() {
+        let temp = TempDir::new().expect("tempdir");
+        let db_path = temp.path().join("beads.db");
+        let conn = Connection::open(db_path.to_string_lossy().into_owned()).unwrap();
+        apply_schema(&conn).expect("Failed to apply schema");
+        run_migrations(&conn, false).expect("migrations on a fresh database");
+
+        assert_eq!(schema_version(&conn), Some(21));
+        assert_eq!(unverified_flag(&conn), Vec::<String>::new());
+    }
+
+    /// Once the verifier clears the flag, reopening at v21 must not bring it back.
+    #[test]
+    fn the_flag_is_set_once() {
+        let temp = TempDir::new().expect("tempdir");
+        let db_path = temp.path().join("beads.db");
+        let conn = Connection::open(db_path.to_string_lossy().into_owned()).unwrap();
+        apply_schema(&conn).expect("Failed to apply schema");
+        conn.execute("PRAGMA user_version = 20").unwrap();
+        apply_schema(&conn).expect("upgrade from v20");
+        assert_eq!(unverified_flag(&conn).len(), 1);
+
+        conn.execute(&format!(
+            "DELETE FROM metadata WHERE key = '{}'",
+            crate::sync::agreement::METADATA_AGREEMENT_UNVERIFIED
+        ))
+        .unwrap();
+        apply_schema(&conn).expect("reopen at v21");
+        run_migrations(&conn, false).expect("migrations at v21");
+
+        assert_eq!(unverified_flag(&conn), Vec::<String>::new());
     }
 
     /// The digest a fresh `br` writes and the digest v19 backfills into an

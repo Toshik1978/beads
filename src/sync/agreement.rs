@@ -24,6 +24,11 @@ use std::path::Path;
 /// Metadata key for the content hash of the base snapshot as last recorded.
 pub const METADATA_BASE_CONTENT_HASH: &str = "base_content_hash";
 
+/// Metadata key set by the schema v21 migration on a database upgraded from
+/// v20 or earlier, whose sync-state facts were recorded before agreement was
+/// verified. Present exactly while that state is unverified.
+pub const METADATA_AGREEMENT_UNVERIFIED: &str = "agreement_unverified";
+
 pub(crate) const BASE_SNAPSHOT_FILE: &str = "beads.base.jsonl";
 
 /// Which direction produced the agreement.
@@ -31,6 +36,9 @@ pub(crate) const BASE_SNAPSHOT_FILE: &str = "beads.base.jsonl";
 pub enum AgreementSource {
     Import,
     Export,
+    /// The state was checked, not changed: the hash, witness and base are
+    /// recorded but no import or export time is, since neither happened.
+    Verified,
 }
 
 /// How an export records agreement.
@@ -176,6 +184,7 @@ pub fn commit_agreement_in_tx(
     let time_key = match source {
         AgreementSource::Import => METADATA_LAST_IMPORT_TIME,
         AgreementSource::Export => METADATA_LAST_EXPORT_TIME,
+        AgreementSource::Verified => return Ok(()),
     };
     storage.set_metadata_in_tx(time_key, &Utc::now().to_rfc3339())
 }
@@ -193,6 +202,48 @@ pub fn record_agreement(
 ) -> Result<()> {
     let prepared = prepare_agreement(jsonl_path, beads_dir)?;
     storage.with_write_transaction(|storage| commit_agreement_in_tx(storage, &prepared, source))
+}
+
+/// Whether the sync state is still the unverified state a schema upgrade left.
+///
+/// # Errors
+///
+/// Returns an error on metadata read failure.
+pub fn agreement_unverified(storage: &SqliteStorage) -> Result<bool> {
+    Ok(storage
+        .get_metadata(METADATA_AGREEMENT_UNVERIFIED)?
+        .is_some())
+}
+
+/// Clear the unverified flag in its own transaction.
+///
+/// # Errors
+///
+/// Returns an error if the write fails.
+pub fn clear_agreement_unverified(storage: &mut SqliteStorage) -> Result<()> {
+    storage.with_write_transaction(|storage| {
+        storage.delete_metadata_in_tx(METADATA_AGREEMENT_UNVERIFIED)
+    })
+}
+
+/// Record the full agreement (without an import time, see
+/// [`AgreementSource::Verified`]) and clear the unverified flag in one
+/// transaction, so the flag never outlives a recorded agreement or vice versa.
+///
+/// # Errors
+///
+/// Returns an error if preparation or the transaction fails; the flag then
+/// stays set.
+pub fn record_verified_agreement(
+    storage: &mut SqliteStorage,
+    jsonl_path: &Path,
+    beads_dir: &Path,
+) -> Result<()> {
+    let prepared = prepare_agreement(jsonl_path, beads_dir)?;
+    storage.with_write_transaction(|storage| {
+        commit_agreement_in_tx(storage, &prepared, AgreementSource::Verified)?;
+        storage.delete_metadata_in_tx(METADATA_AGREEMENT_UNVERIFIED)
+    })
 }
 
 /// The base snapshot, but only if it is the one last recorded: the file

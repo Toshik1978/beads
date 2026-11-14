@@ -343,3 +343,78 @@ fn corruption_recovery_still_says_so() {
         "recovery must be reported: {all}"
     );
 }
+
+/// Pretend the workspace's database was last opened by a br before schema v21,
+/// so the next open upgrades it and flags its sync state as unverified.
+fn downgrade_to_v20(ws: &BrWorkspace, also: &[&str]) {
+    let db = ws.root.join(".beads").join("beads.db");
+    let conn =
+        beads::storage::conn::Connection::open(db.to_string_lossy().into_owned()).expect("open db");
+    for sql in also {
+        conn.execute(sql).expect("raw sql");
+    }
+    conn.execute("PRAGMA user_version = 20").expect("downgrade");
+}
+
+fn metadata(ws: &BrWorkspace, key: &str) -> Option<String> {
+    let db = ws.root.join(".beads").join("beads.db");
+    let conn =
+        beads::storage::conn::Connection::open(db.to_string_lossy().into_owned()).expect("open db");
+    conn.query_with_params(
+        "SELECT value FROM metadata WHERE key = ?",
+        &[beads::storage::conn::SqliteValue::from(key)],
+    )
+    .expect("query metadata")
+    .iter()
+    .rev()
+    .find_map(|row| {
+        row.get(0)
+            .and_then(beads::storage::conn::SqliteValue::as_text)
+            .map(str::to_string)
+    })
+}
+
+#[test]
+fn upgrade_verification_runs_once() {
+    let ws = BrWorkspace::new();
+    init(&ws);
+    let a = create(&ws, "a", "create_a");
+    let b = create(&ws, "b", "create_b");
+    let flush = run_br(&ws, ["sync", "--flush-only"], "flush");
+    assert!(flush.status.success(), "flush failed: {}", flush.stderr);
+    // An old br wedged this workspace: the JSONL has `b`, the database lost
+    // it, and the recorded hash and witness still claim agreement.
+    downgrade_to_v20(
+        &ws,
+        &[
+            "PRAGMA foreign_keys = OFF",
+            &format!("DELETE FROM issues WHERE id = '{b}'"),
+        ],
+    );
+
+    let first = run_br(&ws, ["list", "--json"], "list_first");
+    assert!(first.status.success(), "list failed: {}", first.stderr);
+    let mut expected = vec![(a, "a".to_string()), (b, "b".to_string())];
+    expected.sort();
+    assert_eq!(
+        issue_titles(&first),
+        expected,
+        "the first command after the upgrade repairs the wedged database"
+    );
+    assert_eq!(metadata(&ws, "agreement_unverified"), None);
+    let status_after_first = run_br(&ws, ["sync", "--status"], "status_first");
+    let recorded =
+        ["last_import_time", "jsonl_mtime", "base_content_hash"].map(|key| metadata(&ws, key));
+
+    let second = run_br(&ws, ["list", "--json"], "list_second");
+    assert!(second.status.success(), "list failed: {}", second.stderr);
+
+    assert_eq!(metadata(&ws, "agreement_unverified"), None);
+    assert_eq!(
+        ["last_import_time", "jsonl_mtime", "base_content_hash"].map(|key| metadata(&ws, key)),
+        recorded,
+        "a second command does not verify again"
+    );
+    let status_after_second = run_br(&ws, ["sync", "--status"], "status_second");
+    assert_eq!(status_after_first.stdout, status_after_second.stdout);
+}

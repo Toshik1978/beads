@@ -2213,7 +2213,9 @@ pub fn auto_import_probe_refreshing_witnesses(
     if let Some(observed) = probe.refresh_witness {
         refresh_jsonl_witness_best_effort(storage, jsonl_path, &observed);
     }
-    Ok(probe.jsonl_newer)
+    // State recorded before the upgrade is unchecked: reconcile verifies it
+    // even though the JSONL looks unchanged.
+    Ok(probe.jsonl_newer || agreement::agreement_unverified(storage)?)
 }
 
 /// Check whether auto-import needs to inspect JSONL contents without mutating metadata.
@@ -2237,7 +2239,8 @@ pub fn auto_import_probe(
     if jsonl_path.exists() {
         validate_sync_path_with_external(jsonl_path, beads_dir, allow_external_jsonl)?;
     }
-    compute_jsonl_newer_impl(storage, jsonl_path).map(|probe| probe.jsonl_newer)
+    let probe = compute_jsonl_newer_impl(storage, jsonl_path)?;
+    Ok(probe.jsonl_newer || agreement::agreement_unverified(storage)?)
 }
 
 fn compute_staleness_impl(
