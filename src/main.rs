@@ -229,8 +229,9 @@ fn main() {
                     expected_prefix: Some(expected_prefix.as_str()),
                     allow_external_jsonl,
                     // A read command serves the database it has, with a
-                    // warning; only a write must refuse to build on it.
-                    read_only: !is_mutating,
+                    // warning; only a write (or `remote init`, see
+                    // `needs_fresh_database`) must refuse to build on it.
+                    read_only: !needs_fresh_database(&cli.command),
                     retention_days: res.paths.metadata.deletions_retention_days,
                     history: res.resolved_history_config(),
                 };
@@ -704,6 +705,21 @@ const fn is_mutating_command(cmd: &Commands) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Whether the startup reconcile must refuse rather than serve a stale
+/// database. Every write must; so must `br remote init`, which writes nothing
+/// local but provisions the remote project from the workspace vocabulary its
+/// pre-flight reads out of SQLite (see `should_auto_import`): a stale database
+/// there provisions maps that do not cover the workspace.
+const fn needs_fresh_database(cmd: &Commands) -> bool {
+    is_mutating_command(cmd)
+        || matches!(
+            cmd,
+            Commands::Remote {
+                command: beads::cli::RemoteCommands::Init(_)
+            }
+        )
 }
 
 /// Determine if a command must hold `.write.lock` for its whole execution.

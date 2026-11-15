@@ -1122,7 +1122,7 @@ fn preserved_unflushed_tombstones(
     tombstones_missing_from_jsonl_tombstones(
         snapshot,
         &jsonl_filter,
-        &crate::sync::dirty_issue_id_set(storage),
+        crate::sync::dirty_issue_id_set(storage).as_ref(),
     )
 }
 

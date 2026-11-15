@@ -64,7 +64,9 @@ local changes the JSONL has not seen, the next command merges the two; if they
 conflict (or there is no trusted base to merge against), a write command fails
 with `SYNC_CONFLICT` and a read command answers from the database with a
 `SYNC_SERVED_STALE` warning on stderr. Either way the fix is `br sync --merge`
-(add `--force-db` or `--force-jsonl` to pick a side on conflicts). Writing
+(add `--force-db` or `--force-jsonl` to pick a side on conflicts); a
+`br sync --merge` that stops on conflicts also exits 6 (`SYNC_CONFLICT`), where
+it used to exit 7. Writing
 with `--allow-stale` or `--no-auto-import` does not settle the difference:
 the automatic export refuses to overwrite the changed JSONL, and the next
 plain command reconciles it.

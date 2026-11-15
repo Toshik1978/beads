@@ -105,9 +105,15 @@ fn rebase_onto_an_older_jsonl_never_ends_in_sync_over_missing_content() {
         let new_id = parse_created_id(&after.stdout);
         let db = db_statuses(&ws);
         for (id, status) in &wanted {
-            // A tombstone is deliberately hidden from `list`; every other id
-            // must be present with the JSONL's status.
+            // A tombstone is deliberately hidden from `list`, so a deleted id
+            // must be absent (a live row is a deleted issue come back); every
+            // other id must be present with the JSONL's status.
             if status == "tombstone" {
+                assert!(
+                    !db.contains_key(id),
+                    "{id} is deleted in the JSONL and must not be live: {:?}",
+                    db.get(id)
+                );
                 continue;
             }
             assert_eq!(

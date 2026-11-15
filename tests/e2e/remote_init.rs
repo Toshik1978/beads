@@ -552,3 +552,57 @@ fn e2e_remote_init_never_prints_the_token_when_a_request_is_rejected() {
         server.requests()
     );
 }
+
+/// A stale database is worse here than for a read: the pre-flight would pass
+/// on rows the JSONL has moved past and provision maps that do not cover the
+/// workspace. When the startup reconcile cannot bring the database up to date
+/// (both sides changed, no clean merge), `remote init` refuses like a write
+/// instead of serving the stale database with a warning.
+#[test]
+fn e2e_remote_init_refuses_rather_than_serving_a_stale_database() {
+    let _log = common::test_log("e2e_remote_init_refuses_rather_than_serving_a_stale_database");
+    let workspace = initialised_workspace();
+    let server = MockServer::start();
+
+    let created = run_br_with_env(&workspace, ["create", "Ordinary"], TOKEN, "create");
+    assert!(
+        created.status.success(),
+        "create failed: {}",
+        created.stderr
+    );
+    let id = common::cli::parse_created_id(&created.stdout);
+    // A local edit the JSONL has not seen...
+    let update = run_br_with_env(
+        &workspace,
+        ["--no-auto-flush", "update", &id, "--title", "from db"],
+        TOKEN,
+        "update",
+    );
+    assert!(update.status.success(), "update failed: {}", update.stderr);
+    // ...and a conflicting edit to the same issue in the JSONL.
+    let jsonl = workspace.root.join(".beads").join("issues.jsonl");
+    let original = std::fs::read_to_string(&jsonl).expect("read issues.jsonl");
+    std::fs::write(&jsonl, original.replace("Ordinary", "from jsonl")).expect("write jsonl");
+    write_remote_config(&workspace, &server.base_url());
+
+    let run = run_br_with_env(
+        &workspace,
+        ["remote", "init"],
+        TOKEN,
+        "remote_init_conflict",
+    );
+
+    assert_eq!(
+        run.status.code(),
+        Some(6),
+        "a refused reconcile is SYNC_CONFLICT: stdout={} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(run.stderr.contains("br sync --merge"), "{}", run.stderr);
+    assert!(
+        server.requests().is_empty(),
+        "refused before any network access, got {:?}",
+        server.requests()
+    );
+}

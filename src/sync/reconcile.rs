@@ -241,7 +241,7 @@ pub fn has_local_changes(storage: &SqliteStorage) -> Result<bool> {
 }
 
 /// How [`verify_legacy_agreement`] settled a pre-upgrade sync state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LegacyVerdict {
     /// The database and JSONL already described the same issues; the
     /// agreement is now recorded.
@@ -249,15 +249,10 @@ pub enum LegacyVerdict {
     /// They differed and the database had no local changes: the JSONL was
     /// imported.
     Imported,
-    /// They differ and the database has local changes (read-only callers
-    /// only; others get the error). The flag stays set.
-    Refused,
-}
-
-enum LegacyStep {
-    Agrees,
-    Imported,
-    Refused(BeadsError),
+    /// They differ and the database has local changes, or the JSONL holds
+    /// unresolved conflict markers (read-only callers only; others get the
+    /// error). The flag stays set.
+    Refused { reason: String },
 }
 
 fn import_config(beads_dir: &Path, opts: &ReconcileOptions) -> ImportConfig {
@@ -275,7 +270,7 @@ fn import_config(beads_dir: &Path, opts: &ReconcileOptions) -> ImportConfig {
 /// Whether the database agrees with the JSONL on the content agreement covers.
 ///
 /// Only rows export would write take part (no `-wisp-` ids, no expired
-/// tombstones). A non-dirty row's stored `content_hash` must equal its JSONL
+/// tombstones), on either side. A non-dirty row's stored `content_hash` must equal its JSONL
 /// record's hash (after the normalization import applies). A dirty row holds
 /// an edit the JSONL has not seen, so its live hash is not comparable; its
 /// JSONL record is compared with `export_hashes`, the hash of what this
@@ -291,6 +286,11 @@ fn database_matches_jsonl(
 ) -> Result<bool> {
     let mut jsonl = HashMap::new();
     for mut issue in read_issues_from_jsonl(jsonl_path)? {
+        // The same filter as the database side: a tombstone exported while
+        // in retention and expired since is not part of the agreement.
+        if !is_issue_exportable(&issue, retention_days) {
+            continue;
+        }
         normalize_issue(&mut issue);
         jsonl.insert(issue.id.clone(), crate::util::content_hash(&issue));
     }
@@ -320,47 +320,36 @@ fn database_matches_jsonl(
     Ok(seen == jsonl.len())
 }
 
-fn legacy_step(
-    storage: &mut SqliteStorage,
-    beads_dir: &Path,
+/// Whether a sync state recorded before the upgrade already agrees with the
+/// JSONL, checked without writing anything: what [`verify_legacy_agreement`]
+/// would call [`LegacyVerdict::Agrees`]. For a read-only report such as `br
+/// sync --status`, which must not import or record. A JSONL with conflict
+/// markers does not agree; a missing one does.
+///
+/// # Errors
+///
+/// Returns an error if the JSONL or the database cannot be read.
+pub fn legacy_state_agrees(
+    storage: &SqliteStorage,
     jsonl_path: &Path,
-    opts: &ReconcileOptions,
-) -> Result<LegacyStep> {
+    retention_days: Option<u64>,
+) -> Result<bool> {
     if !jsonl_path.exists() {
-        clear_agreement_unverified(storage)?;
-        return Ok(LegacyStep::Agrees);
+        return Ok(true);
     }
-    // Unresolved conflict markers are a merge to finish, not a fault: refuse
-    // the way an ordinary reconcile does, and keep the flag.
-    if let Err(error) = ensure_no_conflict_markers(jsonl_path) {
-        return Ok(LegacyStep::Refused(BeadsError::SyncConflict {
-            message: format!("{error}\n{RESOLVE_HINT}"),
-        }));
+    if ensure_no_conflict_markers(jsonl_path).is_err() {
+        return Ok(false);
     }
-    if database_matches_jsonl(storage, jsonl_path, opts.retention_days)? {
-        record_verified_agreement(storage, jsonl_path, beads_dir)?;
-        return Ok(LegacyStep::Agrees);
+    database_matches_jsonl(storage, jsonl_path, retention_days)
+}
+
+/// A legacy refusal: the error, or for a read-only caller the verdict.
+fn legacy_refusal(message: String, opts: &ReconcileOptions) -> Result<LegacyVerdict> {
+    if opts.read_only {
+        Ok(LegacyVerdict::Refused { reason: message })
+    } else {
+        Err(BeadsError::SyncConflict { message })
     }
-    if has_local_changes(storage)? {
-        return Ok(LegacyStep::Refused(BeadsError::SyncConflict {
-            message: format!(
-                "The sync state recorded before this upgrade does not match the JSONL, and the \
-                 database has local changes, so neither side can be taken as is.\n{RESOLVE_HINT}"
-            ),
-        }));
-    }
-    let result = import_from_jsonl(
-        storage,
-        jsonl_path,
-        &import_config(beads_dir, opts),
-        opts.expected_prefix,
-    )?;
-    debug!(
-        imported_count = result.imported_count,
-        "Legacy verify imported"
-    );
-    clear_agreement_unverified(storage)?;
-    Ok(LegacyStep::Imported)
 }
 
 /// Check, once, a sync state recorded before agreement was verified (the
@@ -383,12 +372,40 @@ pub fn verify_legacy_agreement(
     jsonl_path: &Path,
     opts: &ReconcileOptions,
 ) -> Result<LegacyVerdict> {
-    match legacy_step(storage, beads_dir, jsonl_path, opts)? {
-        LegacyStep::Agrees => Ok(LegacyVerdict::Agrees),
-        LegacyStep::Imported => Ok(LegacyVerdict::Imported),
-        LegacyStep::Refused(_) if opts.read_only => Ok(LegacyVerdict::Refused),
-        LegacyStep::Refused(error) => Err(error),
+    if !jsonl_path.exists() {
+        clear_agreement_unverified(storage)?;
+        return Ok(LegacyVerdict::Agrees);
     }
+    // Unresolved conflict markers are a merge to finish, not a fault: refuse
+    // the way an ordinary reconcile does, and keep the flag.
+    if let Err(error) = ensure_no_conflict_markers(jsonl_path) {
+        return legacy_refusal(format!("{error}\n{RESOLVE_HINT}"), opts);
+    }
+    if database_matches_jsonl(storage, jsonl_path, opts.retention_days)? {
+        record_verified_agreement(storage, jsonl_path, beads_dir)?;
+        return Ok(LegacyVerdict::Agrees);
+    }
+    if has_local_changes(storage)? {
+        return legacy_refusal(
+            format!(
+                "The sync state recorded before this upgrade does not match the JSONL, and the \
+                 database has local changes, so neither side can be taken as is.\n{RESOLVE_HINT}"
+            ),
+            opts,
+        );
+    }
+    let result = import_from_jsonl(
+        storage,
+        jsonl_path,
+        &import_config(beads_dir, opts),
+        opts.expected_prefix,
+    )?;
+    debug!(
+        imported_count = result.imported_count,
+        "Legacy verify imported"
+    );
+    clear_agreement_unverified(storage)?;
+    Ok(LegacyVerdict::Imported)
 }
 
 /// The precondition for a command: make the database and JSONL agree, or say
@@ -413,13 +430,12 @@ pub fn reconcile_before_command(
         validate_sync_path_with_external(jsonl_path, beads_dir, opts.allow_external_jsonl)?;
     }
     if agreement_unverified(storage)? {
-        match legacy_step(storage, beads_dir, jsonl_path, opts)? {
-            LegacyStep::Agrees => {}
-            LegacyStep::Imported => return Ok(ReconcileOutcome::Imported),
-            LegacyStep::Refused(BeadsError::SyncConflict { message }) if opts.read_only => {
-                return Ok(ReconcileOutcome::ServedStale { reason: message });
+        match verify_legacy_agreement(storage, beads_dir, jsonl_path, opts)? {
+            LegacyVerdict::Agrees => {}
+            LegacyVerdict::Imported => return Ok(ReconcileOutcome::Imported),
+            LegacyVerdict::Refused { reason } => {
+                return Ok(ReconcileOutcome::ServedStale { reason });
             }
-            LegacyStep::Refused(error) => return Err(error),
         }
     }
     let staleness = compute_staleness_refreshing_witnesses(storage, jsonl_path)?;
@@ -926,7 +942,10 @@ mod tests {
         assert_eq!(flag(&ws).as_deref(), Some("true"));
         assert!(ws.storage.get_issue("bd-b").unwrap().is_none());
 
-        assert_eq!(verify(&mut ws, true).unwrap(), LegacyVerdict::Refused);
+        assert!(matches!(
+            verify(&mut ws, true).unwrap(),
+            LegacyVerdict::Refused { .. }
+        ));
         assert_eq!(flag(&ws).as_deref(), Some("true"));
     }
 
@@ -1036,7 +1055,10 @@ mod tests {
             verify(&mut ws, false),
             Err(BeadsError::SyncConflict { .. })
         ));
-        assert_eq!(verify(&mut ws, true).unwrap(), LegacyVerdict::Refused);
+        assert!(matches!(
+            verify(&mut ws, true).unwrap(),
+            LegacyVerdict::Refused { .. }
+        ));
         assert_eq!(flag(&ws).as_deref(), Some("true"));
     }
 
@@ -1149,6 +1171,35 @@ mod tests {
             verify_legacy_agreement(&mut ws.storage, &ws.beads_dir, &ws.jsonl, &options).unwrap();
 
         assert_eq!(verdict, LegacyVerdict::Agrees);
+        assert_eq!(flag(&ws), None);
+    }
+
+    #[test]
+    fn an_expired_tombstone_still_in_the_jsonl_agrees() {
+        let mut ws = agreed_workspace(&[("bd-a", "a1"), ("bd-gone", "gone")]);
+        ws.storage
+            .delete_issue(
+                "bd-gone",
+                "t",
+                "bye",
+                Some(chrono::Utc::now() - chrono::Duration::days(400)),
+            )
+            .unwrap();
+        // Exported while the tombstone was still in retention: the JSONL
+        // carries it, and nothing is dirty.
+        export_to_jsonl(&ws.storage, &ws.jsonl, &config(&ws.beads_dir)).unwrap();
+        assert!(jsonl_issues(&ws.jsonl).contains_key("bd-gone"));
+        let metadata: Vec<(String, String)> = ws.storage.get_dirty_issue_metadata().unwrap();
+        ws.storage.clear_dirty_issues(&metadata).unwrap();
+        ws.storage.set_metadata("needs_flush", "false").unwrap();
+        mark_unverified(&mut ws);
+        let mut options = opts(false);
+        options.retention_days = Some(30);
+
+        let verdict =
+            verify_legacy_agreement(&mut ws.storage, &ws.beads_dir, &ws.jsonl, &options).unwrap();
+
+        assert_eq!(verdict, LegacyVerdict::Agrees, "no needless import");
         assert_eq!(flag(&ws), None);
     }
 }

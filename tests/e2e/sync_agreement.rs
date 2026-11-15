@@ -418,3 +418,120 @@ fn upgrade_verification_runs_once() {
     let status_after_second = run_br(&ws, ["sync", "--status"], "status_second");
     assert_eq!(status_after_first.stdout, status_after_second.stdout);
 }
+
+/// A workspace an old br wedged: the JSONL has `a` and `b`, the database lost
+/// `b`, the recorded hash and witness still claim agreement, and the next open
+/// upgrades it. Returns `(a, b)`.
+fn wedged_upgraded_workspace(ws: &BrWorkspace, also: &[&str]) -> (String, String) {
+    init(ws);
+    let a = create(ws, "a", "create_a");
+    let b = create(ws, "b", "create_b");
+    let flush = run_br(ws, ["sync", "--flush-only"], "flush");
+    assert!(flush.status.success(), "flush failed: {}", flush.stderr);
+    let delete_b = format!("DELETE FROM issues WHERE id = '{b}'");
+    let mut sql = vec!["PRAGMA foreign_keys = OFF", delete_b.as_str()];
+    sql.extend_from_slice(also);
+    downgrade_to_v20(ws, &sql);
+    (a, b)
+}
+
+#[test]
+fn sync_status_does_not_claim_in_sync_over_an_unverified_upgrade() {
+    let ws = BrWorkspace::new();
+    wedged_upgraded_workspace(&ws, &[]);
+
+    let status = run_br(&ws, ["sync", "--status"], "status");
+    assert!(status.status.success(), "status failed: {}", status.stderr);
+    assert!(!status.stdout.contains("In sync"), "{}", status.stdout);
+    assert!(
+        status.stdout.contains("JSONL is newer"),
+        "{}",
+        status.stdout
+    );
+
+    let json = run_br(&ws, ["sync", "--status", "--json"], "status_json");
+    assert!(json.status.success(), "status failed: {}", json.stderr);
+    let payload: Value = serde_json::from_str(&json.stdout).expect("status json");
+    assert_eq!(payload["jsonl_newer"], true, "{}", json.stdout);
+    assert_eq!(
+        metadata(&ws, "agreement_unverified").as_deref(),
+        Some("true"),
+        "status is read-only: it reports the flag, it does not verify"
+    );
+}
+
+#[test]
+fn sync_import_only_verifies_an_unverified_upgrade() {
+    let ws = BrWorkspace::new();
+    let (a, b) = wedged_upgraded_workspace(&ws, &[]);
+
+    let import = run_br(&ws, ["sync", "--import-only"], "import");
+    assert!(import.status.success(), "import failed: {}", import.stderr);
+
+    let mut expected = vec![(a, "a".to_string()), (b, "b".to_string())];
+    expected.sort();
+    assert_eq!(
+        db_titles(&ws, "db_after"),
+        expected,
+        "--import-only must not trust a pre-upgrade hash over a database missing issues"
+    );
+    assert_eq!(metadata(&ws, "agreement_unverified"), None);
+    let status = run_br(&ws, ["sync", "--status"], "status");
+    assert!(status.stdout.contains("In sync"), "{}", status.stdout);
+}
+
+#[test]
+fn auto_flush_refuses_while_the_upgrade_is_unverified() {
+    let ws = BrWorkspace::new();
+    // A pending full flush is what would force-export the stale database.
+    let (_, b) = wedged_upgraded_workspace(
+        &ws,
+        &[
+            "DELETE FROM metadata WHERE key = 'needs_flush'",
+            "INSERT INTO metadata (key, value) VALUES ('needs_flush', 'true')",
+        ],
+    );
+    let before = fs::read_to_string(jsonl_path(&ws)).expect("read jsonl");
+
+    let run = run_br_with_env(&ws, ["--allow-stale", "create", "c"], NO_LOGS, "create_c");
+
+    assert_eq!(
+        fs::read_to_string(jsonl_path(&ws)).expect("read jsonl"),
+        before,
+        "the auto-flush must not export a database whose sync state is unverified"
+    );
+    assert!(before.contains(&b));
+    assert!(
+        !run.status.success() || run.stderr.contains("br sync --merge"),
+        "the skipped flush must be reported: status={} stderr={}",
+        run.status,
+        run.stderr
+    );
+    assert_eq!(
+        metadata(&ws, "agreement_unverified").as_deref(),
+        Some("true")
+    );
+}
+
+#[test]
+fn sync_status_checks_a_healthy_unverified_upgrade_without_writing() {
+    let ws = BrWorkspace::new();
+    init(&ws);
+    create(&ws, "a", "create_a");
+    let flush = run_br(&ws, ["sync", "--flush-only"], "flush");
+    assert!(flush.status.success(), "flush failed: {}", flush.stderr);
+    downgrade_to_v20(&ws, &[]);
+
+    let status = run_br(&ws, ["sync", "--status"], "status");
+    assert!(status.status.success(), "status failed: {}", status.stderr);
+    assert!(
+        status.stdout.contains("In sync"),
+        "the database matches the JSONL, so the report may say so: {}",
+        status.stdout
+    );
+    assert_eq!(
+        metadata(&ws, "agreement_unverified").as_deref(),
+        Some("true"),
+        "status checks without recording; the next command verifies"
+    );
+}

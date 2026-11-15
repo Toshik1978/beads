@@ -9,13 +9,14 @@ use crate::error::{BeadsError, Result};
 use crate::health::{Anomaly, AnomalyClass};
 use crate::output::OutputContext;
 use crate::sync::agreement::{
-    AgreementSource, ExportAgreement, record_agreement_if_hash_matches, trusted_base,
+    AgreementSource, ExportAgreement, agreement_unverified, record_agreement_if_hash_matches,
+    trusted_base,
 };
 use crate::sync::history::HistoryConfig;
 use crate::sync::path::symlink_escape_for_existing_ancestor;
 use crate::sync::reconcile::{
-    ReconcileOptions, ReconcileOutcome, has_local_changes, merge_db_with_jsonl,
-    reconcile_before_command,
+    ReconcileOptions, ReconcileOutcome, has_local_changes, legacy_state_agrees,
+    merge_db_with_jsonl, reconcile_before_command, verify_legacy_agreement,
 };
 use crate::sync::{
     ConflictResolution, ExportConfig, ExportEntityType, ExportError, ExportErrorPolicy,
@@ -420,7 +421,7 @@ fn maybe_delegate_rebuild(
     let preserved_pre_delegation_tombstones = tombstones_missing_from_jsonl_tombstones(
         snapshot_tombstones(&open_result.storage),
         &jsonl_filter,
-        &crate::sync::dirty_issue_id_set(&open_result.storage),
+        crate::sync::dirty_issue_id_set(&open_result.storage).as_ref(),
     );
     // `recover_database_from_jsonl` sets `auto_rebuilt = true` on success,
     // which is what gates the short-circuit inside `execute_import` below.
@@ -461,6 +462,7 @@ fn dispatch_sync_subcommand(
             &open_result.storage,
             path_policy,
             &options.db_path,
+            options.retention_days,
             options.use_json,
             ctx,
         ),
@@ -963,6 +965,7 @@ fn execute_status(
     storage: &crate::storage::SqliteStorage,
     path_policy: &SyncPathPolicy,
     db_path: &Path,
+    retention_days: Option<u64>,
     use_json: bool,
     ctx: &OutputContext,
 ) -> Result<()> {
@@ -972,6 +975,16 @@ fn execute_status(
 
     let jsonl_path = &path_policy.jsonl_path;
     let staleness = compute_staleness(storage, jsonl_path)?;
+    // A sync state recorded before an upgrade is not evidence of agreement
+    // until it is verified. This read-only report does not verify (that may
+    // import), but it may check: unless the database already matches the
+    // JSONL, the JSONL counts as newer, as the startup probes treat it.
+    let jsonl_newer = staleness.jsonl_newer
+        || (agreement_unverified(storage)?
+            && !legacy_state_agrees(storage, jsonl_path, retention_days).unwrap_or_else(|error| {
+                debug!(%error, "Could not check the pre-upgrade sync state");
+                false
+            }));
     let dirty_count = staleness.dirty_count;
     let jsonl_exists = staleness.jsonl_exists;
     debug!(
@@ -991,14 +1004,14 @@ fn execute_status(
         last_import_time,
         jsonl_content_hash,
         jsonl_exists,
-        jsonl_newer: staleness.jsonl_newer,
+        jsonl_newer,
         db_newer: staleness.db_newer,
         workspace_health: workspace_health.to_string(),
         anomalies,
         git_export: git_export_status(jsonl_path),
     };
     debug!(
-        jsonl_newer = staleness.jsonl_newer,
+        jsonl_newer,
         db_newer = staleness.db_newer,
         workspace_health = %status.workspace_health,
         "Computed sync staleness"
@@ -1692,7 +1705,7 @@ fn repair_import_integrity_if_needed(
     let preserved_tombstones = tombstones_missing_from_jsonl_tombstones(
         snapshot_tombstones(storage),
         &jsonl_filter,
-        &crate::sync::dirty_issue_id_set(storage),
+        crate::sync::dirty_issue_id_set(storage).as_ref(),
     );
 
     // Close the dirty connection before rebuilding the same file path.
@@ -1739,7 +1752,7 @@ fn repair_import_integrity_with_import_config(
     let preserved_tombstones = tombstones_missing_from_jsonl_tombstones(
         snapshot_tombstones(storage),
         &jsonl_filter,
-        &crate::sync::dirty_issue_id_set(storage),
+        crate::sync::dirty_issue_id_set(storage).as_ref(),
     );
 
     let placeholder = crate::storage::SqliteStorage::open_memory()?;
@@ -1980,8 +1993,32 @@ fn execute_import(
         return Ok(());
     }
 
+    // A sync state recorded before an upgrade must be verified before the
+    // hash shortcut below may trust it. `--force`/`--rebuild` are the operator
+    // choosing the JSONL; a `--rename-prefix` import keeps its own semantics
+    // (and, with the flag still set, skips the shortcut).
+    if !args.force && !args.rebuild && !args.rename_prefix && agreement_unverified(storage)? {
+        // Markers first: they are the actionable error, and the same one the
+        // import below would give.
+        crate::sync::ensure_no_conflict_markers(jsonl_path)?;
+        let verdict =
+            verify_legacy_agreement(storage, &path_policy.beads_dir, jsonl_path, reconcile_opts)?;
+        info!(
+            ?verdict,
+            "Verified the sync state recorded before the upgrade"
+        );
+        if verdict == crate::sync::reconcile::LegacyVerdict::Imported
+            && !use_json
+            && should_render_human_sync_output(ctx, use_json)
+        {
+            println!(
+                "Imported the JSONL: the sync state recorded before the upgrade did not match it"
+            );
+        }
+    }
+
     // Check staleness (unless --force or --rebuild)
-    if !args.force && !args.rebuild {
+    if !args.force && !args.rebuild && !agreement_unverified(storage)? {
         let last_import_time = storage.get_metadata(METADATA_LAST_IMPORT_TIME)?;
         let stored_hash = storage.get_metadata(METADATA_JSONL_CONTENT_HASH)?;
 
@@ -2086,7 +2123,7 @@ fn execute_import(
             jsonl_filter
                 .as_ref()
                 .expect("force/rebuild imports should precompute JSONL tombstone filter"),
-            &crate::sync::dirty_issue_id_set(storage),
+            crate::sync::dirty_issue_id_set(storage).as_ref(),
         )
     } else {
         Vec::new()
@@ -3251,7 +3288,10 @@ mod tests {
         let filtered = tombstones_missing_from_jsonl_tombstones(
             vec![in_jsonl, missing.clone()],
             &filter,
-            &HashSet::from(["bd-in-jsonl".to_string(), "bd-missing".to_string()]),
+            Some(&HashSet::from([
+                "bd-in-jsonl".to_string(),
+                "bd-missing".to_string(),
+            ])),
         );
 
         assert_eq!(filtered.len(), 1);
@@ -3303,10 +3343,10 @@ mod tests {
         let filtered = tombstones_missing_from_jsonl_tombstones(
             vec![old_local_preserved, new_local_preserved],
             &filter,
-            &HashSet::from([
+            Some(&HashSet::from([
                 "bd-contested-older".to_string(),
                 "bd-contested-newer".to_string(),
-            ]),
+            ])),
         );
 
         assert_eq!(filtered.len(), 2);

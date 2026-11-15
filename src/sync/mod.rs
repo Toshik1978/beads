@@ -3203,6 +3203,22 @@ pub fn auto_flush(
             ),
         });
     }
+    // A sync state recorded before an upgrade is not yet evidence of
+    // agreement: the stored hash the check above trusts may be one an older br
+    // recorded over a database that had lost issues. Startup verifies it, so
+    // this is reached only when the command opted out (`--allow-stale`,
+    // `--no-auto-import`); exporting would overwrite the JSONL from a database
+    // that may be stale.
+    if jsonl_exists && agreement::agreement_unverified(storage)? {
+        return Err(BeadsError::SyncConflict {
+            message: format!(
+                "The sync state recorded before this upgrade has not been verified, so the \
+                 automatic export did not overwrite the JSONL. Run any br command without \
+                 `--allow-stale`/`--no-auto-import` to verify it.\n{}",
+                reconcile::RESOLVE_HINT
+            ),
+        });
+    }
 
     // Refuse to auto-flush over a JSONL that still holds unresolved
     // merge-conflict markers. The downstream export path would otherwise
@@ -4890,17 +4906,19 @@ pub(crate) struct PreservedTombstone {
 
 /// The ids of issues with an unflushed local change, read before a rebuild
 /// wipes the data tables. Best-effort like `snapshot_tombstones`: on a read
-/// failure it logs and returns an empty set, so nothing is preserved.
+/// failure it logs and returns `None`, which
+/// [`tombstones_missing_from_jsonl_tombstones`] reads as "unknown" and keeps
+/// every snapshotted tombstone rather than dropping unflushed deletions.
 #[must_use]
-pub(crate) fn dirty_issue_id_set(storage: &SqliteStorage) -> HashSet<String> {
+pub(crate) fn dirty_issue_id_set(storage: &SqliteStorage) -> Option<HashSet<String>> {
     match storage.get_dirty_issue_ids() {
-        Ok(ids) => ids.into_iter().collect(),
+        Ok(ids) => Some(ids.into_iter().collect()),
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "Failed to read dirty issues before rebuild; no tombstones will be preserved"
+                "Failed to read dirty issues before rebuild; preserving every snapshotted tombstone"
             );
-            HashSet::new()
+            None
         }
     }
 }
@@ -5120,11 +5138,13 @@ pub(crate) struct JsonlTombstoneFilter {
 /// all: a tombstone that is not dirty was already flushed, so a rebuild from
 /// an older JSONL that lacks it is entitled to drop it. Restoring it would
 /// re-mark it dirty and leave the workspace disagreeing with its JSONL.
+/// `None` (the dirty set could not be read) skips that narrowing: losing an
+/// unflushed deletion is worse than restoring a flushed one.
 #[must_use]
 pub(crate) fn tombstones_missing_from_jsonl_tombstones(
     tombstones: Vec<PreservedTombstone>,
     jsonl_filter: &JsonlTombstoneFilter,
-    dirty_ids: &HashSet<String>,
+    dirty_ids: Option<&HashSet<String>>,
 ) -> Vec<PreservedTombstone> {
     let original_count = tombstones.len();
     let mut skipped_already_flushed = 0usize;
@@ -5133,7 +5153,7 @@ pub(crate) fn tombstones_missing_from_jsonl_tombstones(
         .into_iter()
         .filter(|tombstone| {
             let id = &tombstone.issue.id;
-            if !dirty_ids.contains(id) {
+            if dirty_ids.is_some_and(|dirty| !dirty.contains(id)) {
                 return false;
             }
             if jsonl_filter.tombstone_ids.contains(id) {
@@ -9283,5 +9303,38 @@ mod tests {
             hash1, hash2,
             "Hashes should be identical regardless of empty lines or whitespace"
         );
+    }
+
+    /// A rebuild that cannot read the dirty set must not drop a deletion it
+    /// cannot prove was flushed: every snapshotted tombstone the JSONL lacks
+    /// is kept, as before the dirty narrowing existed.
+    #[test]
+    fn unreadable_dirty_set_keeps_every_snapshotted_tombstone() {
+        let storage = SqliteStorage::open_memory().unwrap();
+        let mut gone = make_test_issue("bd-gone", "gone");
+        gone.status = Status::Tombstone;
+        gone.deleted_at = Some(Utc::now());
+        storage.upsert_issue_for_import(&gone).unwrap();
+        let snapshot = snapshot_tombstones(&storage);
+        assert_eq!(snapshot.len(), 1);
+        storage
+            .execute_test_sql("DROP TABLE dirty_issues;")
+            .unwrap();
+
+        let dirty = dirty_issue_id_set(&storage);
+        assert!(dirty.is_none(), "a read error is not an empty set");
+        let kept = tombstones_missing_from_jsonl_tombstones(
+            snapshot.clone(),
+            &JsonlTombstoneFilter::default(),
+            dirty.as_ref(),
+        );
+        assert_eq!(kept.len(), 1, "the unflushed deletion survives");
+        // A known, empty dirty set still drops the (flushed) tombstone.
+        let flushed = tombstones_missing_from_jsonl_tombstones(
+            snapshot,
+            &JsonlTombstoneFilter::default(),
+            Some(&HashSet::new()),
+        );
+        assert!(flushed.is_empty());
     }
 }

@@ -100,11 +100,18 @@ for consistency, though a future task may narrow its surface.
 ## Schema versioning
 
 The schema version lives at `CURRENT_SCHEMA_VERSION` in
-`src/storage/schema.rs`; as of this writing it is **19**. It is stamped into
+`src/storage/schema.rs`; as of this writing it is **21**. It is stamped into
 SQLite's `PRAGMA user_version` on a freshly created database, and an existing
 database is brought forward by a sequence of migrations gated on the stored
 `user_version` (`if user_version < N { ... }`), run automatically whenever
 the database is opened — there is no separate migration command.
+
+The v21 migration sets `agreement_unverified` on a database upgraded from v20
+or earlier, so the first command verifies the sync state an older `br` recorded
+(`verify_legacy_agreement` in `src/sync/reconcile.rs`). A v20 `br` still opens
+a v21 database normally (its check is `user_version >= 20`), writes to it
+without the agreement module, and never lowers `user_version`, so a workspace
+it wedges after that verification is not re-detected by a newer `br`.
 
 ## The `Issue` field set is a published interface
 
