@@ -62,21 +62,28 @@ pub fn repo_root() -> PathBuf {
 /// `assert_cmd::cargo::cargo_bin!` expands to `env!("CARGO_BIN_EXE_<name>")`,
 /// which cargo only defines for integration tests *of the package declaring
 /// the binary*. This crate is not that package, so the macro fails to compile
-/// here. Test binaries live at `<target>/<profile>/deps/<name>-<hash>`, and
-/// the built binary sits one directory up.
+/// here.
+///
+/// nextest exports `NEXTEST_BIN_EXE_<name>` at run time, which is exact, so it
+/// is preferred. Otherwise the binary is found by walking up from the test
+/// executable: up to Rust 1.99 test binaries lived at
+/// `<target>/<profile>/deps/<name>-<hash>` (the binary one directory up),
+/// while from 1.100 cargo's build-dir layout puts them at
+/// `<target>/<profile>/build/<pkg>/<hash>/out/<name>-<hash>` (four up). The
+/// nearest ancestor holding the binary is the profile directory in both.
 #[must_use]
 pub fn cargo_built_binary(name: &str) -> Option<PathBuf> {
+    let file_name = PathBuf::from(name).with_extension(std::env::consts::EXE_EXTENSION);
+    if let Some(path) = std::env::var_os(format!("NEXTEST_BIN_EXE_{name}")).map(PathBuf::from)
+        && path.is_file()
+    {
+        return Some(path);
+    }
     let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let profile_dir = if dir.ends_with("deps") {
-        dir.parent()?
-    } else {
-        dir
-    };
-    let candidate = profile_dir
-        .join(name)
-        .with_extension(std::env::consts::EXE_EXTENSION);
-    candidate.exists().then_some(candidate)
+    exe.parent()?
+        .ancestors()
+        .map(|dir| dir.join(&file_name))
+        .find(|candidate| candidate.is_file())
 }
 
 static INIT: Once = Once::new();
