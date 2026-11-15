@@ -419,10 +419,38 @@ fn should_attempt_mutation_jsonl_recovery(
             || probe_err.is_some_and(|err| storage_ctx.should_attempt_jsonl_recovery(err)))
 }
 
+/// Reconcile a routed workspace before a command writes to it: import or
+/// merge a changed JSONL, or refuse with `SyncConflict` naming `br sync
+/// --merge`. Read-only callers use [`auto_import_routed_read_if_stale`].
 pub(super) fn auto_import_storage_ctx_if_stale(
     storage_ctx: &mut OpenStorageResult,
     cli: &crate::config::CliOverrides,
 ) -> crate::Result<()> {
+    reconcile_storage_ctx(storage_ctx, cli, false).map(drop)
+}
+
+/// Reconcile a routed workspace before a read: as
+/// [`auto_import_storage_ctx_if_stale`], except that a disagreement the
+/// reconcile cannot resolve serves the database as it is, with the same
+/// warning the local startup reconcile prints, instead of refusing.
+pub(super) fn auto_import_routed_read_if_stale(
+    storage_ctx: &mut OpenStorageResult,
+    cli: &crate::config::CliOverrides,
+    ctx: &OutputContext,
+) -> crate::Result<()> {
+    if let crate::sync::reconcile::ReconcileOutcome::ServedStale { reason } =
+        reconcile_storage_ctx(storage_ctx, cli, true)?
+    {
+        report_served_stale(ctx, &reason);
+    }
+    Ok(())
+}
+
+fn reconcile_storage_ctx(
+    storage_ctx: &mut OpenStorageResult,
+    cli: &crate::config::CliOverrides,
+    read_only: bool,
+) -> crate::Result<crate::sync::reconcile::ReconcileOutcome> {
     // Issue #229: skip auto-import in --no-db mode.  The in-memory database
     // was just populated from the JSONL file during `open_storage_with_cli`,
     // so there is no staleness to detect.  Running the staleness probe here
@@ -435,7 +463,7 @@ pub(super) fn auto_import_storage_ctx_if_stale(
     // return zero rows — the mechanism behind the "Issue not found" errors
     // on `br --no-db update`.
     if storage_ctx.no_db {
-        return Ok(());
+        return Ok(crate::sync::reconcile::ReconcileOutcome::Unchanged);
     }
 
     let config_layer = storage_ctx.load_config(cli)?;
@@ -450,19 +478,50 @@ pub(super) fn auto_import_storage_ctx_if_stale(
     let opts = crate::sync::reconcile::ReconcileOptions {
         expected_prefix: Some(expected_prefix.as_str()),
         allow_external_jsonl,
-        read_only: false,
+        read_only,
         retention_days: storage_ctx.paths.metadata.deletions_retention_days,
         history: storage_ctx.resolved_history_config(),
     };
-    auto_import_if_stale(
+    let outcome = auto_import_if_stale(
         &mut storage_ctx.storage,
         &storage_ctx.paths.beads_dir,
         &storage_ctx.paths.jsonl_path,
         &opts,
         cli.allow_stale.unwrap_or(false),
         no_auto_import,
-    )?;
-    Ok(())
+    );
+    // `br sync --merge` reconciles the workspace it is run in, so a routed
+    // workspace's warning or refusal must say which one that is.
+    let routed = || routed_workspace_note(&storage_ctx.paths.beads_dir, cli);
+    match outcome {
+        Ok(crate::sync::reconcile::ReconcileOutcome::ServedStale { reason }) => {
+            Ok(crate::sync::reconcile::ReconcileOutcome::ServedStale {
+                reason: routed().map_or_else(|| reason.clone(), |note| format!("{note}\n{reason}")),
+            })
+        }
+        Err(BeadsError::SyncConflict { message }) => Err(BeadsError::SyncConflict {
+            message: routed().map_or_else(|| message.clone(), |note| format!("{note}\n{message}")),
+        }),
+        other => other,
+    }
+}
+
+/// For a workspace other than the one this invocation resolves to, the line
+/// telling the user where to resolve it; `None` for the invoking workspace,
+/// or when that cannot be determined (the message then reads as local).
+fn routed_workspace_note(beads_dir: &Path, cli: &crate::config::CliOverrides) -> Option<String> {
+    let local = crate::config::discover_beads_dir_with_cli(cli).ok()?;
+    let canonical = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let routed = canonical(beads_dir);
+    if routed == canonical(&local) {
+        return None;
+    }
+    let root = routed.parent().unwrap_or(&routed);
+    Some(format!(
+        "This is the routed workspace {}: run `br sync --merge` from {}, not here.",
+        routed.display(),
+        root.display()
+    ))
 }
 
 pub(super) fn cli_for_routed_workspace(
@@ -543,13 +602,26 @@ pub(super) fn auto_import_external_projects_if_stale(
             }
         };
 
-        if let Err(error) = auto_import_storage_ctx_if_stale(&mut storage_ctx, &route_cli) {
-            tracing::warn!(
-                project = %project,
-                path = %beads_dir.display(),
-                error = %error,
-                "External project auto-import failed; dependency status will use the current database state"
-            );
+        // Only read for dependency status: a disagreement serves the
+        // external database as it is rather than failing the import.
+        match reconcile_storage_ctx(&mut storage_ctx, &route_cli, true) {
+            Ok(crate::sync::reconcile::ReconcileOutcome::ServedStale { reason }) => {
+                tracing::warn!(
+                    project = %project,
+                    path = %beads_dir.display(),
+                    reason = %reason,
+                    "External project database does not agree with its JSONL; dependency status will use the current database state"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    project = %project,
+                    path = %beads_dir.display(),
+                    error = %error,
+                    "External project auto-import failed; dependency status will use the current database state"
+                );
+            }
         }
     }
 }

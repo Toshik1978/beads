@@ -1,7 +1,7 @@
 //! Show command implementation.
 
 use crate::cli::commands::{
-    acquire_routed_workspace_write_lock, auto_import_storage_ctx_if_stale,
+    acquire_routed_workspace_write_lock, auto_import_routed_read_if_stale,
     cli_for_routed_workspace, external_project_db_paths_after_auto_import_if_needed,
 };
 use crate::cli::{ShowArgs, resolve_output_format_basic_with_outer_mode};
@@ -114,6 +114,7 @@ fn execute_routed(
                 } else {
                     None
                 },
+                outer_ctx,
             )?;
             routed_details.push((batch.issue_inputs, batch_details));
         }
@@ -161,6 +162,7 @@ fn execute_routed(
             } else {
                 None
             },
+            outer_ctx,
         )?;
         routed_render_items.push((
             batch.issue_inputs,
@@ -224,6 +226,7 @@ fn execute_inner(
         beads_dir,
         preloaded_storage,
         preloaded_storage_ctx,
+        outer_ctx,
     )?;
     let output_format =
         resolve_output_format_basic_with_outer_mode(args.format, outer_ctx.inherited_output_mode());
@@ -322,6 +325,7 @@ fn load_issue_details_for_route(
     beads_dir: &Path,
     preloaded_storage: Option<&SqliteStorage>,
     preloaded_storage_ctx: Option<&config::OpenStorageResult>,
+    ctx: &OutputContext,
 ) -> Result<(Vec<IssueDetails>, bool)> {
     let target_ids = requested_target_ids(args, beads_dir)?;
 
@@ -355,7 +359,7 @@ fn load_issue_details_for_route(
         Some(config::open_storage_with_cli(beads_dir, cli)?)
     };
     if let Some(storage_ctx) = owned_storage_ctx.as_mut() {
-        auto_import_storage_ctx_if_stale(storage_ctx, cli)?;
+        auto_import_routed_read_if_stale(storage_ctx, cli, ctx)?;
     }
     let config_layer = if let Some(storage_ctx) = owned_storage_ctx.as_ref() {
         storage_ctx.load_config(cli)?

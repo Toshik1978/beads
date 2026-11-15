@@ -535,3 +535,232 @@ fn sync_status_checks_a_healthy_unverified_upgrade_without_writing() {
         "status checks without recording; the next command verifies"
     );
 }
+
+/// The human-mode served-stale warning, as the local startup path prints it.
+const SERVED_STALE_WARNING: &str = "The database does not agree with the JSONL";
+
+/// A main workspace routing the `ext-` prefix to a second workspace whose
+/// database and JSONL disagree: `a` was retitled in the database (unflushed)
+/// and, separately, in the JSONL. Returns `(main, external, a)`.
+fn routed_conflicting_workspace() -> (BrWorkspace, BrWorkspace, String) {
+    let main = BrWorkspace::new();
+    init(&main);
+    let ext = BrWorkspace::new();
+    let init_ext = run_br(&ext, ["init", "--prefix", "ext"], "init_ext");
+    assert!(
+        init_ext.status.success(),
+        "init failed: {}",
+        init_ext.stderr
+    );
+    fs::write(
+        main.root.join(".beads").join("routes.jsonl"),
+        format!(
+            r#"{{"prefix":"ext-","path":"{}"}}"#,
+            ext.root.to_string_lossy()
+        ),
+    )
+    .expect("write routes.jsonl");
+
+    let a = create(&ext, "a", "create_a");
+    let flush = run_br(&ext, ["sync", "--flush-only"], "flush");
+    assert!(flush.status.success(), "flush failed: {}", flush.stderr);
+    let update = run_br(
+        &ext,
+        ["--no-auto-flush", "update", &a, "--title", "a from db"],
+        "update_a",
+    );
+    assert!(update.status.success(), "update failed: {}", update.stderr);
+    retitle_in_jsonl(&ext, &a, "a from jsonl");
+    (main, ext, a)
+}
+
+/// The routed workspace's `.beads` directory, as messages name it.
+fn routed_beads_dir(ws: &BrWorkspace) -> String {
+    ws.root.join(".beads").to_string_lossy().into_owned()
+}
+
+#[test]
+fn routed_show_over_a_conflicting_jsonl_serves_stale() {
+    let (main, ext, a) = routed_conflicting_workspace();
+
+    let run = run_br_with_env(&main, ["show", &a], NO_LOGS, "routed_show");
+
+    assert!(
+        run.status.success(),
+        "a routed read serves stale rather than refusing: {}",
+        run.stderr
+    );
+    assert!(run.stdout.contains("a from db"), "{}", run.stdout);
+    assert_eq!(
+        run.stderr.matches(SERVED_STALE_WARNING).count(),
+        1,
+        "the warning is printed once: {}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("br sync --merge"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains(&routed_beads_dir(&ext)),
+        "the warning names the routed workspace, where `br sync --merge` must run: {}",
+        run.stderr
+    );
+
+    let json = run_br_with_env(&main, ["show", &a, "--json"], NO_LOGS, "routed_show_json");
+    assert!(json.status.success(), "{}", json.stderr);
+    assert!(json.stderr.contains("SYNC_SERVED_STALE"), "{}", json.stderr);
+    let warning: Value = serde_json::from_str(json.stderr.trim()).expect("warning json");
+    assert!(
+        warning["warning"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(&routed_beads_dir(&ext))),
+        "{}",
+        json.stderr
+    );
+}
+
+#[test]
+fn routed_list_reads_over_a_conflicting_jsonl_serve_stale() {
+    let (main, _ext, a) = routed_conflicting_workspace();
+
+    for (args, label) in [
+        (vec!["comments", "list", a.as_str()], "routed_comments_list"),
+        (vec!["dep", "list", a.as_str()], "routed_dep_list"),
+        (vec!["dep", "tree", a.as_str()], "routed_dep_tree"),
+        (vec!["label", "list", a.as_str()], "routed_label_list"),
+    ] {
+        let run = run_br_with_env(&main, &args, NO_LOGS, label);
+        assert!(
+            run.status.success(),
+            "{label}: a routed read serves stale rather than refusing: {}",
+            run.stderr
+        );
+        assert_eq!(
+            run.stderr.matches(SERVED_STALE_WARNING).count(),
+            1,
+            "{label}: the warning is printed once: {}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
+fn routed_writes_over_a_conflicting_jsonl_refuse() {
+    let (main, ext, a) = routed_conflicting_workspace();
+    // Created and linked with `--allow-stale`, which writes to the database
+    // without reconciling and records no agreement, so the conflict stands:
+    // `b` is a dep-add target, and `a -> c` an existing edge to remove.
+    let mut ids = Vec::new();
+    for title in ["b", "c"] {
+        let run = run_br(
+            &ext,
+            ["--allow-stale", "--no-auto-flush", "create", title],
+            title,
+        );
+        assert!(
+            run.status.success(),
+            "create {title} failed: {}",
+            run.stderr
+        );
+        ids.push(parse_created_id(&run.stdout));
+    }
+    let (b, c) = (ids[0].clone(), ids[1].clone());
+    let link = run_br(
+        &ext,
+        ["--allow-stale", "--no-auto-flush", "dep", "add", &a, &c],
+        "link_a_c",
+    );
+    assert!(link.status.success(), "dep add failed: {}", link.stderr);
+    let before = db_titles(&ext, "db_before");
+    let deps_before = run_br(
+        &ext,
+        ["--allow-stale", "dep", "list", &a, "--json"],
+        "deps_before",
+    );
+    assert!(deps_before.status.success(), "{}", deps_before.stderr);
+
+    for (args, label) in [
+        (
+            vec!["update", a.as_str(), "--status", "in_progress"],
+            "routed_update",
+        ),
+        (vec!["close", a.as_str()], "routed_close"),
+        (
+            vec!["comments", "add", a.as_str(), "note"],
+            "routed_comment_add",
+        ),
+        (vec!["label", "add", a.as_str(), "x"], "routed_label_add"),
+        (vec!["dep", "add", a.as_str(), b.as_str()], "routed_dep_add"),
+        (
+            vec!["dep", "remove", a.as_str(), c.as_str()],
+            "routed_dep_remove",
+        ),
+    ] {
+        let run = run_br_with_env(&main, &args, NO_LOGS, label);
+        assert!(
+            !run.status.success(),
+            "{label}: a routed write must refuse: {}",
+            run.stdout
+        );
+        assert!(
+            run.stderr.contains("br sync --merge"),
+            "{label}: {}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains(&routed_beads_dir(&ext)),
+            "{label}: the refusal names the routed workspace: {}",
+            run.stderr
+        );
+    }
+    assert_eq!(
+        db_titles(&ext, "db_after"),
+        before,
+        "a refusal leaves the routed database unchanged"
+    );
+    let deps_after = run_br(
+        &ext,
+        ["--allow-stale", "dep", "list", &a, "--json"],
+        "deps_after",
+    );
+    assert_eq!(
+        deps_after.stdout, deps_before.stdout,
+        "dependencies unchanged"
+    );
+    assert_eq!(jsonl_title(&ext, &a).as_deref(), Some("a from jsonl"));
+}
+
+#[test]
+fn local_reads_over_a_conflicting_jsonl_warn_once() {
+    let ws = BrWorkspace::new();
+    init(&ws);
+    let a = create(&ws, "a", "create_a");
+    let flush = run_br(&ws, ["sync", "--flush-only"], "flush");
+    assert!(flush.status.success(), "flush failed: {}", flush.stderr);
+    let update = run_br(
+        &ws,
+        ["--no-auto-flush", "update", &a, "--title", "a from db"],
+        "update_a",
+    );
+    assert!(update.status.success(), "update failed: {}", update.stderr);
+    retitle_in_jsonl(&ws, &a, "a from jsonl");
+
+    for (args, label) in [
+        (vec!["show", a.as_str()], "local_show"),
+        (vec!["comments", "list", a.as_str()], "local_comments_list"),
+        (vec!["dep", "list", a.as_str()], "local_dep_list"),
+        (vec!["label", "list", a.as_str()], "local_label_list"),
+    ] {
+        let run = run_br_with_env(&ws, &args, NO_LOGS, label);
+        assert!(run.status.success(), "{label}: {}", run.stderr);
+        assert_eq!(
+            run.stderr.matches(SERVED_STALE_WARNING).count(),
+            1,
+            "{label}: the startup reconcile warns, and nothing warns again: {}",
+            run.stderr
+        );
+        assert!(
+            !run.stderr.contains("routed workspace"),
+            "{label}: a local read is not described as routed: {}",
+            run.stderr
+        );
+    }
+}

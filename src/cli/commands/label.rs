@@ -4,8 +4,9 @@
 
 use super::{
     RoutedWorkspaceWriteLock, acquire_routed_workspace_write_lock,
-    auto_import_storage_ctx_if_stale, cli_for_routed_workspace, partial_route_failure,
-    report_auto_flush_failure, resolve_issue_id, retry_mutation_with_jsonl_recovery,
+    auto_import_routed_read_if_stale, auto_import_storage_ctx_if_stale, cli_for_routed_workspace,
+    partial_route_failure, report_auto_flush_failure, resolve_issue_id,
+    retry_mutation_with_jsonl_recovery,
 };
 use crate::cli::{LabelAddArgs, LabelCommands, LabelListArgs, LabelRemoveArgs, LabelRenameArgs};
 use crate::config;
@@ -430,7 +431,11 @@ fn execute_label_list_command(
         )?;
         routed_write_lock.mark_cli_write_lock_held(&mut route_cli);
         let mut storage_ctx = config::open_storage_with_cli(&route.beads_dir, &route_cli)?;
-        auto_import_storage_ctx_if_stale(&mut storage_ctx, &route_cli)?;
+        // The startup reconcile already covered the local workspace (and
+        // warned if it served stale); only another workspace needs its own.
+        if route.is_external {
+            auto_import_routed_read_if_stale(&mut storage_ctx, &route_cli, ctx)?;
+        }
         let config_layer = storage_ctx.load_config(&route_cli)?;
         let id_config = config::id_config_from_layer(&config_layer);
         let resolver = IdResolver::new(ResolverConfig::with_prefix(id_config.prefix));
