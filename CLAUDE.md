@@ -192,6 +192,12 @@ tests, hash-parity proptests, CLI flag tests, fixture assertions — taking the
 total from 3344 down to **3203**: a net loss of 141, all accounted for by
 the five `!`-marked commits, not a silent skip.
 
+At v1.10.0 the total, verified by `cargo nextest list --workspace`, is
+**3610**. The single-agreement-point sync work (epic `bds-jr49`) added a few
+hundred of those — the agreement writers guard, the reconcile and
+legacy-verification unit tests, the `sync_agreement` e2e module and the
+rebase-onto-an-older-JSONL repro — on top of ordinary feature work since 3203.
+
 The rule this exists to serve is the one at the end of this section: verify a
 change in the total by diffing `cargo nextest list --workspace`, never by
 arithmetic against a number written in a file.

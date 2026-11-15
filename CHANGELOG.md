@@ -9,6 +9,77 @@ Versions follow [semver](https://semver.org). Commits follow
 
 ---
 
+## v1.10.0 — 2026-11-15
+
+A minor release: `br` can no longer report "In sync" over a database that is
+missing what the JSONL holds.
+
+A workspace could end up with its SQLite database silently behind its
+`issues.jsonl` while `br sync --status` said "In sync". The chain was a rebuild
+from an older JSONL (a branch-follow hook running at the start of a rebase),
+which restored flushed tombstones as dirty rows; with dirty rows present, a
+later changed JSONL was skipped rather than imported, and the next write's
+auto-flush then recorded the new file's hash as agreed. Every piece of that
+chain is closed, and the sync state now has one owner.
+
+### Highlights
+
+- **One agreement record.** The JSONL hash, its witness (mtime and size), the
+  import and export times and the merge base `beads.base.jsonl` are written in
+  one place, together. The base is a byte copy of the agreed JSONL and is
+  trusted only while its hash matches, so a missing or rewritten base is never
+  guessed at.
+- **A changed JSONL is imported, merged or refused, never skipped.** Before any
+  command runs: no local changes means import; local changes with a trusted
+  base mean an automatic three-way merge; a conflict, or local changes without
+  a trusted base, refuse with `SYNC_CONFLICT` naming `br sync --merge` (and
+  `--force-db` / `--force-jsonl` when there are conflicts). Read-only commands
+  answer from the database with a warning instead of refusing, including reads
+  through a routed workspace. `--allow-stale` and `--no-auto-import` never
+  record agreement.
+- **Writes wait instead of skipping.** A held `.sync.lock` now means wait, and
+  the auto-flush never writes over a JSONL it has not seen.
+- **No more trusting a file on its mtime.** A JSONL is judged unchanged only by
+  a matching witness or a matching full hash.
+- **`--rebuild` keeps only unflushed deletions.** Tombstones that were already
+  flushed follow the JSONL, so a rebuild from an older file no longer leaves
+  dirty rows behind. A requested rebuild says `Rebuilt from JSONL:` and backs up
+  to `*.rebuild.bak`; genuine corruption recovery still says so.
+- **Upgrading checks old sync state once.** Schema v21 flags databases written
+  by earlier versions; the first command compares the database with the JSONL
+  and imports, passes, or refuses. A v20 `br` still opens a v21 database.
+- **Exit code change:** `br sync --merge` conflicts now exit 6
+  (`SYNC_CONFLICT`) instead of 7.
+
+
+
+### Features
+
+- [f9c1f55](https://github.com/Toshik1978/beads/commit/f9c1f55f28fccb819549abae16e8f073daba9f2c) feat(sync): agreement record owns all sync-state facts
+- [60796cb](https://github.com/Toshik1978/beads/commit/60796cb04e0de5f43793faec2b8ffa0d3d9023c0) feat(sync): write precondition — import, merge or refuse
+- [a568c71](https://github.com/Toshik1978/beads/commit/a568c71f2a81ea22b099bdad1d5eb95cee4547ea) feat(sync): verify pre-upgrade sync state once
+
+### Bug Fixes
+
+- [4e6a8b3](https://github.com/Toshik1978/beads/commit/4e6a8b3df5f38f426847ac35d64a43792faa8e23) fix(deps): bump rustls stack and pulldown-cmark past new RustSec advisories
+- [ec138f5](https://github.com/Toshik1978/beads/commit/ec138f57c8d00d0b68cea3cb0f27adb53e4a2979) fix(sync): the mtime gate never blesses an unhashed file
+- [b0debe1](https://github.com/Toshik1978/beads/commit/b0debe102ca901e94eea8c682ea63f813f866816) fix(sync): rebuild preserves only unflushed tombstones
+- [37ce7fc](https://github.com/Toshik1978/beads/commit/37ce7fc0bd9e2dcbc27efbe94d8da8baf4ae2d22) fix(sync): honest sync messages for a requested rebuild
+- [66b0e1d](https://github.com/Toshik1978/beads/commit/66b0e1d36f2ab1dbc98ef9c4822093d38b3b8d1b) fix(sync): close the final-review gaps in the agreement work
+- [253edf2](https://github.com/Toshik1978/beads/commit/253edf291423d82b7e2e7a3e0876576ec5dfe8a8) fix(sync): routed reads serve stale instead of refusing
+
+### Documentation
+
+- [bc34115](https://github.com/Toshik1978/beads/commit/bc341156ca8ad6a4279cc2f81b7fd870e4751219) docs: drop the AI attribution rule
+
+### Others
+
+- [87e195f](https://github.com/Toshik1978/beads/commit/87e195f7d999069e55bd735449170a2f45399f86) refactor: satisfy clippy 1.99's redundant_else and assert_is_empty
+- [223a323](https://github.com/Toshik1978/beads/commit/223a323d12299a0d83dda5fa7c8fb5ad02adc312) ci: run CI weekly and group Dependabot security updates
+- [7413540](https://github.com/Toshik1978/beads/commit/74135402ecd784ec32bcfcb6815e1535d3695eb6) ci: limit GITHUB_TOKEN permissions to read-only
+
+---
+
 ## v1.9.1 — 2026-09-26
 
 A patch release: comment ids are the same on every clone.
