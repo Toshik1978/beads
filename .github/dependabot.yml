@@ -5,10 +5,10 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 10
     commit-message:
       prefix: build
       include: scope
+    open-pull-requests-limit: 10
     groups:
       cargo:
         patterns:
@@ -22,20 +22,20 @@ updates:
       # separate PRs each fail `cargo audit` on the others' advisories, so they
       # are grouped into a single PR that can actually go green.
       cargo-security:
-        applies-to: security-updates
         patterns:
           - "*"
-
+        applies-to: security-updates
+    cooldown:
+      default-days: 7
   # Actions referenced by workflows under .github/workflows/.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 10
     commit-message:
       prefix: ci
       include: scope
-
+    open-pull-requests-limit: 10
     # EVERY action in this repository is pinned to a moving major tag (`@v4`,
     # `@v2`) or a branch (`@stable`), never to an exact `x.y.z`. Upstream
     # repoints those tags on each release, so minor and patch updates arrive
@@ -61,10 +61,25 @@ updates:
         update-types:
           - version-update:semver-minor
           - version-update:semver-patch
-
     groups:
       github-actions:
         patterns:
           - "*"
         update-types:
           - major
+    cooldown:
+      default-days: 7
+  - package-ecosystem: pre-commit
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+      include: scope
+    open-pull-requests-limit: 10
+    groups:
+      pre-commit:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7
