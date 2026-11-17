@@ -5,7 +5,7 @@ default_install_hook_types: [pre-commit, pre-push, commit-msg]
 
 repos:
   - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: v4.4.0
+    rev: v4.5.0
     hooks:
       # Re-checked by commit-lint.yml, so a contributor who never installed the
       # hooks is still caught. `.cliff.toml` groups the CHANGELOG by these
