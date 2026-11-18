@@ -53,3 +53,36 @@ repos:
         pass_filenames: false
         stages:
           - pre-push
+
+      # Secrets in the staged diff, before they reach history: a pushed secret
+      # has to be rotated, not just removed. False positives go in .gitleaks.toml.
+      - id: gitleaks
+        name: gitleaks (staged)
+        entry: gitleaks git --pre-commit --staged --redact --verbose
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages:
+          - pre-commit
+
+  # Stock file guards: oversized files, leftover conflict markers, YAML that
+  # does not parse. Not the whitespace fixers: they rewrite patches, fixtures
+  # and generated files (piloted on linux-config, 2026-11-18).
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        stages: [pre-commit]
+      - id: check-merge-conflict
+        stages: [pre-commit]
+      - id: check-yaml
+        stages: [pre-commit]
+
+  - repo: local
+    hooks:
+      - id: actionlint
+        name: actionlint
+        entry: actionlint
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        stages: [pre-commit]
